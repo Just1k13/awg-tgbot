@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -Eeuo pipefail
 
 REPO_OWNER="Just1k13"
 REPO_NAME="awg-tgbot"
@@ -49,11 +49,23 @@ DETECTED_AWG_I3=""
 DETECTED_AWG_I4=""
 DETECTED_AWG_I5=""
 
-print_line() { printf '%s\n' "------------------------------------------------------------"; }
-info() { printf '[*] %s\n' "$*" >&2; }
-ok() { printf '[+] %s\n' "$*" >&2; }
-warn() { printf '[!] %s\n' "$*" >&2; }
-die() { warn "$*"; exit 1; }
+print_line() {
+  printf '%s\n' "------------------------------------------------------------"
+}
+
+info() {
+  printf '[*] %s\n' "$*" >&2
+}
+
+ok() {
+  printf '[+] %s\n' "$*" >&2
+}
+
+warn() {
+  printf '[!] %s\n' "$*" >&2
+}
+
+trap 'printf "[!] Ошибка на строке %s. Подробности: %s\n" "$LINENO" "$INSTALL_LOG" >&2' ERR
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -76,7 +88,9 @@ setup_tty_fd() {
   fi
 }
 
-has_tty() { [[ -e /proc/$$/fd/3 ]]; }
+has_tty() {
+  [[ -e /proc/$$/fd/3 ]]
+}
 
 pause_if_tty() {
   if has_tty; then
@@ -85,35 +99,36 @@ pause_if_tty() {
   fi
 }
 
-clear_if_tty() { has_tty && clear || true; }
+clear_if_tty() {
+  if has_tty; then
+    clear || true
+  fi
+}
 
 prompt_raw() {
   local prompt="$1"
-  local __resultvar="$2"
   local value=""
   if has_tty; then
     if ! read -r -u 3 -p "$prompt" value; then
       value=""
     fi
   fi
-  printf -v "$__resultvar" '%s' "$value"
-  return 0
+  printf '%s' "$value"
 }
 
 prompt_with_default() {
   local prompt="$1"
   local default="${2:-}"
-  local __resultvar="$3"
   local value=""
   while true; do
     if [[ -n "$default" ]]; then
-      prompt_raw "$prompt [$default]: " value
+      value="$(prompt_raw "$prompt [$default]: ")"
       value="${value:-$default}"
     else
-      prompt_raw "$prompt: " value
+      value="$(prompt_raw "$prompt: ")"
     fi
     if [[ -n "$value" ]]; then
-      printf -v "$__resultvar" '%s' "$value"
+      printf '%s' "$value"
       return 0
     fi
     warn "Значение не может быть пустым."
@@ -125,9 +140,11 @@ confirm() {
   local default="${2:-Y}"
   local value=""
   local suffix="[Y/n]"
-  [[ "$default" == "N" ]] && suffix="[y/N]"
+  if [[ "$default" == "N" ]]; then
+    suffix="[y/N]"
+  fi
   while true; do
-    prompt_raw "$prompt $suffix: " value
+    value="$(prompt_raw "$prompt $suffix: ")"
     value="${value:-$default}"
     case "${value,,}" in
       y|yes|д|да) return 0 ;;
@@ -137,9 +154,17 @@ confirm() {
   done
 }
 
-require_command() { command -v "$1" >/dev/null 2>&1; }
-service_exists() { [[ -f "$SERVICE_FILE" ]]; }
-is_installed() { [[ -f "$SERVICE_FILE" && -d "$BOT_DIR" && -f "$BOT_DIR/app.py" ]]; }
+require_command() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+service_exists() {
+  [[ -f "$SERVICE_FILE" ]]
+}
+
+is_installed() {
+  [[ -f "$SERVICE_FILE" && -d "$BOT_DIR" && -f "$BOT_DIR/app.py" ]]
+}
 
 get_env_value() {
   local key="$1"
@@ -152,7 +177,7 @@ set_env_value() {
   local value="$2"
   mkdir -p "$INSTALL_DIR"
   touch "$ENV_FILE"
-  chmod 600 "$ENV_FILE" || true
+  chmod 600 "$ENV_FILE"
   local escaped
   escaped="$(printf '%s' "$value" | sed -e 's/[\\/&]/\\&/g')"
   if grep -q -E "^${key}=" "$ENV_FILE" 2>/dev/null; then
@@ -160,59 +185,51 @@ set_env_value() {
   else
     printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
   fi
-  return 0
 }
 
 fetch_remote_sha() {
-  local sha=""
-  sha="$(curl -fsSL "$COMMIT_API_URL" 2>/dev/null | grep -m1 '"sha"' | sed -E 's/.*"sha": "([a-f0-9]+)".*/\1/' || true)"
+  local sha
+  sha="$(curl -fsSL "$COMMIT_API_URL" | grep -m1 '"sha"' | sed -E 's/.*"sha": "([a-f0-9]+)".*/\1/' || true)"
   printf '%s' "$sha"
 }
 
-get_local_sha() { [[ -f "$VERSION_FILE" ]] && cat "$VERSION_FILE" || true; }
-
-dpkg_lock_free() {
-  ! fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1
+get_local_sha() {
+  [[ -f "$VERSION_FILE" ]] && cat "$VERSION_FILE" || true
 }
 
-wait_for_apt_locks() {
-  local waited=0 max_wait=300
-  if ! require_command fuser; then
-    apt-get update -y >/dev/null 2>&1 || true
-    return 0
-  fi
-  while ! dpkg_lock_free; do
-    if (( waited == 0 )); then
-      warn "apt/dpkg сейчас занят другим процессом. Жду освобождения блокировки..."
+wait_for_apt_lock() {
+  local timeout_seconds="${1:-180}"
+  local waited=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    if (( waited >= timeout_seconds )); then
+      warn "Не удалось дождаться освобождения apt/dpkg lock за ${timeout_seconds} сек."
+      return 1
     fi
-    sleep 5
-    waited=$((waited + 5))
-    if (( waited >= max_wait )); then
-      die "Не удалось дождаться освобождения apt/dpkg lock за ${max_wait} секунд. Попробуй позже."
-    fi
+    info "Жду освобождения apt/dpkg lock..."
+    sleep 3
+    waited=$((waited + 3))
   done
   return 0
-}
-
-apt_get_safe() {
-  wait_for_apt_locks
-  apt-get "$@"
 }
 
 ensure_packages() {
   info "Проверяю и обновляю системные зависимости..."
   export DEBIAN_FRONTEND=noninteractive
-  apt_get_safe update -y
-  apt_get_safe install -y --no-install-recommends \
+  apt-get update -y
+  wait_for_apt_lock 180 || return 1
+  apt-get install -y --no-install-recommends \
     ca-certificates curl tar gzip openssl python3 python3-venv python3-pip iproute2 psmisc
   if ! require_command docker; then
     warn "Docker не найден. Устанавливаю docker.io..."
-    apt_get_safe install -y --no-install-recommends docker.io
+    wait_for_apt_lock 180 || return 1
+    apt-get install -y --no-install-recommends docker.io
   fi
   return 0
 }
 
-docker_is_accessible() { require_command docker && docker ps >/dev/null 2>&1; }
+docker_is_accessible() {
+  require_command docker && docker ps >/dev/null 2>&1
+}
 
 ensure_docker_ready() {
   if ! docker_is_accessible; then
@@ -224,8 +241,13 @@ ensure_docker_ready() {
 }
 
 pick_existing_or_default() {
-  local current="$1" fallback="$2"
-  if [[ -n "$current" ]]; then printf '%s' "$current"; else printf '%s' "$fallback"; fi
+  local current="$1"
+  local fallback="$2"
+  if [[ -n "$current" ]]; then
+    printf '%s' "$current"
+  else
+    printf '%s' "$fallback"
+  fi
 }
 
 is_public_ipv4() {
@@ -236,9 +258,9 @@ value = sys.argv[1].strip()
 try:
     addr = ipaddress.ip_address(value)
     ok = addr.version == 4 and not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved)
-    print('1' if ok else '0')
-except Exception:
-    print('0')
+    print("1" if ok else "0")
+except ValueError:
+    print("0")
 PY
 }
 
@@ -247,8 +269,8 @@ is_hostname_like() {
   "$PYTHON_BIN" - "$value" <<'PY'
 import re, sys
 value = sys.argv[1].strip()
-ok = bool(value) and ' ' not in value and ':' not in value and len(value) <= 253 and value.lower() != 'localhost' and bool(re.fullmatch(r'[A-Za-z0-9.-]+', value))
-print('1' if ok else '0')
+ok = bool(value) and " " not in value and ":" not in value and len(value) <= 253 and value.lower() not in {"localhost"} and bool(re.fullmatch(r"[A-Za-z0-9.-]+", value))
+print("1" if ok else "0")
 PY
 }
 
@@ -258,12 +280,13 @@ docker_exec_capture() {
 }
 
 docker_exec_sh() {
-  local container="$1" cmd="$2"
-  docker exec -i "$container" sh -lc "$cmd" 2>/dev/null || true
+  local container="$1"
+  local command="$2"
+  docker exec -i "$container" sh -lc "$command" 2>/dev/null || true
 }
 
 find_awg_container() {
-  local current lines line name image haystack score best_score=0 best_name=""
+  local current
   current="$(get_env_value DOCKER_CONTAINER)"
   if [[ -n "$current" ]] && docker_is_accessible && docker inspect "$current" >/dev/null 2>&1; then
     printf '%s' "$current"
@@ -273,6 +296,7 @@ find_awg_container() {
     printf '%s' "$current"
     return 0
   fi
+  local lines line name image haystack score best_score=0 best_name=""
   lines="$(docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null || true)"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
@@ -284,18 +308,23 @@ find_awg_container() {
     [[ "$haystack" == *"awg"* ]] && score=$((score+70))
     [[ "$haystack" == *"wireguard"* ]] && score=$((score+60))
     [[ "$haystack" == *"vpn"* ]] && score=$((score+30))
-    if (( score > best_score )); then best_score=$score; best_name="$name"; fi
+    if (( score > best_score )); then
+      best_score=$score
+      best_name="$name"
+    fi
   done <<< "$lines"
   printf '%s' "$best_name"
 }
 
 extract_awg_show_value() {
-  local label="$1" content="$2"
+  local label="$1"
+  local content="$2"
   awk -F': ' -v k="$label" '$1 == k {print substr($0, index($0, ": ")+2); exit}' <<< "$content"
 }
 
 parse_conf_value() {
-  local key="$1" content="$2"
+  local key="$1"
+  local content="$2"
   awk -v key="$key" '
     function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
     $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
@@ -308,7 +337,10 @@ parse_conf_value() {
 }
 
 find_awg_config_path() {
-  local container="$1" interface_hint="$2" path=""
+  local container="$1"
+  local interface_hint="$2"
+  local path=""
+
   if [[ -n "$interface_hint" ]]; then
     path="$(docker_exec_sh "$container" "[ -f '/opt/amnezia/awg/${interface_hint}.conf' ] && printf '%s' '/opt/amnezia/awg/${interface_hint}.conf' || true")"
   fi
@@ -322,8 +354,11 @@ find_awg_config_path() {
 }
 
 derive_public_key_from_private() {
-  local container="$1" private_key="$2" out=""
+  local container="$1"
+  local private_key="$2"
+  local out=""
   [[ -n "$private_key" ]] || return 0
+
   out="$(printf '%s\n' "$private_key" | docker exec -i "$container" awg pubkey 2>/dev/null | tr -d '\r' | head -n1 || true)"
   if [[ -z "$out" ]]; then
     out="$(printf '%s\n' "$private_key" | docker exec -i "$container" wg pubkey 2>/dev/null | tr -d '\r' | head -n1 || true)"
@@ -332,7 +367,7 @@ derive_public_key_from_private() {
 }
 
 get_public_host() {
-  local value hostf
+  local value host route hostf
   for value in "$(get_env_value PUBLIC_HOST)" "$(get_env_value SERVER_HOST)" "$(get_env_value SERVER_DOMAIN)" "${PUBLIC_HOST:-}" "${SERVER_HOST:-}" "${SERVER_DOMAIN:-}"; do
     value="$(printf '%s' "$value" | tr -d '[:space:]')"
     [[ -z "$value" ]] && continue
@@ -341,13 +376,18 @@ get_public_host() {
       return 0
     fi
   done
+
   hostf="$(hostname -f 2>/dev/null || true)"
   if [[ "$(is_hostname_like "$hostf")" == "1" && "$hostf" == *.* ]]; then
     printf '%s' "$hostf"
     return 0
   fi
+
   if require_command curl; then
-    for url in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipv4.icanhazip.com"; do
+    for url in \
+      "https://api.ipify.org" \
+      "https://ifconfig.me/ip" \
+      "https://ipv4.icanhazip.com"; do
       value="$(curl -4 -fsSL --connect-timeout 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
       if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
         printf '%s' "$value"
@@ -355,7 +395,15 @@ get_public_host() {
       fi
     done
   fi
-  printf '%s' ''
+
+  route="$(ip -4 route get 1.1.1.1 2>/dev/null || true)"
+  value="$(grep -oE '\bsrc\s+[0-9.]+\b' <<< "$route" | awk '{print $2}' | head -n1 || true)"
+  if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+
+  printf '%s' ""
 }
 
 detect_awg_environment() {
@@ -400,20 +448,24 @@ detect_awg_environment() {
 
     interface_name="$(extract_awg_show_value 'interface' "$show_output")"
     [[ -n "$interface_name" ]] && DETECTED_INTERFACE="$interface_name"
+
     DETECTED_PUBLIC_KEY="$(extract_awg_show_value 'public key' "$show_output")"
     DETECTED_LISTEN_PORT="$(extract_awg_show_value 'listening port' "$show_output")"
 
     DETECTED_CONFIG_PATH="$(find_awg_config_path "$DETECTED_CONTAINER" "$DETECTED_INTERFACE")"
     if [[ -n "$DETECTED_CONFIG_PATH" ]]; then
       conf_output="$(docker_exec_sh "$DETECTED_CONTAINER" "cat '$DETECTED_CONFIG_PATH'")"
+
       if [[ -z "$DETECTED_LISTEN_PORT" ]]; then
         DETECTED_LISTEN_PORT="$(parse_conf_value 'ListenPort' "$conf_output")"
       fi
+
       if [[ -z "$DETECTED_PUBLIC_KEY" ]]; then
         private_key="$(parse_conf_value 'PrivateKey' "$conf_output")"
         private_key="$(printf '%s' "$private_key" | tr -d '\r' | xargs 2>/dev/null || true)"
         DETECTED_PUBLIC_KEY="$(derive_public_key_from_private "$DETECTED_CONTAINER" "$private_key")"
       fi
+
       DETECTED_AWG_JC="$(parse_conf_value 'Jc' "$conf_output")"
       DETECTED_AWG_JMIN="$(parse_conf_value 'Jmin' "$conf_output")"
       DETECTED_AWG_JMAX="$(parse_conf_value 'Jmax' "$conf_output")"
@@ -434,16 +486,17 @@ detect_awg_environment() {
   fi
 
   if [[ -z "$DETECTED_PUBLIC_HOST" ]]; then
-    if [[ "$(is_hostname_like "$DETECTED_SERVER_NAME")" == "1" && "$DETECTED_SERVER_NAME" == *.* ]]; then
-      DETECTED_PUBLIC_HOST="$DETECTED_SERVER_NAME"
+    DETECTED_PUBLIC_HOST="$(printf '%s' "$DETECTED_SERVER_NAME" | tr -d '[:space:]')"
+    if [[ "$(is_hostname_like "$DETECTED_PUBLIC_HOST")" != "1" ]]; then
+      DETECTED_PUBLIC_HOST=""
     fi
   fi
+
   if [[ -n "$DETECTED_PUBLIC_HOST" && -n "$DETECTED_LISTEN_PORT" ]]; then
     DETECTED_SERVER_IP="${DETECTED_PUBLIC_HOST}:${DETECTED_LISTEN_PORT}"
   else
     DETECTED_SERVER_IP="$(get_env_value SERVER_IP)"
   fi
-  return 0
 }
 
 print_detected_awg_summary() {
@@ -456,9 +509,15 @@ print_detected_awg_summary() {
   echo "Endpoint: ${DETECTED_SERVER_IP:-не найден}"
   echo "Имя сервера: ${DETECTED_SERVER_NAME:-не найдено}"
   print_line
-  [[ -z "$DETECTED_PUBLIC_KEY" ]] && warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
-  [[ -z "$DETECTED_SERVER_IP" ]] && warn "Не удалось автоматически определить внешний SERVER_IP."
-  [[ -z "$DETECTED_PUBLIC_HOST" ]] && warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
+  if [[ -z "$DETECTED_PUBLIC_KEY" ]]; then
+    warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
+  fi
+  if [[ -z "$DETECTED_SERVER_IP" ]]; then
+    warn "Не удалось автоматически определить внешний SERVER_IP."
+  fi
+  if [[ -z "$DETECTED_PUBLIC_HOST" ]]; then
+    warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
+  fi
   return 0
 }
 
@@ -466,8 +525,8 @@ download_repo() {
   local tmp_dir src_dir
   tmp_dir="$(mktemp -d)"
   info "Скачиваю код из ${REPO_URL} (${REPO_BRANCH})..."
-  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz" || { rm -rf "$tmp_dir"; return 1; }
-  tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir" || { rm -rf "$tmp_dir"; return 1; }
+  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
+  tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
   src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
     warn "Не удалось скачать корректную структуру репозитория."
@@ -480,11 +539,17 @@ download_repo() {
 }
 
 deploy_repo() {
-  local tmp_dir="$1" src_dir backup_dir=""
+  local tmp_dir="$1"
+  local src_dir backup_dir=""
   src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
-  [[ -n "$src_dir" && -d "$src_dir/bot" && -f "$src_dir/awg-tgbot.sh" ]] || return 1
+
+  if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
+    warn "Не найдены файлы репозитория для развёртывания."
+    return 1
+  fi
 
   mkdir -p "$INSTALL_DIR" "$STATE_DIR" "$(dirname "$SELF_SYMLINK")"
+
   if [[ -d "$BOT_DIR" || -f "$INSTALL_DIR/awg-tgbot.sh" ]]; then
     backup_dir="$(mktemp -d "${INSTALL_DIR}/.backup.XXXXXX")"
     [[ -d "$BOT_DIR" ]] && mv "$BOT_DIR" "$backup_dir/bot"
@@ -493,6 +558,7 @@ deploy_repo() {
 
   rm -rf "$BOT_DIR"
   mkdir -p "$BOT_DIR"
+
   if cp -a "$src_dir/bot/." "$BOT_DIR/" \
     && cp "$src_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh" \
     && chmod +x "$INSTALL_DIR/awg-tgbot.sh" \
@@ -520,14 +586,17 @@ ensure_env_file() {
     else
       touch "$ENV_FILE"
     fi
-    chmod 600 "$ENV_FILE" || true
+    chmod 600 "$ENV_FILE"
   fi
 }
 
 ensure_secret() {
   local current secret
   current="$(get_env_value ENCRYPTION_SECRET)"
-  if [[ -n "$current" ]]; then printf '%s' "$current"; return 0; fi
+  if [[ -n "$current" ]]; then
+    printf '%s' "$current"
+    return 0
+  fi
   if require_command openssl; then
     secret="$(openssl rand -hex 32)"
   else
@@ -541,7 +610,8 @@ PY
 }
 
 prompt_api_token() {
-  local __resultvar="$1" token=""
+  local __resultvar="$1"
+  local token=""
   while true; do
     prompt_with_default 'Введите токен Telegram-бота' '' token
     if [[ "$token" == *:* ]]; then
@@ -553,7 +623,8 @@ prompt_api_token() {
 }
 
 prompt_admin_id() {
-  local __resultvar="$1" admin_id=""
+  local __resultvar="$1"
+  local admin_id=""
   while true; do
     prompt_with_default 'Введите Telegram user_id администратора' '' admin_id
     if [[ "$admin_id" =~ ^[0-9]+$ ]]; then
@@ -565,13 +636,16 @@ prompt_admin_id() {
 }
 
 write_common_env() {
-  local api_token="$1" admin_id="$2" server_name="$3" secret="$4"
+  local api_token="$1"
+  local admin_id="$2"
+  local server_name="$3"
+  local secret="$4"
+
   set_env_value API_TOKEN "$api_token"
   set_env_value ADMIN_ID "$admin_id"
   set_env_value SERVER_NAME "$server_name"
   set_env_value ENCRYPTION_SECRET "$secret"
   set_env_value DB_PATH "vpn_bot.db"
-  return 0
 }
 
 write_detected_awg_env() {
@@ -596,39 +670,38 @@ write_detected_awg_env() {
   [[ -n "$DETECTED_AWG_I3" ]] && set_env_value AWG_I3 "$DETECTED_AWG_I3"
   [[ -n "$DETECTED_AWG_I4" ]] && set_env_value AWG_I4 "$DETECTED_AWG_I4"
   [[ -n "$DETECTED_AWG_I5" ]] && set_env_value AWG_I5 "$DETECTED_AWG_I5"
-  return 0
 }
 
 configure_manual_awg_only() {
   local value default
   default="$(pick_existing_or_default "$(get_env_value DOCKER_CONTAINER)" "$DETECTED_CONTAINER")"
-  prompt_with_default 'DOCKER_CONTAINER' "$default" value
+  value="$(prompt_with_default 'DOCKER_CONTAINER' "$default")"
   set_env_value DOCKER_CONTAINER "$value"
 
   default="$(pick_existing_or_default "$(get_env_value WG_INTERFACE)" "$DETECTED_INTERFACE")"
-  prompt_with_default 'WG_INTERFACE' "$default" value
+  value="$(prompt_with_default 'WG_INTERFACE' "$default")"
   set_env_value WG_INTERFACE "$value"
 
   default="$(pick_existing_or_default "$(get_env_value SERVER_PUBLIC_KEY)" "$DETECTED_PUBLIC_KEY")"
-  prompt_with_default 'SERVER_PUBLIC_KEY' "$default" value
+  value="$(prompt_with_default 'SERVER_PUBLIC_KEY' "$default")"
   set_env_value SERVER_PUBLIC_KEY "$value"
 
   default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-  prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
+  value="$(prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default")"
   set_env_value PUBLIC_HOST "$value"
 
   default="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
-  prompt_with_default 'SERVER_IP (host:port)' "$default" value
+  value="$(prompt_with_default 'SERVER_IP (host:port)' "$default")"
   set_env_value SERVER_IP "$value"
-  return 0
 }
 
 configure_auto_install() {
   local api_token admin_id server_name secret value default
-  prompt_api_token api_token
-  prompt_admin_id admin_id
+
+  api_token="$(prompt_api_token)"
+  admin_id="$(prompt_admin_id)"
   default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  prompt_with_default 'Введите название сервера' "$default" server_name
+  server_name="$(prompt_with_default 'Введите название сервера' "$default")"
   secret="$(ensure_secret)"
 
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
@@ -636,65 +709,68 @@ configure_auto_install() {
 
   if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" ]]; then
     warn "Не удалось автоматически определить SERVER_PUBLIC_KEY. Нужен один ручной шаг."
-    prompt_with_default 'SERVER_PUBLIC_KEY' "$DETECTED_PUBLIC_KEY" value
+    default="$DETECTED_PUBLIC_KEY"
+    value="$(prompt_with_default 'SERVER_PUBLIC_KEY' "$default")"
     set_env_value SERVER_PUBLIC_KEY "$value"
   fi
 
   if [[ -z "$(get_env_value SERVER_IP)" ]]; then
     warn "Не удалось автоматически определить SERVER_IP. Укажи домен/IP и порт."
     default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-    prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
+    value="$(prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default")"
     set_env_value PUBLIC_HOST "$value"
     if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
       set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
     else
-      prompt_with_default 'SERVER_IP (host:port)' "$DETECTED_SERVER_IP" value
+      default="$DETECTED_SERVER_IP"
+      value="$(prompt_with_default 'SERVER_IP (host:port)' "$default")"
       set_env_value SERVER_IP "$value"
     fi
   fi
-  return 0
 }
 
 configure_manual_install() {
   local api_token admin_id server_name secret value default
-  prompt_api_token api_token
-  prompt_admin_id admin_id
+  api_token="$(prompt_api_token)"
+  admin_id="$(prompt_admin_id)"
   default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  prompt_with_default 'Введите название сервера' "$default" server_name
+  server_name="$(prompt_with_default 'Введите название сервера' "$default")"
   secret="$(ensure_secret)"
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
+
   configure_manual_awg_only
 
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
-  prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
+  value="$(prompt_with_default 'Цена 7 дней в Telegram Stars' "$default")"
   set_env_value STARS_PRICE_7_DAYS "$value"
 
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
-  prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
+  value="$(prompt_with_default 'Цена 30 дней в Telegram Stars' "$default")"
   set_env_value STARS_PRICE_30_DAYS "$value"
 
   default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
-  prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
+  value="$(prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default")"
   set_env_value DOWNLOAD_URL "$value"
 
   default="$(get_env_value SUPPORT_USERNAME)"
-  prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}" value
+  value="$(prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}")"
   set_env_value SUPPORT_USERNAME "$value"
-  return 0
 }
 
 ensure_venv_and_requirements() {
   info "Настраиваю Python окружение..."
-  [[ -d "$VENV_DIR" ]] || "$PYTHON_BIN" -m venv "$VENV_DIR" || return 1
-  "$VENV_DIR/bin/pip" install --upgrade pip wheel || return 1
-  "$VENV_DIR/bin/pip" install -r "$BOT_DIR/requirements.txt" || return 1
-  return 0
+  if [[ ! -d "$VENV_DIR" ]]; then
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
+  fi
+  "$VENV_DIR/bin/pip" install --upgrade pip wheel
+  "$VENV_DIR/bin/pip" install -r "$BOT_DIR/requirements.txt"
 }
 
 write_service() {
   mkdir -p "$APP_LOG_DIR"
   touch "$APP_LOG_FILE"
   chmod 640 "$APP_LOG_FILE" || true
+
   cat > "$SERVICE_FILE" <<SERVICE
 [Unit]
 Description=AWG Telegram Bot
@@ -715,9 +791,9 @@ StandardError=append:${APP_LOG_FILE}
 [Install]
 WantedBy=multi-user.target
 SERVICE
+
   systemctl daemon-reload
   systemctl enable "$SERVICE_NAME" >/dev/null
-  return 0
 }
 
 persist_remote_sha() {
@@ -727,21 +803,18 @@ persist_remote_sha() {
     mkdir -p "$STATE_DIR"
     printf '%s\n' "$sha" > "$VERSION_FILE"
   fi
-  return 0
 }
 
 start_service() {
   info "Запускаю сервис..."
   systemctl restart "$SERVICE_NAME"
   sleep 2
-  return 0
 }
 
 stop_service_if_exists() {
   if service_exists; then
     systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
   fi
-  return 0
 }
 
 show_status() {
@@ -759,7 +832,6 @@ show_status() {
     warn "Бот пока не установлен."
   fi
   print_line
-  return 0
 }
 
 check_updates() {
@@ -775,7 +847,6 @@ check_updates() {
     warn "Есть новая версия или локальная версия ещё не зафиксирована."
   fi
   print_line
-  return 0
 }
 
 install_or_reinstall_flow() {
@@ -792,57 +863,56 @@ install_or_reinstall_flow() {
     echo "2) Ручная переустановка"
     echo "0) Отмена"
   fi
-  prompt_raw "Выбор: " choice
+  choice="$(prompt_raw "Выбор: ")"
   case "$choice" in
     1|2) ;;
     *) warn "Действие отменено."; return 0 ;;
   esac
 
-  ensure_packages || die "Не удалось установить системные зависимости."
-  ensure_docker_ready || die "Docker недоступен."
+  ensure_packages
+  ensure_docker_ready || return 1
   detect_awg_environment
   print_detected_awg_summary
 
-  tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
+  tmp_dir="$(download_repo)" || return 1
   stop_service_if_exists
-  deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; die "Не удалось развернуть файлы проекта."; }
+  deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; return 1; }
   rm -rf "$tmp_dir"
   ensure_env_file
 
   detect_awg_environment
   print_detected_awg_summary
   if [[ "$choice" == "1" ]]; then
-    configure_auto_install || die "Автоматическая настройка не завершилась."
+    configure_auto_install
   else
-    configure_manual_install || die "Ручная настройка не завершилась."
+    configure_manual_install
   fi
 
-  ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
-  write_service || die "Не удалось создать systemd сервис."
+  ensure_venv_and_requirements
+  write_service
   persist_remote_sha
-  start_service || die "Не удалось запустить сервис."
+  start_service
   ok "Готово. Бот установлен/переустановлен."
   show_status
   echo "Быстрый запуск меню потом: sudo bash ${INSTALL_DIR}/awg-tgbot.sh"
   echo "Или коротко: sudo awg-tgbot"
-  return 0
 }
 
 update_bot() {
-  local tmp_dir api_token admin_id server_name secret
   if ! is_installed; then
     warn "Бот не установлен."
     return 0
   fi
   print_line
   info "Обновление AWG Telegram Bot"
-  ensure_packages || die "Не удалось обновить системные зависимости."
-  ensure_docker_ready || die "Docker недоступен."
+  ensure_packages
+  ensure_docker_ready || return 1
   check_updates
 
-  tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
+  local tmp_dir api_token admin_id server_name secret
+  tmp_dir="$(download_repo)" || return 1
   stop_service_if_exists
-  deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; die "Не удалось развернуть обновление."; }
+  deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; return 1; }
   rm -rf "$tmp_dir"
   ensure_env_file
 
@@ -850,65 +920,89 @@ update_bot() {
   admin_id="$(get_env_value ADMIN_ID)"
   server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
   secret="$(ensure_secret)"
-  [[ -n "$api_token" ]] || prompt_api_token api_token
-  [[ -n "$admin_id" ]] || prompt_admin_id admin_id
+
+  if [[ -z "$api_token" ]]; then api_token="$(prompt_api_token)"; fi
+  if [[ -z "$admin_id" ]]; then admin_id="$(prompt_admin_id)"; fi
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
 
   detect_awg_environment
   write_detected_awg_env
-  ensure_venv_and_requirements || die "Не удалось обновить Python зависимости."
-  write_service || die "Не удалось обновить systemd сервис."
+  ensure_venv_and_requirements
+  write_service
   persist_remote_sha
-  start_service || die "Не удалось перезапустить сервис."
+  start_service
   ok "Обновление завершено."
   show_status
-  return 0
 }
 
 remove_bot() {
-  local choice=""
   print_line
   if ! is_installed && [[ ! -d "$INSTALL_DIR" ]]; then
     warn "Бот уже удалён."
     return 0
   fi
-  echo "1) Полностью удалить бота"
-  echo "2) Удалить только сервис и venv, оставить .env и базу"
+
+  echo "1) Удалить всё"
+  echo "2) Удалить всё, кроме БД"
   echo "0) Отмена"
+  local choice=""
+  local db_rel db_abs tmp_db
   prompt_raw "Выбор: " choice
   case "$choice" in
     1)
-      if ! confirm "Точно удалить бот, .env, базу и логи?" "N"; then
+      if ! confirm "Точно удалить весь бот, .env, БД, сервис и логи?" "N"; then
         warn "Удаление отменено."
         return 0
       fi
       systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
       rm -f "$SERVICE_FILE"
-      systemctl daemon-reload || true
-      systemctl reset-failed || true
+      systemctl daemon-reload
+      systemctl reset-failed
       rm -f "$SELF_SYMLINK"
       rm -rf "$INSTALL_DIR" "$APP_LOG_DIR"
-      ok "Бот полностью удалён."
+      rm -f "$INSTALL_LOG"
+      ok "Удалено всё."
       ;;
     2)
+      if ! confirm "Точно удалить всё, кроме БД?" "N"; then
+        warn "Удаление отменено."
+        return 0
+      fi
+      db_rel="$(grep -m1 '^DB_PATH=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- || true)"
+      db_rel="${db_rel:-vpn_bot.db}"
+      if [[ "$db_rel" = /* ]]; then
+        db_abs="$db_rel"
+      else
+        db_abs="$INSTALL_DIR/$db_rel"
+      fi
+      tmp_db=""
+      if [[ -f "$db_abs" ]]; then
+        tmp_db="$(mktemp)"
+        cp -f "$db_abs" "$tmp_db"
+      fi
       systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
       rm -f "$SERVICE_FILE"
-      systemctl daemon-reload || true
-      systemctl reset-failed || true
-      rm -rf "$VENV_DIR"
+      systemctl daemon-reload
+      systemctl reset-failed
       rm -f "$SELF_SYMLINK"
-      ok "Сервис и venv удалены. .env и база сохранены."
+      rm -rf "$INSTALL_DIR" "$APP_LOG_DIR"
+      rm -f "$INSTALL_LOG"
+      if [[ -n "$tmp_db" && -f "$tmp_db" ]]; then
+        mkdir -p "$INSTALL_DIR"
+        cp -f "$tmp_db" "$INSTALL_DIR/$(basename "$db_rel")"
+        chmod 600 "$INSTALL_DIR/$(basename "$db_rel")" || true
+        rm -f "$tmp_db"
+      fi
+      ok "Удалено всё, БД сохранена."
       ;;
     *)
       warn "Удаление отменено."
       ;;
   esac
   print_line
-  return 0
 }
 
 show_logs() {
-  local choice=""
   print_line
   if ! is_installed; then
     warn "Бот не установлен."
@@ -920,7 +1014,8 @@ show_logs() {
   echo "3) Последние 100 строк bot.log"
   echo "4) Смотреть bot.log в реальном времени"
   echo "0) Назад"
-  prompt_raw "Выбор: " choice
+  local choice=""
+  choice="$(prompt_raw "Выбор: ")"
   case "$choice" in
     1) journalctl -u "$SERVICE_NAME" -n 100 --no-pager ;;
     2) journalctl -u "$SERVICE_NAME" -f ;;
@@ -929,7 +1024,6 @@ show_logs() {
     *) ;;
   esac
   print_line
-  return 0
 }
 
 print_not_installed_menu() {
@@ -974,7 +1068,7 @@ main_menu() {
   while true; do
     if is_installed; then
       print_installed_menu
-      prompt_raw "Выбери действие: " choice
+      choice="$(prompt_raw "Выбери действие: ")"
       case "$choice" in
         1) install_or_reinstall_flow reinstall ;;
         2) update_bot ;;
@@ -987,7 +1081,7 @@ main_menu() {
       esac
     else
       print_not_installed_menu
-      prompt_raw "Выбери действие: " choice
+      choice="$(prompt_raw "Выбери действие: ")"
       case "$choice" in
         1) install_or_reinstall_flow install ;;
         2|0) echo "Выход."; exit 0 ;;

@@ -324,18 +324,15 @@ find_awg_config_path() {
   local container="$1"
   local interface_hint="$2"
   local path=""
+
   if [[ -n "$interface_hint" ]]; then
-    path="/opt/amnezia/awg/${interface_hint}.conf"
-    if docker_exec_sh "$container" "[ -f '$path' ] && printf '%s' '$path'"; then
-      :
-    fi
+    path="$(docker_exec_sh "$container" "[ -f '/opt/amnezia/awg/${interface_hint}.conf' ] && printf '%s' '/opt/amnezia/awg/${interface_hint}.conf' || true")"
   fi
-  path="$(docker_exec_sh "$container" "[ -f '/opt/amnezia/awg/${interface_hint}.conf' ] && printf '%s' '/opt/amnezia/awg/${interface_hint}.conf' || true")"
   if [[ -z "$path" ]]; then
     path="$(docker_exec_sh "$container" "[ -f '/opt/amnezia/awg/awg0.conf' ] && printf '%s' '/opt/amnezia/awg/awg0.conf' || true")"
   fi
   if [[ -z "$path" ]]; then
-    path="$(docker_exec_sh "$container" "find /opt/amnezia -maxdepth 4 -type f -name '*.conf' 2>/dev/null | grep '/awg/' | head -n1")"
+    path="$(docker_exec_sh "$container" "find /opt/amnezia -maxdepth 4 -type f -name '*.conf' 2>/dev/null | grep '/awg/' | head -n1 || true")"
   fi
   printf '%s' "$path"
 }
@@ -343,8 +340,14 @@ find_awg_config_path() {
 derive_public_key_from_private() {
   local container="$1"
   local private_key="$2"
+  local out=""
   [[ -n "$private_key" ]] || return 0
-  printf '%s\n' "$private_key" | docker exec -i "$container" awg pubkey 2>/dev/null | tr -d '\r' | head -n1 || true
+
+  out="$(printf '%s\n' "$private_key" | docker exec -i "$container" awg pubkey 2>/dev/null | tr -d '\r' | head -n1 || true)"
+  if [[ -z "$out" ]]; then
+    out="$(printf '%s\n' "$private_key" | docker exec -i "$container" wg pubkey 2>/dev/null | tr -d '\r' | head -n1 || true)"
+  fi
+  printf '%s' "$out"
 }
 
 get_public_host() {
@@ -490,9 +493,16 @@ print_detected_awg_summary() {
   echo "Endpoint: ${DETECTED_SERVER_IP:-не найден}"
   echo "Имя сервера: ${DETECTED_SERVER_NAME:-не найдено}"
   print_line
-  [[ -z "$DETECTED_PUBLIC_KEY" ]] && warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
-  [[ -z "$DETECTED_SERVER_IP" ]] && warn "Не удалось автоматически определить внешний SERVER_IP."
-  [[ -z "$DETECTED_PUBLIC_HOST" ]] && warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
+  if [[ -z "$DETECTED_PUBLIC_KEY" ]]; then
+    warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
+  fi
+  if [[ -z "$DETECTED_SERVER_IP" ]]; then
+    warn "Не удалось автоматически определить внешний SERVER_IP."
+  fi
+  if [[ -z "$DETECTED_PUBLIC_HOST" ]]; then
+    warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
+  fi
+  return 0
 }
 
 download_repo() {

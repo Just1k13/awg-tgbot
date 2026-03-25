@@ -786,7 +786,7 @@ check_updates() {
 }
 
 install_or_reinstall_flow() {
-  local mode="$1" tmp_dir choice
+  local mode="$1" tmp_dir choice api_token admin_id server_name secret value default
   print_line
   if [[ "$mode" == "install" ]]; then
     info "Установка AWG Telegram Bot"
@@ -805,6 +805,12 @@ install_or_reinstall_flow() {
     *) warn "Действие отменено."; return 0 ;;
   esac
 
+  prompt_api_token api_token
+  prompt_admin_id admin_id
+  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  prompt_with_default 'Введите название сервера' "$default" server_name
+  secret="$(ensure_secret)"
+
   ensure_packages || die "Не удалось установить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
   detect_awg_environment
@@ -816,12 +822,41 @@ install_or_reinstall_flow() {
   rm -rf "$tmp_dir"
   ensure_env_file
 
-  detect_awg_environment
-  print_detected_awg_summary
+  write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
+
   if [[ "$choice" == "1" ]]; then
-    configure_auto_install || die "Автоматическая настройка не завершилась."
+    write_detected_awg_env
+    if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" ]]; then
+      warn "Не удалось автоматически определить SERVER_PUBLIC_KEY. Нужен один ручной шаг."
+      prompt_with_default 'SERVER_PUBLIC_KEY' "$DETECTED_PUBLIC_KEY" value
+      set_env_value SERVER_PUBLIC_KEY "$value"
+    fi
+    if [[ -z "$(get_env_value SERVER_IP)" ]]; then
+      warn "Не удалось автоматически определить SERVER_IP. Укажи внешний IP и порт."
+      default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
+      prompt_with_default 'PUBLIC_HOST / внешний IP' "$default" value
+      set_env_value PUBLIC_HOST "$value"
+      if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
+        set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
+      else
+        prompt_with_default 'SERVER_IP (IP:port)' "$DETECTED_SERVER_IP" value
+        set_env_value SERVER_IP "$value"
+      fi
+    fi
   else
-    configure_manual_install || die "Ручная настройка не завершилась."
+    configure_manual_awg_only
+    default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
+    prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
+    set_env_value STARS_PRICE_7_DAYS "$value"
+    default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
+    prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
+    set_env_value STARS_PRICE_30_DAYS "$value"
+    default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
+    prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
+    set_env_value DOWNLOAD_URL "$value"
+    default="$(get_env_value SUPPORT_USERNAME)"
+    prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}" value
+    set_env_value SUPPORT_USERNAME "$value"
   fi
 
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.env
+.venv/
+venv/
+vpn_bot.db
+*.db
+.mypy_cache/
+.pytest_cache/
+.DS_Store

@@ -329,7 +329,7 @@ if _detected_awg:
     summary_parts = []
     if _detected_awg.get('WG_INTERFACE'):
         summary_parts.append(f'container={DOCKER_CONTAINER_HINT}')
-        summary_parts.append(f'interface={_deted := _detected_awg["WG_INTERFACE"]}')
+        summary_parts.append(f'interface={_detected_awg["WG_INTERFACE"]}')
     if _detected_awg.get('SERVER_PUBLIC_KEY'):
         summary_parts.append('public_key=найден')
     if _detected_awg.get('DETECTED_HOST_PORT'):

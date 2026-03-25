@@ -1,6 +1,7 @@
 import asyncio
+from time import monotonic
 
-from aiogram import Bot, Dispatcher, Router, types
+from aiogram import BaseMiddleware, Bot, Dispatcher, Router, types
 from aiogram.exceptions import TelegramUnauthorizedError
 
 from awg_backend import (
@@ -26,9 +27,72 @@ from handlers_user import router as user_router
 from payments import router as payments_router
 
 dp = Dispatcher()
+dp.message.middleware(DuplicateMessageGuardMiddleware())
+dp.callback_query.middleware(DuplicateCallbackGuardMiddleware())
 bg_worker_task: asyncio.Task | None = None
 
 fallback_router = Router()
+
+
+class DuplicateMessageGuardMiddleware(BaseMiddleware):
+    def __init__(self, ttl: float = 1.5):
+        self.ttl = ttl
+        self._seen: dict[tuple[int, int, str], float] = {}
+
+    async def __call__(self, handler, event, data):
+        if isinstance(event, types.Message):
+            user_id = event.from_user.id if event.from_user else 0
+            chat_id = event.chat.id if event.chat else 0
+            payload = (event.text or event.caption or "").strip()
+            if payload:
+                now = monotonic()
+                stale = [key for key, ts in self._seen.items() if now - ts > self.ttl]
+                for key in stale:
+                    self._seen.pop(key, None)
+
+                key = (chat_id, user_id, payload)
+                last = self._seen.get(key)
+                self._seen[key] = now
+                if last is not None and (now - last) < self.ttl:
+                    logger.info(
+                        "Подавлен дубль message: chat=%s user=%s payload=%r",
+                        chat_id,
+                        user_id,
+                        payload,
+                    )
+                    return
+        return await handler(event, data)
+
+
+class DuplicateCallbackGuardMiddleware(BaseMiddleware):
+    def __init__(self, ttl: float = 1.5):
+        self.ttl = ttl
+        self._seen: dict[tuple[int, int, str], float] = {}
+
+    async def __call__(self, handler, event, data):
+        if isinstance(event, types.CallbackQuery):
+            user_id = event.from_user.id if event.from_user else 0
+            chat_id = event.message.chat.id if event.message and event.message.chat else 0
+            payload = (event.data or "").strip()
+            if payload:
+                now = monotonic()
+                stale = [key for key, ts in self._seen.items() if now - ts > self.ttl]
+                for key in stale:
+                    self._seen.pop(key, None)
+
+                key = (chat_id, user_id, payload)
+                last = self._seen.get(key)
+                self._seen[key] = now
+                if last is not None and (now - last) < self.ttl:
+                    logger.info(
+                        "Подавлен дубль callback: chat=%s user=%s payload=%r",
+                        chat_id,
+                        user_id,
+                        payload,
+                    )
+                    await event.answer()
+                    return
+        return await handler(event, data)
 
 
 @fallback_router.callback_query()

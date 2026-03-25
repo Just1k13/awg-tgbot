@@ -628,6 +628,7 @@ write_common_env() {
   set_env_value SERVER_NAME "$server_name"
   set_env_value ENCRYPTION_SECRET "$secret"
   set_env_value DB_PATH "vpn_bot.db"
+  return 0
 }
 
 write_detected_awg_env() {

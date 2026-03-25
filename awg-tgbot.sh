@@ -341,13 +341,16 @@ download_repo() {
   local tmp_dir src_dir
   tmp_dir="$(mktemp -d)"
   info "Скачиваю код из ${REPO_URL} (${REPO_BRANCH})..."
-  curl -fsSL "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
+  curl -fL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
   tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
-    rm -rf "$tmp_dir"
     warn "Не удалось скачать корректную структуру репозитория."
-    exit 1
+    warn "Содержимое временной папки:"
+    ls -la "$tmp_dir" >&2 || true
+    [[ -n "$src_dir" ]] && ls -la "$src_dir" >&2 || true
+    rm -rf "$tmp_dir"
+    return 1
   fi
   printf '%s' "$tmp_dir"
 }
@@ -355,27 +358,40 @@ download_repo() {
 deploy_repo() {
   local tmp_dir="$1"
   local src_dir backup_dir=""
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-  mkdir -p "$INSTALL_DIR" "$STATE_DIR"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
 
-  if [[ -d "$BOT_DIR" ]]; then
+  if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
+    warn "Не найдены файлы репозитория для развёртывания."
+    ls -la "$tmp_dir" >&2 || true
+    [[ -n "$src_dir" ]] && ls -la "$src_dir" >&2 || true
+    return 1
+  fi
+
+  mkdir -p "$INSTALL_DIR" "$STATE_DIR" "$(dirname "$SELF_SYMLINK")"
+
+  if [[ -d "$BOT_DIR" || -f "$INSTALL_DIR/awg-tgbot.sh" ]]; then
     backup_dir="$(mktemp -d "${INSTALL_DIR}/.backup.XXXXXX")"
-    mv "$BOT_DIR" "$backup_dir/bot"
+    [[ -d "$BOT_DIR" ]] && mv "$BOT_DIR" "$backup_dir/bot"
+    [[ -f "$INSTALL_DIR/awg-tgbot.sh" ]] && mv "$INSTALL_DIR/awg-tgbot.sh" "$backup_dir/awg-tgbot.sh"
   fi
 
-  if cp -a "$src_dir/bot" "$BOT_DIR" && cp -a "$src_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh"; then
-    chmod +x "$INSTALL_DIR/awg-tgbot.sh"
-    ln -sf "$INSTALL_DIR/awg-tgbot.sh" "$SELF_SYMLINK"
+  rm -rf "$BOT_DIR"
+  mkdir -p "$BOT_DIR"
+
+  if cp -a "$src_dir/bot/." "$BOT_DIR/"     && cp "$src_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh"     && chmod +x "$INSTALL_DIR/awg-tgbot.sh"     && ln -sfn "$INSTALL_DIR/awg-tgbot.sh" "$SELF_SYMLINK"; then
     [[ -n "$backup_dir" ]] && rm -rf "$backup_dir"
-  else
-    rm -rf "$BOT_DIR"
-    if [[ -n "$backup_dir" && -d "$backup_dir/bot" ]]; then
-      mv "$backup_dir/bot" "$BOT_DIR"
-      rm -rf "$backup_dir"
-    fi
-    warn "Не удалось развернуть файлы репозитория."
-    exit 1
+    return 0
   fi
+
+  warn "Не удалось развернуть файлы репозитория. Выполняю откат."
+  rm -rf "$BOT_DIR"
+  rm -f "$INSTALL_DIR/awg-tgbot.sh"
+  if [[ -n "$backup_dir" && -d "$backup_dir" ]]; then
+    [[ -d "$backup_dir/bot" ]] && mv "$backup_dir/bot" "$BOT_DIR"
+    [[ -f "$backup_dir/awg-tgbot.sh" ]] && mv "$backup_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh"
+    rm -rf "$backup_dir"
+  fi
+  return 1
 }
 
 ensure_env_file() {
@@ -653,9 +669,9 @@ install_or_reinstall_flow() {
     *) warn "Действие отменено."; return 0 ;;
   esac
 
-  tmp_dir="$(download_repo)"
+  tmp_dir="$(download_repo)" || return 1
   stop_service_if_exists
-  deploy_repo "$tmp_dir"
+  deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; return 1; }
   rm -rf "$tmp_dir"
   ensure_env_file
 
@@ -686,9 +702,9 @@ update_bot() {
   check_updates
 
   local tmp_dir api_token admin_id server_name secret
-  tmp_dir="$(download_repo)"
+  tmp_dir="$(download_repo)" || return 1
   stop_service_if_exists
-  deploy_repo "$tmp_dir"
+  deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; return 1; }
   rm -rf "$tmp_dir"
   ensure_env_file
 

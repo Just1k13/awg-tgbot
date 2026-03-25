@@ -24,6 +24,31 @@ PYTHON_BIN="/usr/bin/python3"
 TTY_DEVICE="/dev/tty"
 SELF_SYMLINK="/usr/local/bin/awg-tgbot"
 
+DETECTED_CONTAINER=""
+DETECTED_INTERFACE=""
+DETECTED_CONFIG_PATH=""
+DETECTED_PUBLIC_KEY=""
+DETECTED_LISTEN_PORT=""
+DETECTED_SERVER_IP=""
+DETECTED_SERVER_NAME=""
+DETECTED_PUBLIC_HOST=""
+DETECTED_AWG_JC=""
+DETECTED_AWG_JMIN=""
+DETECTED_AWG_JMAX=""
+DETECTED_AWG_S1=""
+DETECTED_AWG_S2=""
+DETECTED_AWG_S3=""
+DETECTED_AWG_S4=""
+DETECTED_AWG_H1=""
+DETECTED_AWG_H2=""
+DETECTED_AWG_H3=""
+DETECTED_AWG_H4=""
+DETECTED_AWG_I1=""
+DETECTED_AWG_I2=""
+DETECTED_AWG_I3=""
+DETECTED_AWG_I4=""
+DETECTED_AWG_I5=""
+
 print_line() {
   printf '%s\n' "------------------------------------------------------------"
 }
@@ -57,14 +82,20 @@ setup_logging() {
   exec > >(tee -a "$INSTALL_LOG") 2>&1
 }
 
+setup_tty_fd() {
+  if [[ -r "$TTY_DEVICE" ]]; then
+    exec 3<>"$TTY_DEVICE"
+  fi
+}
+
 has_tty() {
-  [[ -r "$TTY_DEVICE" ]]
+  [[ -e /proc/$$/fd/3 ]]
 }
 
 pause_if_tty() {
   if has_tty; then
     echo
-    read -r -p "Нажми Enter, чтобы продолжить..." _dummy < "$TTY_DEVICE"
+    read -r -u 3 -p "Нажми Enter, чтобы продолжить..." _dummy || true
   fi
 }
 
@@ -79,7 +110,9 @@ prompt_raw() {
   local __resultvar="$2"
   local value=""
   if has_tty; then
-    read -r -p "$prompt" value < "$TTY_DEVICE"
+    if ! read -r -u 3 -p "$prompt" value; then
+      value=""
+    fi
   fi
   printf -v "$__resultvar" '%s' "$value"
 }
@@ -87,6 +120,7 @@ prompt_raw() {
 prompt_with_default() {
   local prompt="$1"
   local default="${2:-}"
+  local __resultvar="$3"
   local value=""
   while true; do
     if [[ -n "$default" ]]; then
@@ -96,7 +130,7 @@ prompt_with_default() {
       prompt_raw "$prompt: " value
     fi
     if [[ -n "$value" ]]; then
-      printf '%s' "$value"
+      printf -v "$__resultvar" '%s' "$value"
       return 0
     fi
     warn "Значение не может быть пустым."
@@ -219,9 +253,20 @@ is_hostname_like() {
   "$PYTHON_BIN" - "$value" <<'PY'
 import re, sys
 value = sys.argv[1].strip()
-ok = bool(value) and ' ' not in value and ':' not in value and len(value) <= 253 and value.lower() not in {"localhost"} and bool(re.fullmatch(r"[A-Za-z0-9.-]+", value))
+ok = bool(value) and " " not in value and ":" not in value and len(value) <= 253 and value.lower() not in {"localhost"} and bool(re.fullmatch(r"[A-Za-z0-9.-]+", value))
 print("1" if ok else "0")
 PY
+}
+
+docker_exec_capture() {
+  local container="$1"; shift
+  docker exec -i "$container" "$@" 2>/dev/null || true
+}
+
+docker_exec_sh() {
+  local container="$1"
+  local command="$2"
+  docker exec -i "$container" sh -lc "$command" 2>/dev/null || true
 }
 
 find_awg_container() {
@@ -255,37 +300,76 @@ find_awg_container() {
   printf '%s' "$best_name"
 }
 
-extract_awg_value() {
+extract_awg_show_value() {
   local label="$1"
   local content="$2"
   awk -F': ' -v k="$label" '$1 == k {print substr($0, index($0, ": ")+2); exit}' <<< "$content"
 }
 
-get_public_host() {
-  local current direct value fqdn
-  current="$(get_env_value SERVER_IP)"
-  if [[ -n "$current" && "$current" == *:* ]]; then
-    printf '%s' "${current%:*}"
-    return 0
-  fi
+parse_conf_value() {
+  local key="$1"
+  local content="$2"
+  awk -v key="$key" '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+    $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+      val=$0
+      sub(/^[^=]*=/, "", val)
+      print trim(val)
+      exit
+    }
+  ' <<< "$content"
+}
 
-  for direct in "$(get_env_value PUBLIC_HOST)" "${PUBLIC_HOST:-}" "$(get_env_value SERVER_HOST)" "${SERVER_HOST:-}" "$(get_env_value SERVER_DOMAIN)" "${SERVER_DOMAIN:-}"; do
-    direct="${direct// /}"
-    if [[ -z "$direct" ]]; then
-      continue
+find_awg_config_path() {
+  local container="$1"
+  local interface_hint="$2"
+  local path=""
+  if [[ -n "$interface_hint" ]]; then
+    path="/opt/amnezia/awg/${interface_hint}.conf"
+    if docker_exec_sh "$container" "[ -f '$path' ] && printf '%s' '$path'"; then
+      :
     fi
-    if [[ "$(is_public_ipv4 "$direct")" == "1" || "$(is_hostname_like "$direct")" == "1" ]]; then
-      printf '%s' "$direct"
+  fi
+  path="$(docker_exec_sh "$container" "[ -f '/opt/amnezia/awg/${interface_hint}.conf' ] && printf '%s' '/opt/amnezia/awg/${interface_hint}.conf' || true")"
+  if [[ -z "$path" ]]; then
+    path="$(docker_exec_sh "$container" "[ -f '/opt/amnezia/awg/awg0.conf' ] && printf '%s' '/opt/amnezia/awg/awg0.conf' || true")"
+  fi
+  if [[ -z "$path" ]]; then
+    path="$(docker_exec_sh "$container" "find /opt/amnezia -maxdepth 4 -type f -name '*.conf' 2>/dev/null | grep '/awg/' | head -n1")"
+  fi
+  printf '%s' "$path"
+}
+
+derive_public_key_from_private() {
+  local container="$1"
+  local private_key="$2"
+  [[ -n "$private_key" ]] || return 0
+  printf '%s\n' "$private_key" | docker exec -i "$container" awg pubkey 2>/dev/null | tr -d '\r' | head -n1 || true
+}
+
+get_public_host() {
+  local value host route hostf
+  for value in "$(get_env_value PUBLIC_HOST)" "$(get_env_value SERVER_HOST)" "$(get_env_value SERVER_DOMAIN)" "${PUBLIC_HOST:-}" "${SERVER_HOST:-}" "${SERVER_DOMAIN:-}"; do
+    value="$(printf '%s' "$value" | tr -d '[:space:]')"
+    [[ -z "$value" ]] && continue
+    if [[ "$(is_public_ipv4 "$value")" == "1" || "$(is_hostname_like "$value")" == "1" ]]; then
+      printf '%s' "$value"
       return 0
     fi
   done
+
+  hostf="$(hostname -f 2>/dev/null || true)"
+  if [[ "$(is_hostname_like "$hostf")" == "1" && "$hostf" == *.* ]]; then
+    printf '%s' "$hostf"
+    return 0
+  fi
 
   if require_command curl; then
     for url in \
       "https://api.ipify.org" \
       "https://ifconfig.me/ip" \
       "https://ipv4.icanhazip.com"; do
-      value="$(curl -4 -fsSL "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+      value="$(curl -4 -fsSL --connect-timeout 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
       if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
         printf '%s' "$value"
         return 0
@@ -293,9 +377,10 @@ get_public_host() {
     done
   fi
 
-  fqdn="$(hostname -f 2>/dev/null | tr -d '[:space:]' || true)"
-  if [[ "$(is_hostname_like "$fqdn")" == "1" ]]; then
-    printf '%s' "$fqdn"
+  route="$(ip -4 route get 1.1.1.1 2>/dev/null || true)"
+  value="$(grep -oE '\bsrc\s+[0-9.]+\b' <<< "$route" | awk '{print $2}' | head -n1 || true)"
+  if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
+    printf '%s' "$value"
     return 0
   fi
 
@@ -305,10 +390,12 @@ get_public_host() {
 detect_awg_environment() {
   DETECTED_CONTAINER=""
   DETECTED_INTERFACE=""
+  DETECTED_CONFIG_PATH=""
   DETECTED_PUBLIC_KEY=""
   DETECTED_LISTEN_PORT=""
   DETECTED_SERVER_IP=""
   DETECTED_SERVER_NAME=""
+  DETECTED_PUBLIC_HOST=""
   DETECTED_AWG_JC=""
   DETECTED_AWG_JMIN=""
   DETECTED_AWG_JMAX=""
@@ -326,89 +413,97 @@ detect_awg_environment() {
   DETECTED_AWG_I4=""
   DETECTED_AWG_I5=""
 
-  local configured_container configured_interface show_output host
+  local configured_container configured_interface show_output conf_output private_key interface_name
   configured_container="$(get_env_value DOCKER_CONTAINER)"
   configured_interface="$(get_env_value WG_INTERFACE)"
   DETECTED_CONTAINER="$(pick_existing_or_default "$configured_container" "$(find_awg_container)")"
-  DETECTED_SERVER_NAME="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname 2>/dev/null || echo 'My VPN')")"
+  DETECTED_INTERFACE="${configured_interface:-awg0}"
+  DETECTED_SERVER_NAME="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  DETECTED_PUBLIC_HOST="$(get_public_host)"
 
   if [[ -n "$DETECTED_CONTAINER" ]] && docker_is_accessible && docker inspect "$DETECTED_CONTAINER" >/dev/null 2>&1; then
-    show_output="$(docker exec -i "$DETECTED_CONTAINER" awg show "${configured_interface:-awg0}" 2>/dev/null || true)"
+    show_output="$(docker_exec_capture "$DETECTED_CONTAINER" awg show "$DETECTED_INTERFACE")"
     if [[ -z "$show_output" ]]; then
-      show_output="$(docker exec -i "$DETECTED_CONTAINER" awg show 2>/dev/null || true)"
+      show_output="$(docker_exec_capture "$DETECTED_CONTAINER" awg show)"
     fi
-    if [[ -n "$show_output" && "$show_output" == *"interface:"* ]]; then
-      DETECTED_INTERFACE="$(extract_awg_value 'interface' "$show_output")"
-      DETECTED_PUBLIC_KEY="$(extract_awg_value 'public key' "$show_output")"
-      DETECTED_LISTEN_PORT="$(extract_awg_value 'listening port' "$show_output")"
-      DETECTED_AWG_JC="$(extract_awg_value 'jc' "$show_output")"
-      DETECTED_AWG_JMIN="$(extract_awg_value 'jmin' "$show_output")"
-      DETECTED_AWG_JMAX="$(extract_awg_value 'jmax' "$show_output")"
-      DETECTED_AWG_S1="$(extract_awg_value 's1' "$show_output")"
-      DETECTED_AWG_S2="$(extract_awg_value 's2' "$show_output")"
-      DETECTED_AWG_S3="$(extract_awg_value 's3' "$show_output")"
-      DETECTED_AWG_S4="$(extract_awg_value 's4' "$show_output")"
-      DETECTED_AWG_H1="$(extract_awg_value 'h1' "$show_output")"
-      DETECTED_AWG_H2="$(extract_awg_value 'h2' "$show_output")"
-      DETECTED_AWG_H3="$(extract_awg_value 'h3' "$show_output")"
-      DETECTED_AWG_H4="$(extract_awg_value 'h4' "$show_output")"
-      DETECTED_AWG_I1="$(extract_awg_value 'i1' "$show_output")"
-      DETECTED_AWG_I2="$(extract_awg_value 'i2' "$show_output")"
-      DETECTED_AWG_I3="$(extract_awg_value 'i3' "$show_output")"
-      DETECTED_AWG_I4="$(extract_awg_value 'i4' "$show_output")"
-      DETECTED_AWG_I5="$(extract_awg_value 'i5' "$show_output")"
+
+    interface_name="$(extract_awg_show_value 'interface' "$show_output")"
+    [[ -n "$interface_name" ]] && DETECTED_INTERFACE="$interface_name"
+
+    DETECTED_PUBLIC_KEY="$(extract_awg_show_value 'public key' "$show_output")"
+    DETECTED_LISTEN_PORT="$(extract_awg_show_value 'listening port' "$show_output")"
+
+    DETECTED_CONFIG_PATH="$(find_awg_config_path "$DETECTED_CONTAINER" "$DETECTED_INTERFACE")"
+    if [[ -n "$DETECTED_CONFIG_PATH" ]]; then
+      conf_output="$(docker_exec_sh "$DETECTED_CONTAINER" "cat '$DETECTED_CONFIG_PATH'")"
+
+      if [[ -z "$DETECTED_LISTEN_PORT" ]]; then
+        DETECTED_LISTEN_PORT="$(parse_conf_value 'ListenPort' "$conf_output")"
+      fi
+
+      if [[ -z "$DETECTED_PUBLIC_KEY" ]]; then
+        private_key="$(parse_conf_value 'PrivateKey' "$conf_output")"
+        private_key="$(printf '%s' "$private_key" | tr -d '\r' | xargs 2>/dev/null || true)"
+        DETECTED_PUBLIC_KEY="$(derive_public_key_from_private "$DETECTED_CONTAINER" "$private_key")"
+      fi
+
+      DETECTED_AWG_JC="$(parse_conf_value 'Jc' "$conf_output")"
+      DETECTED_AWG_JMIN="$(parse_conf_value 'Jmin' "$conf_output")"
+      DETECTED_AWG_JMAX="$(parse_conf_value 'Jmax' "$conf_output")"
+      DETECTED_AWG_S1="$(parse_conf_value 'S1' "$conf_output")"
+      DETECTED_AWG_S2="$(parse_conf_value 'S2' "$conf_output")"
+      DETECTED_AWG_S3="$(parse_conf_value 'S3' "$conf_output")"
+      DETECTED_AWG_S4="$(parse_conf_value 'S4' "$conf_output")"
+      DETECTED_AWG_H1="$(parse_conf_value 'H1' "$conf_output")"
+      DETECTED_AWG_H2="$(parse_conf_value 'H2' "$conf_output")"
+      DETECTED_AWG_H3="$(parse_conf_value 'H3' "$conf_output")"
+      DETECTED_AWG_H4="$(parse_conf_value 'H4' "$conf_output")"
+      DETECTED_AWG_I1="$(parse_conf_value 'I1' "$conf_output")"
+      DETECTED_AWG_I2="$(parse_conf_value 'I2' "$conf_output")"
+      DETECTED_AWG_I3="$(parse_conf_value 'I3' "$conf_output")"
+      DETECTED_AWG_I4="$(parse_conf_value 'I4' "$conf_output")"
+      DETECTED_AWG_I5="$(parse_conf_value 'I5' "$conf_output")"
     fi
   fi
 
-  [[ -z "$DETECTED_INTERFACE" ]] && DETECTED_INTERFACE="${configured_interface:-awg0}"
-  host="$(get_public_host)"
-  if [[ -n "$host" && -n "$DETECTED_LISTEN_PORT" ]]; then
-    DETECTED_SERVER_IP="${host}:${DETECTED_LISTEN_PORT}"
+  if [[ -z "$DETECTED_PUBLIC_HOST" ]]; then
+    DETECTED_PUBLIC_HOST="$(printf '%s' "$DETECTED_SERVER_NAME" | tr -d '[:space:]')"
+    if [[ "$(is_hostname_like "$DETECTED_PUBLIC_HOST")" != "1" ]]; then
+      DETECTED_PUBLIC_HOST=""
+    fi
+  fi
+
+  if [[ -n "$DETECTED_PUBLIC_HOST" && -n "$DETECTED_LISTEN_PORT" ]]; then
+    DETECTED_SERVER_IP="${DETECTED_PUBLIC_HOST}:${DETECTED_LISTEN_PORT}"
   else
     DETECTED_SERVER_IP="$(get_env_value SERVER_IP)"
   fi
 }
 
 print_detected_awg_summary() {
-  local pk_summary="не найден"
-  [[ -n "$DETECTED_PUBLIC_KEY" ]] && pk_summary="${DETECTED_PUBLIC_KEY:0:16}..."
   print_line
   echo "Автоподбор AWG:"
   echo "Контейнер: ${DETECTED_CONTAINER:-не найден}"
   echo "Интерфейс: ${DETECTED_INTERFACE:-не найден}"
-  echo "Public key: ${pk_summary}"
+  echo "Конфиг: ${DETECTED_CONFIG_PATH:-не найден}"
+  echo "Public key: ${DETECTED_PUBLIC_KEY:+найден}${DETECTED_PUBLIC_KEY:-не найден}"
   echo "Endpoint: ${DETECTED_SERVER_IP:-не найден}"
   echo "Имя сервера: ${DETECTED_SERVER_NAME:-не найдено}"
   print_line
-}
-
-validate_awg_detection() {
-  local ok=0
-  if [[ -n "$DETECTED_CONTAINER" ]]; then
-    ok=1
-  else
-    warn "Не удалось автоматически найти AWG-контейнер."
-  fi
-  if [[ -z "$DETECTED_PUBLIC_KEY" ]]; then
-    warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
-  fi
-  if [[ -z "$DETECTED_SERVER_IP" ]]; then
-    warn "Не удалось автоматически определить внешний SERVER_IP."
-    warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
-  fi
-  return 0
+  [[ -z "$DETECTED_PUBLIC_KEY" ]] && warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
+  [[ -z "$DETECTED_SERVER_IP" ]] && warn "Не удалось автоматически определить внешний SERVER_IP."
+  [[ -z "$DETECTED_PUBLIC_HOST" ]] && warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
 }
 
 download_repo() {
   local tmp_dir src_dir
   tmp_dir="$(mktemp -d)"
   info "Скачиваю код из ${REPO_URL} (${REPO_BRANCH})..."
-  curl -fL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
+  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
   tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name "${REPO_NAME}-*" | head -n1 || true)"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
     warn "Не удалось скачать корректную структуру репозитория."
-    warn "Содержимое временной папки:"
     ls -la "$tmp_dir" >&2 || true
     [[ -n "$src_dir" ]] && ls -la "$src_dir" >&2 || true
     rm -rf "$tmp_dir"
@@ -420,12 +515,10 @@ download_repo() {
 deploy_repo() {
   local tmp_dir="$1"
   local src_dir backup_dir=""
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name "${REPO_NAME}-*" | head -n1 || true)"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
 
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
     warn "Не найдены файлы репозитория для развёртывания."
-    ls -la "$tmp_dir" >&2 || true
-    [[ -n "$src_dir" ]] && ls -la "$src_dir" >&2 || true
     return 1
   fi
 
@@ -491,12 +584,13 @@ PY
 }
 
 prompt_api_token() {
+  local __resultvar="$1"
   local current token
   current="$(get_env_value API_TOKEN)"
   while true; do
-    token="$(prompt_with_default 'Введите токен Telegram-бота' "$current")"
+    prompt_with_default 'Введите токен Telegram-бота' "$current" token
     if [[ "$token" == *:* ]]; then
-      printf '%s' "$token"
+      printf -v "$__resultvar" '%s' "$token"
       return 0
     fi
     warn "Нужен токен в формате 123456:ABCDEF..."
@@ -504,12 +598,13 @@ prompt_api_token() {
 }
 
 prompt_admin_id() {
+  local __resultvar="$1"
   local current admin_id
   current="$(get_env_value ADMIN_ID)"
   while true; do
-    admin_id="$(prompt_with_default 'Введите Telegram user_id администратора' "$current")"
+    prompt_with_default 'Введите Telegram user_id администратора' "$current" admin_id
     if [[ "$admin_id" =~ ^[0-9]+$ ]]; then
-      printf '%s' "$admin_id"
+      printf -v "$__resultvar" '%s' "$admin_id"
       return 0
     fi
     warn "ADMIN_ID должен быть числом."
@@ -534,6 +629,7 @@ write_detected_awg_env() {
   [[ -n "$DETECTED_INTERFACE" ]] && set_env_value WG_INTERFACE "$DETECTED_INTERFACE"
   [[ -n "$DETECTED_PUBLIC_KEY" ]] && set_env_value SERVER_PUBLIC_KEY "$DETECTED_PUBLIC_KEY"
   [[ -n "$DETECTED_SERVER_IP" ]] && set_env_value SERVER_IP "$DETECTED_SERVER_IP"
+  [[ -n "$DETECTED_PUBLIC_HOST" ]] && set_env_value PUBLIC_HOST "$DETECTED_PUBLIC_HOST"
   [[ -n "$DETECTED_AWG_JC" ]] && set_env_value AWG_JC "$DETECTED_AWG_JC"
   [[ -n "$DETECTED_AWG_JMIN" ]] && set_env_value AWG_JMIN "$DETECTED_AWG_JMIN"
   [[ -n "$DETECTED_AWG_JMAX" ]] && set_env_value AWG_JMAX "$DETECTED_AWG_JMAX"
@@ -553,67 +649,87 @@ write_detected_awg_env() {
 }
 
 configure_manual_awg_only() {
-  local value host port default_endpoint
-  value="$(prompt_with_default 'DOCKER_CONTAINER' "$(pick_existing_or_default "$(get_env_value DOCKER_CONTAINER)" "$DETECTED_CONTAINER")")"
+  local value default
+  default="$(pick_existing_or_default "$(get_env_value DOCKER_CONTAINER)" "$DETECTED_CONTAINER")"
+  prompt_with_default 'DOCKER_CONTAINER' "$default" value
   set_env_value DOCKER_CONTAINER "$value"
 
-  value="$(prompt_with_default 'WG_INTERFACE' "$(pick_existing_or_default "$(get_env_value WG_INTERFACE)" "$DETECTED_INTERFACE")")"
+  default="$(pick_existing_or_default "$(get_env_value WG_INTERFACE)" "$DETECTED_INTERFACE")"
+  prompt_with_default 'WG_INTERFACE' "$default" value
   set_env_value WG_INTERFACE "$value"
 
-  value="$(prompt_with_default 'SERVER_PUBLIC_KEY' "$(pick_existing_or_default "$(get_env_value SERVER_PUBLIC_KEY)" "$DETECTED_PUBLIC_KEY")")"
+  default="$(pick_existing_or_default "$(get_env_value SERVER_PUBLIC_KEY)" "$DETECTED_PUBLIC_KEY")"
+  prompt_with_default 'SERVER_PUBLIC_KEY' "$default" value
   set_env_value SERVER_PUBLIC_KEY "$value"
 
-  host="$(get_public_host)"
-  port="${DETECTED_LISTEN_PORT:-}"
-  default_endpoint="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
-  if [[ -z "$default_endpoint" && -n "$host" && -n "$port" ]]; then
-    default_endpoint="${host}:${port}"
-  fi
-  value="$(prompt_with_default 'SERVER_IP (host:port)' "$default_endpoint")"
+  default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
+  prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
+  set_env_value PUBLIC_HOST "$value"
+
+  default="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
+  prompt_with_default 'SERVER_IP (host:port)' "$default" value
   set_env_value SERVER_IP "$value"
 }
 
 configure_auto_install() {
-  local api_token admin_id server_name secret
+  local api_token admin_id server_name secret value default
 
-  api_token="$(prompt_api_token)"
-  admin_id="$(prompt_admin_id)"
-  server_name="$(prompt_with_default 'Введите название сервера' "$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")")"
+  prompt_api_token api_token
+  prompt_admin_id admin_id
+  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
+  prompt_with_default 'Введите название сервера' "$default" server_name
   secret="$(ensure_secret)"
 
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
   write_detected_awg_env
 
-  if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" || -z "$(get_env_value SERVER_IP)" ]]; then
-    warn "Не всё удалось определить автоматически из AWG. Сейчас будут запрошены только недостающие значения."
-    configure_manual_awg_only
+  if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" ]]; then
+    warn "Не удалось автоматически определить SERVER_PUBLIC_KEY. Нужен один ручной шаг."
+    default="$DETECTED_PUBLIC_KEY"
+    prompt_with_default 'SERVER_PUBLIC_KEY' "$default" value
+    set_env_value SERVER_PUBLIC_KEY "$value"
+  fi
+
+  if [[ -z "$(get_env_value SERVER_IP)" ]]; then
+    warn "Не удалось автоматически определить SERVER_IP. Укажи домен/IP и порт."
+    default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
+    prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
+    set_env_value PUBLIC_HOST "$value"
+    if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
+      set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
+    else
+      default="$DETECTED_SERVER_IP"
+      prompt_with_default 'SERVER_IP (host:port)' "$default" value
+      set_env_value SERVER_IP "$value"
+    fi
   fi
 }
 
 configure_manual_install() {
   local api_token admin_id server_name secret value default
-  api_token="$(prompt_api_token)"
-  admin_id="$(prompt_admin_id)"
-  server_name="$(prompt_with_default 'Введите название сервера' "$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")")"
+  prompt_api_token api_token
+  prompt_admin_id admin_id
+  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
+  prompt_with_default 'Введите название сервера' "$default" server_name
   secret="$(ensure_secret)"
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
 
   configure_manual_awg_only
 
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
-  value="$(prompt_with_default 'Цена 7 дней в Telegram Stars' "$default")"
+  prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
   set_env_value STARS_PRICE_7_DAYS "$value"
 
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
-  value="$(prompt_with_default 'Цена 30 дней в Telegram Stars' "$default")"
+  prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
   set_env_value STARS_PRICE_30_DAYS "$value"
 
   default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
-  value="$(prompt_with_default 'Ссылка на Amnezia / страницу скачивания' "$default")"
+  prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
   set_env_value DOWNLOAD_URL "$value"
 
   default="$(get_env_value SUPPORT_USERNAME)"
-  value="$(prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}")"
+  prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}" value
   set_env_value SUPPORT_USERNAME "$value"
 }
 
@@ -719,10 +835,9 @@ install_or_reinstall_flow() {
   fi
 
   ensure_packages
-  ensure_docker_ready || warn "Продолжаю дальше, но автоподбор AWG может не сработать."
+  ensure_docker_ready || return 1
   detect_awg_environment
   print_detected_awg_summary
-  validate_awg_detection
 
   if [[ "$mode" == "install" ]]; then
     echo "1) Автоматическая установка"
@@ -745,6 +860,7 @@ install_or_reinstall_flow() {
   rm -rf "$tmp_dir"
   ensure_env_file
 
+  detect_awg_environment
   if [[ "$choice" == "1" ]]; then
     configure_auto_install
   else
@@ -769,7 +885,7 @@ update_bot() {
   print_line
   info "Обновление AWG Telegram Bot"
   ensure_packages
-  ensure_docker_ready || warn "Docker сейчас недоступен. Обновление кода продолжится, но автоподбор AWG может быть неполным."
+  ensure_docker_ready || return 1
   check_updates
 
   local tmp_dir api_token admin_id server_name secret
@@ -781,11 +897,11 @@ update_bot() {
 
   api_token="$(get_env_value API_TOKEN)"
   admin_id="$(get_env_value ADMIN_ID)"
-  server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname 2>/dev/null || echo 'My VPN')")"
+  server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
   secret="$(ensure_secret)"
 
-  if [[ -z "$api_token" ]]; then api_token="$(prompt_api_token)"; fi
-  if [[ -z "$admin_id" ]]; then admin_id="$(prompt_admin_id)"; fi
+  if [[ -z "$api_token" ]]; then prompt_api_token api_token; fi
+  if [[ -z "$admin_id" ]]; then prompt_admin_id admin_id; fi
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
 
   detect_awg_environment
@@ -932,6 +1048,7 @@ main_menu() {
 
 require_root
 setup_logging
+setup_tty_fd
 
 if [[ $# -gt 0 ]]; then
   run_action "$1"

@@ -95,13 +95,13 @@ clear_if_tty() {
 prompt_raw() {
   local prompt="$1"
   local __resultvar="$2"
-  local value=""
+  local __input=""
   if has_tty; then
-    if ! read -r -u 3 -p "$prompt" value; then
-      value=""
+    if ! read -r -u 3 -p "$prompt" __input; then
+      __input=""
     fi
   fi
-  printf -v "$__resultvar" '%s' "$value"
+  printf -v "$__resultvar" '%s' "$__input"
 }
 
 prompt_with_default() {

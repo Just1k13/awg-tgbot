@@ -196,13 +196,10 @@ def _awg_settings() -> dict[str, str]:
 def build_client_config(private_key: str, ip: str, psk_key: str) -> str:
     settings = "".join(f"{k} = {v}\n" for k, v in _awg_settings().items())
     return (
-        f"# {SERVER_NAME}\n"
         f"[Interface]\n"
         f"Address = {ip}/32\n"
         f"DNS = {PRIMARY_DNS}, {SECONDARY_DNS}\n"
         f"PrivateKey = {private_key}\n"
-        f"MTU = {CLIENT_MTU}\n"
-        f"Name = {SERVER_NAME}\n"
         f"{settings}\n"
         f"[Peer]\n"
         f"PublicKey = {SERVER_PUBLIC_KEY}\n"

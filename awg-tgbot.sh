@@ -107,28 +107,31 @@ clear_if_tty() {
 
 prompt_raw() {
   local prompt="$1"
+  local __resultvar="$2"
   local value=""
   if has_tty; then
     if ! read -r -u 3 -p "$prompt" value; then
       value=""
     fi
   fi
-  printf '%s' "$value"
+  printf -v "$__resultvar" '%s' "$value"
+  return 0
 }
 
 prompt_with_default() {
   local prompt="$1"
   local default="${2:-}"
+  local __resultvar="$3"
   local value=""
   while true; do
     if [[ -n "$default" ]]; then
-      value="$(prompt_raw "$prompt [$default]: ")"
+      prompt_raw "$prompt [$default]: " value
       value="${value:-$default}"
     else
-      value="$(prompt_raw "$prompt: ")"
+      prompt_raw "$prompt: " value
     fi
     if [[ -n "$value" ]]; then
-      printf '%s' "$value"
+      printf -v "$__resultvar" '%s' "$value"
       return 0
     fi
     warn "Значение не может быть пустым."
@@ -144,7 +147,7 @@ confirm() {
     suffix="[y/N]"
   fi
   while true; do
-    value="$(prompt_raw "$prompt $suffix: ")"
+    prompt_raw "$prompt $suffix: " value
     value="${value:-$default}"
     case "${value,,}" in
       y|yes|д|да) return 0 ;;
@@ -594,7 +597,7 @@ PY
 prompt_api_token() {
   local token
   while true; do
-    token="$(prompt_with_default 'Введите токен Telegram-бота' '')"
+    prompt_with_default 'Введите токен Telegram-бота' '' token
     if [[ "$token" == *:* ]]; then
       printf '%s' "$token"
       return 0
@@ -606,7 +609,7 @@ prompt_api_token() {
 prompt_admin_id() {
   local admin_id
   while true; do
-    admin_id="$(prompt_with_default 'Введите Telegram user_id администратора' '')"
+    prompt_with_default 'Введите Telegram user_id администратора' '' admin_id
     if [[ "$admin_id" =~ ^[0-9]+$ ]]; then
       printf '%s' "$admin_id"
       return 0
@@ -657,33 +660,33 @@ write_detected_awg_env() {
 configure_manual_awg_only() {
   local value default
   default="$(pick_existing_or_default "$(get_env_value DOCKER_CONTAINER)" "$DETECTED_CONTAINER")"
-  value="$(prompt_with_default 'DOCKER_CONTAINER' "$default")"
+  prompt_with_default 'DOCKER_CONTAINER' "$default" value
   set_env_value DOCKER_CONTAINER "$value"
 
   default="$(pick_existing_or_default "$(get_env_value WG_INTERFACE)" "$DETECTED_INTERFACE")"
-  value="$(prompt_with_default 'WG_INTERFACE' "$default")"
+  prompt_with_default 'WG_INTERFACE' "$default" value
   set_env_value WG_INTERFACE "$value"
 
   default="$(pick_existing_or_default "$(get_env_value SERVER_PUBLIC_KEY)" "$DETECTED_PUBLIC_KEY")"
-  value="$(prompt_with_default 'SERVER_PUBLIC_KEY' "$default")"
+  prompt_with_default 'SERVER_PUBLIC_KEY' "$default" value
   set_env_value SERVER_PUBLIC_KEY "$value"
 
   default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-  value="$(prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default")"
+  prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
   set_env_value PUBLIC_HOST "$value"
 
   default="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
-  value="$(prompt_with_default 'SERVER_IP (host:port)' "$default")"
+  prompt_with_default 'SERVER_IP (host:port)' "$default" value
   set_env_value SERVER_IP "$value"
 }
 
 configure_auto_install() {
   local api_token admin_id server_name secret value default
 
-  api_token="$(prompt_api_token)"
-  admin_id="$(prompt_admin_id)"
+  prompt_api_token api_token
+  prompt_admin_id admin_id
   default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  server_name="$(prompt_with_default 'Введите название сервера' "$default")"
+  prompt_with_default 'Введите название сервера' "$default" server_name
   secret="$(ensure_secret)"
 
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
@@ -692,20 +695,20 @@ configure_auto_install() {
   if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" ]]; then
     warn "Не удалось автоматически определить SERVER_PUBLIC_KEY. Нужен один ручной шаг."
     default="$DETECTED_PUBLIC_KEY"
-    value="$(prompt_with_default 'SERVER_PUBLIC_KEY' "$default")"
+    prompt_with_default 'SERVER_PUBLIC_KEY' "$default" value
     set_env_value SERVER_PUBLIC_KEY "$value"
   fi
 
   if [[ -z "$(get_env_value SERVER_IP)" ]]; then
     warn "Не удалось автоматически определить SERVER_IP. Укажи домен/IP и порт."
     default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-    value="$(prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default")"
+    prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
     set_env_value PUBLIC_HOST "$value"
     if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
       set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
     else
       default="$DETECTED_SERVER_IP"
-      value="$(prompt_with_default 'SERVER_IP (host:port)' "$default")"
+      prompt_with_default 'SERVER_IP (host:port)' "$default" value
       set_env_value SERVER_IP "$value"
     fi
   fi
@@ -713,29 +716,29 @@ configure_auto_install() {
 
 configure_manual_install() {
   local api_token admin_id server_name secret value default
-  api_token="$(prompt_api_token)"
-  admin_id="$(prompt_admin_id)"
+  prompt_api_token api_token
+  prompt_admin_id admin_id
   default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  server_name="$(prompt_with_default 'Введите название сервера' "$default")"
+  prompt_with_default 'Введите название сервера' "$default" server_name
   secret="$(ensure_secret)"
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
 
   configure_manual_awg_only
 
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
-  value="$(prompt_with_default 'Цена 7 дней в Telegram Stars' "$default")"
+  prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
   set_env_value STARS_PRICE_7_DAYS "$value"
 
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
-  value="$(prompt_with_default 'Цена 30 дней в Telegram Stars' "$default")"
+  prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
   set_env_value STARS_PRICE_30_DAYS "$value"
 
   default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
-  value="$(prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default")"
+  prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
   set_env_value DOWNLOAD_URL "$value"
 
   default="$(get_env_value SUPPORT_USERNAME)"
-  value="$(prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}")"
+  prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}" value
   set_env_value SUPPORT_USERNAME "$value"
 }
 
@@ -845,7 +848,7 @@ install_or_reinstall_flow() {
     echo "2) Ручная переустановка"
     echo "0) Отмена"
   fi
-  choice="$(prompt_raw "Выбор: ")"
+  prompt_raw "Выбор: " choice
   case "$choice" in
     1|2) ;;
     *) warn "Действие отменено."; return 0 ;;
@@ -903,8 +906,8 @@ update_bot() {
   server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
   secret="$(ensure_secret)"
 
-  if [[ -z "$api_token" ]]; then api_token="$(prompt_api_token)"; fi
-  if [[ -z "$admin_id" ]]; then admin_id="$(prompt_admin_id)"; fi
+  if [[ -z "$api_token" ]]; then prompt_api_token api_token; fi
+  if [[ -z "$admin_id" ]]; then prompt_admin_id admin_id; fi
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
 
   detect_awg_environment
@@ -927,7 +930,7 @@ remove_bot() {
   echo "2) Удалить только сервис и venv, оставить .env и базу"
   echo "0) Отмена"
   local choice=""
-  choice="$(prompt_raw "Выбор: ")"
+  prompt_raw "Выбор: " choice
   case "$choice" in
     1)
       if ! confirm "Точно удалить бот, .env, базу и логи?" "N"; then
@@ -971,7 +974,7 @@ show_logs() {
   echo "4) Смотреть bot.log в реальном времени"
   echo "0) Назад"
   local choice=""
-  choice="$(prompt_raw "Выбор: ")"
+  prompt_raw "Выбор: " choice
   case "$choice" in
     1) journalctl -u "$SERVICE_NAME" -n 100 --no-pager ;;
     2) journalctl -u "$SERVICE_NAME" -f ;;
@@ -1024,7 +1027,7 @@ main_menu() {
   while true; do
     if is_installed; then
       print_installed_menu
-      choice="$(prompt_raw "Выбери действие: ")"
+      prompt_raw "Выбери действие: " choice
       case "$choice" in
         1) install_or_reinstall_flow reinstall ;;
         2) update_bot ;;
@@ -1037,7 +1040,7 @@ main_menu() {
       esac
     else
       print_not_installed_menu
-      choice="$(prompt_raw "Выбери действие: ")"
+      prompt_raw "Выбери действие: " choice
       case "$choice" in
         1) install_or_reinstall_flow install ;;
         2|0) echo "Выход."; exit 0 ;;

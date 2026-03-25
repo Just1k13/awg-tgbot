@@ -1,19 +1,32 @@
-
 import asyncio
 
 from aiogram import Bot, Dispatcher, Router, types
+from aiogram.exceptions import TelegramUnauthorizedError
 
-from awg_backend import bootstrap_protected_peers, check_awg_container, cleanup_expired_subscriptions, expired_subscriptions_worker, get_orphan_awg_peers
-from config import API_TOKEN, ADMIN_ID, CLEANUP_INTERVAL_SECONDS, DOCKER_CONTAINER, WG_INTERFACE, DB_PATH, logger, maybe_set_support_username
+from awg_backend import (
+    bootstrap_protected_peers,
+    check_awg_container,
+    cleanup_expired_subscriptions,
+    expired_subscriptions_worker,
+    get_orphan_awg_peers,
+)
+from config import (
+    ADMIN_ID,
+    API_TOKEN,
+    CLEANUP_INTERVAL_SECONDS,
+    DB_PATH,
+    DOCKER_CONTAINER,
+    WG_INTERFACE,
+    logger,
+    maybe_set_support_username,
+)
 from database import close_shared_db, db_health_info, ensure_db_ready
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
 from payments import router as payments_router
 
-bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 bg_worker_task: asyncio.Task | None = None
-
 
 fallback_router = Router()
 
@@ -32,9 +45,17 @@ dp.include_router(fallback_router)
 async def main():
     global bg_worker_task
 
+    bot = Bot(token=API_TOKEN)
     logger.info("Запуск бота")
     logger.info("DB_PATH=%s", DB_PATH)
     logger.info("DOCKER_CONTAINER=%s WG_INTERFACE=%s", DOCKER_CONTAINER, WG_INTERFACE)
+
+    try:
+        await bot.get_me()
+    except TelegramUnauthorizedError as e:
+        logger.error("Telegram API вернул Unauthorized. Проверь API_TOKEN в .env и перевыпусти токен в BotFather при необходимости.")
+        await bot.session.close()
+        raise RuntimeError("Неверный API_TOKEN") from e
 
     await ensure_db_ready()
 
@@ -43,6 +64,7 @@ async def main():
         logger.info("Контейнер и интерфейс AWG доступны")
     except Exception as e:
         logger.exception("AWG недоступен: %s", e)
+        await bot.session.close()
         raise RuntimeError("AWG недоступен") from e
 
     try:

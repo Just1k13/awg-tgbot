@@ -2,17 +2,14 @@ import ipaddress
 import logging
 import os
 import re
-import secrets
 import socket
 import subprocess
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 ENV_FILE = Path('.env')
 load_dotenv(ENV_FILE)
-
 
 DEFAULT_ENV: dict[str, str] = {
     'DOWNLOAD_URL': 'https://amnezia.org',
@@ -61,11 +58,7 @@ DEFAULT_ENV: dict[str, str] = {
     'IGNORE_PEERS': '',
 }
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
 
@@ -116,24 +109,12 @@ def maybe_set_support_username(username: str | None) -> str:
     return normalized
 
 
-def _set_default(name: str, value: str) -> None:
-    if not os.getenv(name, '').strip() and value is not None:
-        os.environ[name] = value
-        _existing_env.setdefault(name, value)
-
-
 def _command_exists(name: str) -> bool:
     return subprocess.run(['bash', '-lc', f'command -v {name} >/dev/null 2>&1'], check=False).returncode == 0
 
 
 def _run_local_command(args: list[str], timeout: int = 10) -> str:
-    result = subprocess.run(
-        args,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'command failed')
     return result.stdout.strip()
@@ -173,12 +154,7 @@ def _find_awg_container() -> str:
         return configured or DEFAULT_ENV['DOCKER_CONTAINER']
 
     ranked: list[tuple[int, str]] = []
-    patterns = [
-        ('amnezia-awg', 100),
-        ('awg', 70),
-        ('wireguard', 60),
-        ('vpn', 30),
-    ]
+    patterns = [('amnezia-awg', 100), ('awg', 70), ('wireguard', 60), ('vpn', 30)]
     for raw in lines:
         parts = raw.split('\t', 1)
         name = parts[0].strip()
@@ -194,14 +170,6 @@ def _find_awg_container() -> str:
         ranked.sort(reverse=True)
         return ranked[0][1]
     return configured or DEFAULT_ENV['DOCKER_CONTAINER']
-
-
-def _is_ip(value: str) -> bool:
-    try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        return False
 
 
 def _is_public_ip(value: str) -> bool:
@@ -226,43 +194,18 @@ def _detect_public_host() -> str:
         if direct:
             return direct
 
+    host = socket.getfqdn().strip()
+    if _hostname_like(host) and '.' in host:
+        return host
+
     if _command_exists('curl'):
-        endpoints = [
-            'https://api.ipify.org',
-            'https://ifconfig.me/ip',
-            'https://ipv4.icanhazip.com',
-        ]
-        for url in endpoints:
+        for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://ipv4.icanhazip.com'):
             try:
                 value = _run_local_command(['curl', '-4', '-fsSL', url], timeout=8).strip()
                 if _is_public_ip(value):
                     return value
             except Exception:
                 continue
-
-    try:
-        route = _run_local_command(['ip', '-4', 'route', 'get', '1.1.1.1'], timeout=6)
-        match = re.search(r'\bsrc\s+(\d+\.\d+\.\d+\.\d+)\b', route)
-        if match:
-            return match.group(1)
-    except Exception:
-        pass
-
-    try:
-        values = _run_local_command(['hostname', '-I'], timeout=6).split()
-        public_candidates = [v for v in values if _is_public_ip(v)]
-        if public_candidates:
-            return public_candidates[0]
-    except Exception:
-        pass
-
-    try:
-        host = socket.getfqdn().strip()
-        if _hostname_like(host):
-            return host
-    except Exception:
-        pass
-
     return ''
 
 
@@ -315,7 +258,6 @@ def _detect_awg_from_container(container: str, interface_hint: str) -> dict[str,
             logger.info('Автоопределение AWG пропущено: %s', last_error)
         return detected
 
-    interface_name = ''
     mapping = {
         'jc:': 'AWG_JC',
         'jmin:': 'AWG_JMIN',
@@ -334,8 +276,7 @@ def _detect_awg_from_container(container: str, interface_hint: str) -> dict[str,
         line = raw_line.strip()
         lowered = line.lower()
         if lowered.startswith('interface: '):
-            interface_name = line.split(':', 1)[1].strip()
-            detected['WG_INTERFACE'] = interface_name
+            detected['WG_INTERFACE'] = line.split(':', 1)[1].strip()
             continue
         if lowered.startswith('public key: '):
             detected['SERVER_PUBLIC_KEY'] = line.split(':', 1)[1].strip()
@@ -366,81 +307,36 @@ def _detect_awg_from_container(container: str, interface_hint: str) -> dict[str,
     return detected
 
 
-for key, value in DEFAULT_ENV.items():
-    _set_default(key, value)
+def _env_with_runtime_default(name: str, default: str) -> str:
+    value = os.getenv(name, '').strip()
+    if value:
+        return value
+    return default
+
 
 DOCKER_CONTAINER_HINT = _find_awg_container()
-_set_default('DOCKER_CONTAINER', DOCKER_CONTAINER_HINT)
-WG_INTERFACE_HINT = os.getenv('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE']).strip() or DEFAULT_ENV['WG_INTERFACE']
+WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE'])
 _detected_awg = _detect_awg_from_container(DOCKER_CONTAINER_HINT, WG_INTERFACE_HINT)
-for _k, _v in _detected_awg.items():
-    if _k.startswith('DETECTED_'):
-        os.environ[_k] = _v
-        continue
-    if _v and not os.getenv(_k, '').strip():
-        os.environ[_k] = _v
-        _existing_env.setdefault(_k, _v)
-
-if not os.getenv('ENCRYPTION_SECRET', '').strip():
-    generated_secret = secrets.token_urlsafe(32)
-    os.environ['ENCRYPTION_SECRET'] = generated_secret
-    _existing_env.setdefault('ENCRYPTION_SECRET', generated_secret)
-
-if not os.getenv('SERVER_NAME', '').strip():
-    os.environ['SERVER_NAME'] = _detect_server_name()
-    _existing_env.setdefault('SERVER_NAME', os.environ['SERVER_NAME'])
-
-if not os.getenv('SERVER_IP', '').strip():
-    public_host = _detect_public_host()
-    detected_port = os.getenv('DETECTED_HOST_PORT', '').strip() or _detected_awg.get('DETECTED_HOST_PORT', '').strip()
-    if public_host and detected_port:
-        os.environ['SERVER_IP'] = f'{public_host}:{detected_port}'
-        _existing_env.setdefault('SERVER_IP', os.environ['SERVER_IP'])
-
-REQUIRED_PROMPTS: dict[str, str] = {
-    'API_TOKEN': 'Введите токен Telegram-бота (API_TOKEN, не numeric ID)',
-    'ADMIN_ID': 'Введите Telegram user_id администратора (ADMIN_ID)',
-}
+PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', _detect_public_host())
+SERVER_NAME_HINT = _env_with_runtime_default('SERVER_NAME', _detect_server_name())
+SERVER_PUBLIC_KEY_HINT = _env_with_runtime_default('SERVER_PUBLIC_KEY', _detected_awg.get('SERVER_PUBLIC_KEY', '').strip())
+DETECTED_HOST_PORT_HINT = _detected_awg.get('DETECTED_HOST_PORT', '').strip()
+SERVER_IP_HINT = os.getenv('SERVER_IP', '').strip()
+if not SERVER_IP_HINT and PUBLIC_HOST_HINT and DETECTED_HOST_PORT_HINT:
+    SERVER_IP_HINT = f'{PUBLIC_HOST_HINT}:{DETECTED_HOST_PORT_HINT}'
 
 if _detected_awg:
     summary_parts = []
     if _detected_awg.get('WG_INTERFACE'):
-        summary_parts.append(f"container={DOCKER_CONTAINER_HINT}")
-        summary_parts.append(f"interface={_detected_awg['WG_INTERFACE']}")
+        summary_parts.append(f'container={DOCKER_CONTAINER_HINT}')
+        summary_parts.append(f'interface={_deted := _detected_awg["WG_INTERFACE"]}')
     if _detected_awg.get('SERVER_PUBLIC_KEY'):
         summary_parts.append('public_key=найден')
     if _detected_awg.get('DETECTED_HOST_PORT'):
-        summary_parts.append(f"port={_detected_awg['DETECTED_HOST_PORT']}")
-    if os.getenv('SERVER_IP', '').strip():
-        summary_parts.append(f"endpoint={os.getenv('SERVER_IP').strip()}")
+        summary_parts.append(f'port={_detected_awg["DETECTED_HOST_PORT"]}')
+    if SERVER_IP_HINT:
+        summary_parts.append(f'endpoint={SERVER_IP_HINT}')
     logger.info('Автоопределение AWG: %s', ', '.join(summary_parts))
-
-if sys.stdin and sys.stdin.isatty():
-    for key, prompt in REQUIRED_PROMPTS.items():
-        current = os.getenv(key, '').strip()
-        if current:
-            continue
-        value = ''
-        while not value:
-            value = input(f'{prompt}: ').strip()
-        _save_env_value(key, value)
-
-    for key in (
-        'ENCRYPTION_SECRET', 'DOCKER_CONTAINER', 'WG_INTERFACE', 'SERVER_PUBLIC_KEY', 'SERVER_IP',
-        'SERVER_NAME', 'DOWNLOAD_URL', 'SUPPORT_USERNAME', 'VPN_SUBNET_PREFIX',
-        'PRIMARY_DNS', 'SECONDARY_DNS', 'CLIENT_MTU', 'PERSISTENT_KEEPALIVE', 'CLIENT_ALLOWED_IPS',
-        'AWG_JC', 'AWG_JMIN', 'AWG_JMAX', 'AWG_S1', 'AWG_S2', 'AWG_S3', 'AWG_S4',
-        'AWG_H1', 'AWG_H2', 'AWG_H3', 'AWG_H4', 'AWG_I1', 'AWG_I2', 'AWG_I3', 'AWG_I4', 'AWG_I5', 'IGNORE_PEERS',
-        'AWG_PROTOCOL_VERSION', 'AWG_TRANSPORT_PROTO', 'DB_PATH', 'FIRST_CLIENT_OCTET',
-        'MAX_CLIENT_OCTET', 'CONFIGS_PER_USER', 'CLEANUP_INTERVAL_SECONDS',
-        'STARS_PRICE_7_DAYS', 'STARS_PRICE_30_DAYS', 'PURCHASE_CLICK_COOLDOWN_SECONDS',
-        'PURCHASE_RATE_LIMIT_TTL_SECONDS', 'ADMIN_COMMAND_COOLDOWN_SECONDS', 'DOCKER_RETRIES',
-        'DOCKER_RETRY_BASE_DELAY', 'DOCKER_TIMEOUT_SECONDS', 'AWG_PEERS_CACHE_TTL_SECONDS',
-    ):
-        current = os.getenv(key, '').strip()
-        if current:
-            _save_env_value(key, current)
-    load_dotenv(ENV_FILE, override=True)
 
 
 def env_int(name: str, default: int) -> int:
@@ -466,52 +362,53 @@ def env_float(name: str, default: float) -> float:
 API_TOKEN = os.getenv('API_TOKEN', '').strip()
 ADMIN_ID = env_int('ADMIN_ID', 0)
 
-SERVER_PUBLIC_KEY = os.getenv('SERVER_PUBLIC_KEY', '').strip()
-SERVER_IP = os.getenv('SERVER_IP', '').strip()
+SERVER_PUBLIC_KEY = SERVER_PUBLIC_KEY_HINT
+SERVER_IP = SERVER_IP_HINT
+PUBLIC_HOST = PUBLIC_HOST_HINT
 
-DOCKER_CONTAINER = os.getenv('DOCKER_CONTAINER', DEFAULT_ENV['DOCKER_CONTAINER']).strip()
-WG_INTERFACE = os.getenv('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE']).strip()
-DB_PATH = os.getenv('DB_PATH', DEFAULT_ENV['DB_PATH']).strip()
+DOCKER_CONTAINER = _env_with_runtime_default('DOCKER_CONTAINER', DOCKER_CONTAINER_HINT or DEFAULT_ENV['DOCKER_CONTAINER'])
+WG_INTERFACE = _env_with_runtime_default('WG_INTERFACE', _detected_awg.get('WG_INTERFACE', '').strip() or DEFAULT_ENV['WG_INTERFACE'])
+DB_PATH = _env_with_runtime_default('DB_PATH', DEFAULT_ENV['DB_PATH'])
 
-DOWNLOAD_URL = os.getenv('DOWNLOAD_URL', DEFAULT_ENV['DOWNLOAD_URL']).strip()
-SUPPORT_USERNAME = os.getenv('SUPPORT_USERNAME', DEFAULT_ENV['SUPPORT_USERNAME']).strip()
-SERVER_NAME = os.getenv('SERVER_NAME', 'My VPN').strip()
+DOWNLOAD_URL = _env_with_runtime_default('DOWNLOAD_URL', DEFAULT_ENV['DOWNLOAD_URL'])
+SUPPORT_USERNAME = _env_with_runtime_default('SUPPORT_USERNAME', DEFAULT_ENV['SUPPORT_USERNAME'])
+SERVER_NAME = SERVER_NAME_HINT
 
 STARS_PRICE_7_DAYS = env_int('STARS_PRICE_7_DAYS', int(DEFAULT_ENV['STARS_PRICE_7_DAYS']))
 STARS_PRICE_30_DAYS = env_int('STARS_PRICE_30_DAYS', int(DEFAULT_ENV['STARS_PRICE_30_DAYS']))
 
-VPN_SUBNET_PREFIX = os.getenv('VPN_SUBNET_PREFIX', DEFAULT_ENV['VPN_SUBNET_PREFIX']).strip()
+VPN_SUBNET_PREFIX = _env_with_runtime_default('VPN_SUBNET_PREFIX', _detected_awg.get('VPN_SUBNET_PREFIX', '').strip() or DEFAULT_ENV['VPN_SUBNET_PREFIX'])
 FIRST_CLIENT_OCTET = env_int('FIRST_CLIENT_OCTET', int(DEFAULT_ENV['FIRST_CLIENT_OCTET']))
 MAX_CLIENT_OCTET = env_int('MAX_CLIENT_OCTET', int(DEFAULT_ENV['MAX_CLIENT_OCTET']))
 CONFIGS_PER_USER = env_int('CONFIGS_PER_USER', int(DEFAULT_ENV['CONFIGS_PER_USER']))
 CLEANUP_INTERVAL_SECONDS = env_int('CLEANUP_INTERVAL_SECONDS', int(DEFAULT_ENV['CLEANUP_INTERVAL_SECONDS']))
 
-PRIMARY_DNS = os.getenv('PRIMARY_DNS', DEFAULT_ENV['PRIMARY_DNS']).strip()
-SECONDARY_DNS = os.getenv('SECONDARY_DNS', DEFAULT_ENV['SECONDARY_DNS']).strip()
-CLIENT_MTU = os.getenv('CLIENT_MTU', DEFAULT_ENV['CLIENT_MTU']).strip()
-PERSISTENT_KEEPALIVE = os.getenv('PERSISTENT_KEEPALIVE', DEFAULT_ENV['PERSISTENT_KEEPALIVE']).strip()
-CLIENT_ALLOWED_IPS = os.getenv('CLIENT_ALLOWED_IPS', DEFAULT_ENV['CLIENT_ALLOWED_IPS']).strip()
+PRIMARY_DNS = _env_with_runtime_default('PRIMARY_DNS', DEFAULT_ENV['PRIMARY_DNS'])
+SECONDARY_DNS = _env_with_runtime_default('SECONDARY_DNS', DEFAULT_ENV['SECONDARY_DNS'])
+CLIENT_MTU = _env_with_runtime_default('CLIENT_MTU', DEFAULT_ENV['CLIENT_MTU'])
+PERSISTENT_KEEPALIVE = _env_with_runtime_default('PERSISTENT_KEEPALIVE', DEFAULT_ENV['PERSISTENT_KEEPALIVE'])
+CLIENT_ALLOWED_IPS = _env_with_runtime_default('CLIENT_ALLOWED_IPS', DEFAULT_ENV['CLIENT_ALLOWED_IPS'])
 ENCRYPTION_SECRET = os.getenv('ENCRYPTION_SECRET', '').strip()
-IGNORE_PEERS = [p.strip() for p in os.getenv('IGNORE_PEERS', '').split(',') if p.strip()]
+IGNORE_PEERS = [p.strip() for p in os.getenv('IGNORE_PEERS', DEFAULT_ENV['IGNORE_PEERS']).split(',') if p.strip()]
 
-AWG_JC = os.getenv('AWG_JC', DEFAULT_ENV['AWG_JC']).strip()
-AWG_JMIN = os.getenv('AWG_JMIN', DEFAULT_ENV['AWG_JMIN']).strip()
-AWG_JMAX = os.getenv('AWG_JMAX', DEFAULT_ENV['AWG_JMAX']).strip()
-AWG_S1 = os.getenv('AWG_S1', DEFAULT_ENV['AWG_S1']).strip()
-AWG_S2 = os.getenv('AWG_S2', DEFAULT_ENV['AWG_S2']).strip()
-AWG_S3 = os.getenv('AWG_S3', DEFAULT_ENV['AWG_S3']).strip()
-AWG_S4 = os.getenv('AWG_S4', DEFAULT_ENV['AWG_S4']).strip()
-AWG_H1 = os.getenv('AWG_H1', DEFAULT_ENV['AWG_H1']).strip()
-AWG_H2 = os.getenv('AWG_H2', DEFAULT_ENV['AWG_H2']).strip()
-AWG_H3 = os.getenv('AWG_H3', DEFAULT_ENV['AWG_H3']).strip()
-AWG_H4 = os.getenv('AWG_H4', DEFAULT_ENV['AWG_H4']).strip()
-AWG_I1 = os.getenv('AWG_I1', DEFAULT_ENV['AWG_I1']).strip()
-AWG_I2 = os.getenv('AWG_I2', DEFAULT_ENV['AWG_I2']).strip()
-AWG_I3 = os.getenv('AWG_I3', DEFAULT_ENV['AWG_I3']).strip()
-AWG_I4 = os.getenv('AWG_I4', DEFAULT_ENV['AWG_I4']).strip()
-AWG_I5 = os.getenv('AWG_I5', DEFAULT_ENV['AWG_I5']).strip()
-AWG_PROTOCOL_VERSION = os.getenv('AWG_PROTOCOL_VERSION', DEFAULT_ENV['AWG_PROTOCOL_VERSION']).strip()
-AWG_TRANSPORT_PROTO = os.getenv('AWG_TRANSPORT_PROTO', DEFAULT_ENV['AWG_TRANSPORT_PROTO']).strip()
+AWG_JC = _env_with_runtime_default('AWG_JC', _detected_awg.get('AWG_JC', '').strip() or DEFAULT_ENV['AWG_JC'])
+AWG_JMIN = _env_with_runtime_default('AWG_JMIN', _detected_awg.get('AWG_JMIN', '').strip() or DEFAULT_ENV['AWG_JMIN'])
+AWG_JMAX = _env_with_runtime_default('AWG_JMAX', _detected_awg.get('AWG_JMAX', '').strip() or DEFAULT_ENV['AWG_JMAX'])
+AWG_S1 = _env_with_runtime_default('AWG_S1', _detected_awg.get('AWG_S1', '').strip() or DEFAULT_ENV['AWG_S1'])
+AWG_S2 = _env_with_runtime_default('AWG_S2', _detected_awg.get('AWG_S2', '').strip() or DEFAULT_ENV['AWG_S2'])
+AWG_S3 = _env_with_runtime_default('AWG_S3', _detected_awg.get('AWG_S3', '').strip() or DEFAULT_ENV['AWG_S3'])
+AWG_S4 = _env_with_runtime_default('AWG_S4', _detected_awg.get('AWG_S4', '').strip() or DEFAULT_ENV['AWG_S4'])
+AWG_H1 = _env_with_runtime_default('AWG_H1', _detected_awg.get('AWG_H1', '').strip() or DEFAULT_ENV['AWG_H1'])
+AWG_H2 = _env_with_runtime_default('AWG_H2', _detected_awg.get('AWG_H2', '').strip() or DEFAULT_ENV['AWG_H2'])
+AWG_H3 = _env_with_runtime_default('AWG_H3', _detected_awg.get('AWG_H3', '').strip() or DEFAULT_ENV['AWG_H3'])
+AWG_H4 = _env_with_runtime_default('AWG_H4', _detected_awg.get('AWG_H4', '').strip() or DEFAULT_ENV['AWG_H4'])
+AWG_I1 = _env_with_runtime_default('AWG_I1', DEFAULT_ENV['AWG_I1'])
+AWG_I2 = _env_with_runtime_default('AWG_I2', DEFAULT_ENV['AWG_I2'])
+AWG_I3 = _env_with_runtime_default('AWG_I3', DEFAULT_ENV['AWG_I3'])
+AWG_I4 = _env_with_runtime_default('AWG_I4', DEFAULT_ENV['AWG_I4'])
+AWG_I5 = _env_with_runtime_default('AWG_I5', DEFAULT_ENV['AWG_I5'])
+AWG_PROTOCOL_VERSION = _env_with_runtime_default('AWG_PROTOCOL_VERSION', DEFAULT_ENV['AWG_PROTOCOL_VERSION'])
+AWG_TRANSPORT_PROTO = _env_with_runtime_default('AWG_TRANSPORT_PROTO', DEFAULT_ENV['AWG_TRANSPORT_PROTO'])
 
 PURCHASE_CLICK_COOLDOWN_SECONDS = env_int('PURCHASE_CLICK_COOLDOWN_SECONDS', int(DEFAULT_ENV['PURCHASE_CLICK_COOLDOWN_SECONDS']))
 PURCHASE_RATE_LIMIT_TTL_SECONDS = env_int('PURCHASE_RATE_LIMIT_TTL_SECONDS', int(DEFAULT_ENV['PURCHASE_RATE_LIMIT_TTL_SECONDS']))
@@ -527,14 +424,14 @@ if not API_TOKEN:
 if ADMIN_ID <= 0:
     required_missing.append('ADMIN_ID')
 if not SERVER_PUBLIC_KEY:
-    required_missing.append('SERVER_PUBLIC_KEY (не удалось определить из docker exec awg show)')
+    required_missing.append('SERVER_PUBLIC_KEY')
 if not SERVER_IP:
-    required_missing.append('SERVER_IP (не удалось собрать из внешнего IP/домена и порта контейнера)')
+    required_missing.append('SERVER_IP')
 if not ENCRYPTION_SECRET:
     required_missing.append('ENCRYPTION_SECRET')
 if required_missing:
     raise RuntimeError(
         'Не заданы переменные окружения: '
         + ', '.join(required_missing)
-        + '. Запустите бота на том же сервере, где доступен docker и контейнер AmneziaWG, либо заполните .env вручную.'
+        + '. Запусти установщик awg-tgbot.sh или заполни .env вручную.'
     )

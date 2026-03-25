@@ -130,37 +130,9 @@ journalctl -u vpn-bot.service -f
 tail -f /var/log/awg-tgbot/bot.log
 ```
 
-Обновление:
+## Важно
 
-```bash
-sudo awg-tgbot update
-```
-
-Проверка обновлений:
-
-```bash
-sudo awg-tgbot check-updates
-```
-
-Удаление:
-
-```bash
-sudo awg-tgbot remove
-```
-
-## Если installer упирается в apt lock
-
-Иногда Ubuntu запускает `unattended-upgrades` и временно блокирует `apt/dpkg`.
-Новый installer ждёт освобождения lock автоматически. Если процесс слишком долго не заканчивается, просто запусти установку чуть позже.
-
-## Если бот не стартует
-
-Проверь:
-
-1. правильный ли `API_TOKEN`
-2. правильный ли `ADMIN_ID`
-3. доступен ли Docker
-4. существует ли контейнер AWG
-5. корректны ли переменные в `/opt/amnezia/bot/.env`
-6. логи `journalctl -u vpn-bot.service -f`
-
+- `API_TOKEN` и `ADMIN_ID` при установке вводятся руками и не подставляются автоматически
+- если бот пишет `Telegram server says - Unauthorized`, токен нужно перевыпустить в BotFather и обновить в `.env`
+- `ENCRYPTION_SECRET` должен быть задан в `.env`; установщик создаёт его автоматически
+- `config.py` больше не делает интерактивный ввод при импорте и не переписывает `.env` сам по себе

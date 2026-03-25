@@ -350,20 +350,15 @@ derive_public_key_from_private() {
 }
 
 get_public_host() {
-  local value hostf route
+  local value route
   for value in "$(get_env_value PUBLIC_HOST)" "$(get_env_value SERVER_HOST)" "$(get_env_value SERVER_DOMAIN)" "${PUBLIC_HOST:-}" "${SERVER_HOST:-}" "${SERVER_DOMAIN:-}"; do
     value="$(printf '%s' "$value" | tr -d '[:space:]')"
     [[ -z "$value" ]] && continue
-    if [[ "$(is_public_ipv4 "$value")" == "1" || "$(is_hostname_like "$value")" == "1" ]]; then
+    if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
       printf '%s' "$value"
       return 0
     fi
   done
-  hostf="$(hostname -f 2>/dev/null || true)"
-  if [[ "$(is_hostname_like "$hostf")" == "1" && "$hostf" == *.* ]]; then
-    printf '%s' "$hostf"
-    return 0
-  fi
   if require_command curl; then
     local url
     for url in 'https://api.ipify.org' 'https://ifconfig.me/ip' 'https://ipv4.icanhazip.com'; do
@@ -480,7 +475,7 @@ print_detected_awg_summary() {
   print_line
   [[ -z "$DETECTED_PUBLIC_KEY" ]] && warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
   [[ -z "$DETECTED_SERVER_IP" ]] && warn "Не удалось автоматически определить внешний SERVER_IP."
-  [[ -z "$DETECTED_PUBLIC_HOST" ]] && warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
+  [[ -z "$DETECTED_PUBLIC_HOST" ]] && warn "Если внешний IP не определился — укажи PUBLIC_HOST / внешний IP вручную."
   return 0
 }
 
@@ -634,10 +629,10 @@ configure_manual_awg_only() {
   prompt_with_default 'SERVER_PUBLIC_KEY' "$default" value
   set_env_value SERVER_PUBLIC_KEY "$value"
   default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-  prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
+  prompt_with_default 'PUBLIC_HOST / внешний IP' "$default" value
   set_env_value PUBLIC_HOST "$value"
   default="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
-  prompt_with_default 'SERVER_IP (host:port)' "$default" value
+  prompt_with_default 'SERVER_IP (IP:port)' "$default" value
   set_env_value SERVER_IP "$value"
   return 0
 }
@@ -657,14 +652,14 @@ configure_auto_install() {
     set_env_value SERVER_PUBLIC_KEY "$value"
   fi
   if [[ -z "$(get_env_value SERVER_IP)" ]]; then
-    warn "Не удалось автоматически определить SERVER_IP. Укажи домен/IP и порт."
+    warn "Не удалось автоматически определить SERVER_IP. Укажи внешний IP и порт."
     default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-    prompt_with_default 'PUBLIC_HOST / домен / внешний IP' "$default" value
+    prompt_with_default 'PUBLIC_HOST / внешний IP' "$default" value
     set_env_value PUBLIC_HOST "$value"
     if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
       set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
     else
-      prompt_with_default 'SERVER_IP (host:port)' "$DETECTED_SERVER_IP" value
+      prompt_with_default 'SERVER_IP (IP:port)' "$DETECTED_SERVER_IP" value
       set_env_value SERVER_IP "$value"
     fi
   fi

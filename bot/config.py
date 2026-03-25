@@ -188,15 +188,27 @@ def _hostname_like(value: str) -> bool:
     return bool(re.fullmatch(r'[A-Za-z0-9.-]+', value))
 
 
+def _resolve_public_ipv4(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ''
+    if _is_public_ip(value):
+        return value
+    if _hostname_like(value):
+        try:
+            resolved = socket.gethostbyname(value).strip()
+            if _is_public_ip(resolved):
+                return resolved
+        except Exception:
+            return ''
+    return ''
+
+
 def _detect_public_host() -> str:
     for env_name in ('PUBLIC_HOST', 'SERVER_HOST', 'SERVER_DOMAIN'):
-        direct = os.getenv(env_name, '').strip()
+        direct = _resolve_public_ipv4(os.getenv(env_name, '').strip())
         if direct:
             return direct
-
-    host = socket.getfqdn().strip()
-    if _hostname_like(host) and '.' in host:
-        return host
 
     if _command_exists('curl'):
         for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://ipv4.icanhazip.com'):
@@ -318,10 +330,19 @@ DOCKER_CONTAINER_HINT = _find_awg_container()
 WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE'])
 _detected_awg = _detect_awg_from_container(DOCKER_CONTAINER_HINT, WG_INTERFACE_HINT)
 PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', _detect_public_host())
+PUBLIC_HOST_HINT = _resolve_public_ipv4(PUBLIC_HOST_HINT)
 SERVER_NAME_HINT = _env_with_runtime_default('SERVER_NAME', _detect_server_name())
 SERVER_PUBLIC_KEY_HINT = _env_with_runtime_default('SERVER_PUBLIC_KEY', _detected_awg.get('SERVER_PUBLIC_KEY', '').strip())
 DETECTED_HOST_PORT_HINT = _detected_awg.get('DETECTED_HOST_PORT', '').strip()
-SERVER_IP_HINT = os.getenv('SERVER_IP', '').strip()
+
+_raw_server_ip = os.getenv('SERVER_IP', '').strip()
+SERVER_IP_HINT = ''
+if _raw_server_ip and ':' in _raw_server_ip:
+    raw_host, raw_port = _raw_server_ip.rsplit(':', 1)
+    resolved_host = _resolve_public_ipv4(raw_host)
+    if resolved_host and raw_port.isdigit():
+        SERVER_IP_HINT = f'{resolved_host}:{raw_port}'
+
 if not SERVER_IP_HINT and PUBLIC_HOST_HINT and DETECTED_HOST_PORT_HINT:
     SERVER_IP_HINT = f'{PUBLIC_HOST_HINT}:{DETECTED_HOST_PORT_HINT}'
 

@@ -42,15 +42,15 @@ print_line() {
 }
 
 info() {
-  printf '[*] %s\n' "$*"
+  printf '[*] %s\n' "$*" >&2
 }
 
 ok() {
-  printf '[+] %s\n' "$*"
+  printf '[+] %s\n' "$*" >&2
 }
 
 warn() {
-  printf '[!] %s\n' "$*"
+  printf '[!] %s\n' "$*" >&2
 }
 
 has_tty() {
@@ -165,7 +165,7 @@ download_repo() {
   curl -fsSL "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
   tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
   local src_dir
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
     rm -rf "$tmp_dir"
     warn "Не удалось скачать корректную структуру репозитория."
@@ -177,7 +177,7 @@ download_repo() {
 deploy_repo() {
   local tmp_dir="$1"
   local src_dir
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
   mkdir -p "$INSTALL_DIR" "$STATE_DIR"
 
   local backup_dir=""
@@ -351,7 +351,7 @@ check_updates() {
   if [[ -z "$remote_sha" ]]; then
     warn "Не удалось получить хеш последнего коммита из GitHub."
     print_line
-    return 1
+    return 0
   fi
   echo "Remote: ${remote_sha}"
   if [[ -n "$local_sha" ]]; then
@@ -396,7 +396,7 @@ install_bot() {
 update_bot() {
   if ! is_installed; then
     warn "Бот не установлен. Сначала выбери установку."
-    return 1
+    return 0
   fi
   print_line
   info "Обновление AWG Telegram Bot"
@@ -472,7 +472,7 @@ show_logs() {
   if ! is_installed; then
     warn "Бот не установлен."
     print_line
-    return 1
+    return 0
   fi
   echo "1) Последние 100 строк journalctl"
   echo "2) Смотреть journalctl -f"

@@ -1,5 +1,0 @@
-aiogram
-aiosqlite
-aiohttp
-cryptography
-python-dotenv

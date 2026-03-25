@@ -27,8 +27,6 @@ from handlers_user import router as user_router
 from payments import router as payments_router
 
 dp = Dispatcher()
-dp.message.middleware(DuplicateMessageGuardMiddleware())
-dp.callback_query.middleware(DuplicateCallbackGuardMiddleware())
 bg_worker_task: asyncio.Task | None = None
 
 fallback_router = Router()
@@ -93,6 +91,10 @@ class DuplicateCallbackGuardMiddleware(BaseMiddleware):
                     await event.answer()
                     return
         return await handler(event, data)
+
+
+dp.message.middleware(DuplicateMessageGuardMiddleware())
+dp.callback_query.middleware(DuplicateCallbackGuardMiddleware())
 
 
 @fallback_router.callback_query()

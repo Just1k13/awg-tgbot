@@ -1,13 +1,13 @@
 # awg-tgbot
 
-Telegram-бот для выдачи подписки и конфигов AmneziaWG (AWG) через Amnezia self-hosted.
+Telegram-бот для выдачи подписки и конфигов AmneziaWG (AWG) через уже установленный Amnezia self-hosted.
 
 ## Что умеет
 
 - покупка и продление подписки через Telegram Stars
-- выдача 2 ключей/конфигов для 2 устройств
-- работа с уже установленным AWG в Docker
-- установка, обновление, проверка версии, логи и удаление через один скрипт `awg-tgbot.sh`
+- выдача 2 ключей / конфигов для 2 устройств
+- работа с уже поднятым AWG в Docker
+- установка, переустановка, обновление, проверка версии, логи и удаление через один `awg-tgbot.sh`
 
 ## Структура
 
@@ -27,68 +27,98 @@ awg-tgbot/
    ├─ security_utils.py
    ├─ texts.py
    ├─ ui_constants.py
-   └─ requirements.txt
+   ├─ requirements.txt
+   └─ .env.example
 ```
 
-## Требования
+## Что нужно до установки
 
-Перед установкой на сервере уже должны быть:
-
-- Ubuntu/Debian
+- Ubuntu / Debian
 - root-доступ
 - установленный и рабочий Docker
 - уже поднятый контейнер AmneziaWG / AWG
-- Telegram bot token
+- токен Telegram-бота
 - Telegram user_id администратора
 
-## Быстрая установка
-
-Запусти одной командой:
+## Быстрый запуск
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash
 ```
 
-или:
+или
 
 ```bash
 wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash
 ```
 
-После запуска откроется интерактивное меню.
+## Как работает меню
 
-## Меню awg-tgbot.sh
+Если бот **не установлен**:
 
-Скрипт умеет:
+- `1) Установить`
+  - `1) Автоматическая установка`
+  - `2) Ручная установка`
+- `2) Отмена / Выход`
 
-- установить бот
-- обновить бот
-- проверить обновления
-- показать статус
-- показать логи
-- удалить бот
+Если бот **уже установлен**:
 
-После установки меню можно открыть снова так:
+- `1) Переустановить`
+  - `1) Автоматическая переустановка`
+  - `2) Ручная переустановка`
+- `2) Обновить`
+- `3) Удалить`
+- `4) Проверить обновления`
+- `5) Статус`
+- `6) Логи`
 
-```bash
-sudo awg-tgbot
-```
+## Автоматическая установка
 
-или:
+В авто-режиме скрипт:
 
-```bash
-sudo bash /opt/amnezia/bot/awg-tgbot.sh
-```
+- проверяет зависимости
+- пытается найти AWG-контейнер
+- пытается определить интерфейс, public key и endpoint
+- спрашивает только:
+  - `API_TOKEN`
+  - `ADMIN_ID`
+  - название сервера
 
-## Где ставится бот
+Если `SERVER_PUBLIC_KEY` или `SERVER_IP` не удалось определить автоматически, скрипт попросит ввести только недостающие значения.
+
+## Ручная установка
+
+В ручном режиме дополнительно можно задать:
+
+- `DOCKER_CONTAINER`
+- `WG_INTERFACE`
+- `SERVER_PUBLIC_KEY`
+- `SERVER_IP`
+- цены Stars
+- ссылку на Amnezia
+- username поддержки
+
+## Куда всё ставится
 
 - код: `/opt/amnezia/bot`
-- bot dir: `/opt/amnezia/bot/bot`
+- бот: `/opt/amnezia/bot/bot`
 - env: `/opt/amnezia/bot/.env`
 - venv: `/opt/amnezia/bot/.venv`
 - systemd service: `vpn-bot.service`
 - install log: `/var/log/awg-tgbot-install.log`
 - app log: `/var/log/awg-tgbot/bot.log`
+
+## Повторный запуск меню
+
+```bash
+sudo awg-tgbot
+```
+
+или
+
+```bash
+sudo bash /opt/amnezia/bot/awg-tgbot.sh
+```
 
 ## Полезные команды
 
@@ -110,43 +140,29 @@ journalctl -u vpn-bot.service -f
 tail -f /var/log/awg-tgbot/bot.log
 ```
 
-Перезапуск:
-
-```bash
-systemctl restart vpn-bot.service
-```
-
-## Обновление
-
-Обновить можно через меню `awg-tgbot.sh` или командой:
+Обновление:
 
 ```bash
 sudo awg-tgbot update
 ```
 
-Проверить наличие обновления:
+Проверка обновлений:
 
 ```bash
 sudo awg-tgbot check-updates
 ```
 
-## Удаление
-
-Удалить можно через меню или командой:
+Удаление:
 
 ```bash
 sudo awg-tgbot remove
 ```
 
-Есть 2 варианта удаления:
-
-1. удалить только сервис и venv, но оставить код, `.env` и базу
-2. удалить всё полностью
-
 ## Важно
 
 - скрипт сам создаёт `ENCRYPTION_SECRET`, если его ещё нет
-- если в репозитории нет `bot/.env.example`, установка всё равно продолжится, `.env` будет создан автоматически
+- если у сервера есть домен, лучше использовать его как endpoint
+- если автоопределение внешнего адреса не сработало, укажи `SERVER_IP` вручную в формате `host:port`
 - по умолчанию используется ветка `main`
 
 ## Если бот не стартует
@@ -158,8 +174,6 @@ sudo awg-tgbot remove
 3. доступен ли Docker
 4. существует ли контейнер AWG
 5. корректны ли переменные в `/opt/amnezia/bot/.env`
-6. логи `journalctl -u vpn-bot.service -f`
-
----
-
-Если репозиторий приватный или у тебя другая ветка, поправь `REPO_OWNER`, `REPO_NAME` и `REPO_BRANCH` в `awg-tgbot.sh`.
+6. логи:
+   - `journalctl -u vpn-bot.service -f`
+   - `tail -f /var/log/awg-tgbot/bot.log`

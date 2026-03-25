@@ -24,8 +24,6 @@ PYTHON_BIN="/usr/bin/python3"
 TTY_DEVICE="/dev/tty"
 SELF_SYMLINK="/usr/local/bin/awg-tgbot"
 
-trap 'printf "[!] Ошибка на строке %s. Подробности: %s\n" "$LINENO" "$INSTALL_LOG" >&2' ERR
-
 print_line() {
   printf '%s\n' "------------------------------------------------------------"
 }
@@ -41,6 +39,8 @@ ok() {
 warn() {
   printf '[!] %s\n' "$*" >&2
 }
+
+trap 'printf "[!] Ошибка на строке %s. Подробности: %s\n" "$LINENO" "$INSTALL_LOG" >&2' ERR
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -170,11 +170,24 @@ ensure_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   apt-get install -y --no-install-recommends \
-    ca-certificates curl tar gzip openssl python3 python3-venv python3-pip
+    ca-certificates curl tar gzip openssl python3 python3-venv python3-pip iproute2
   if ! require_command docker; then
     warn "Docker не найден. Устанавливаю docker.io..."
     apt-get install -y --no-install-recommends docker.io
   fi
+}
+
+docker_is_accessible() {
+  require_command docker && docker ps >/dev/null 2>&1
+}
+
+ensure_docker_ready() {
+  if ! docker_is_accessible; then
+    warn "Docker недоступен. Проверь, что docker установлен и daemon запущен."
+    warn "Подсказка: systemctl status docker --no-pager"
+    return 1
+  fi
+  return 0
 }
 
 pick_existing_or_default() {
@@ -187,14 +200,38 @@ pick_existing_or_default() {
   fi
 }
 
+is_public_ipv4() {
+  local value="$1"
+  "$PYTHON_BIN" - "$value" <<'PY'
+import ipaddress, sys
+value = sys.argv[1].strip()
+try:
+    addr = ipaddress.ip_address(value)
+    ok = addr.version == 4 and not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved)
+    print("1" if ok else "0")
+except ValueError:
+    print("0")
+PY
+}
+
+is_hostname_like() {
+  local value="$1"
+  "$PYTHON_BIN" - "$value" <<'PY'
+import re, sys
+value = sys.argv[1].strip()
+ok = bool(value) and ' ' not in value and ':' not in value and len(value) <= 253 and value.lower() not in {"localhost"} and bool(re.fullmatch(r"[A-Za-z0-9.-]+", value))
+print("1" if ok else "0")
+PY
+}
+
 find_awg_container() {
   local current
   current="$(get_env_value DOCKER_CONTAINER)"
-  if [[ -n "$current" ]] && docker inspect "$current" >/dev/null 2>&1; then
+  if [[ -n "$current" ]] && docker_is_accessible && docker inspect "$current" >/dev/null 2>&1; then
     printf '%s' "$current"
     return 0
   fi
-  if ! require_command docker; then
+  if ! docker_is_accessible; then
     printf '%s' "$current"
     return 0
   fi
@@ -225,38 +262,44 @@ extract_awg_value() {
 }
 
 get_public_host() {
-  local current direct value route
+  local current direct value fqdn
   current="$(get_env_value SERVER_IP)"
   if [[ -n "$current" && "$current" == *:* ]]; then
     printf '%s' "${current%:*}"
     return 0
   fi
-  for direct in "${PUBLIC_HOST:-}" "${SERVER_HOST:-}" "${SERVER_DOMAIN:-}"; do
-    if [[ -n "$direct" ]]; then
+
+  for direct in "$(get_env_value PUBLIC_HOST)" "${PUBLIC_HOST:-}" "$(get_env_value SERVER_HOST)" "${SERVER_HOST:-}" "$(get_env_value SERVER_DOMAIN)" "${SERVER_DOMAIN:-}"; do
+    direct="${direct// /}"
+    if [[ -z "$direct" ]]; then
+      continue
+    fi
+    if [[ "$(is_public_ipv4 "$direct")" == "1" || "$(is_hostname_like "$direct")" == "1" ]]; then
       printf '%s' "$direct"
       return 0
     fi
   done
+
   if require_command curl; then
     for url in \
       "https://api.ipify.org" \
       "https://ifconfig.me/ip" \
       "https://ipv4.icanhazip.com"; do
       value="$(curl -4 -fsSL "$url" 2>/dev/null | tr -d '[:space:]' || true)"
-      if [[ "$value" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
         printf '%s' "$value"
         return 0
       fi
     done
   fi
-  route="$(ip -4 route get 1.1.1.1 2>/dev/null || true)"
-  value="$(grep -oE 'src [0-9.]+$' <<< "$route" | awk '{print $2}' || true)"
-  if [[ -n "$value" ]]; then
-    printf '%s' "$value"
+
+  fqdn="$(hostname -f 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "$(is_hostname_like "$fqdn")" == "1" ]]; then
+    printf '%s' "$fqdn"
     return 0
   fi
-  value="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-  printf '%s' "$value"
+
+  printf '%s' ""
 }
 
 detect_awg_environment() {
@@ -289,12 +332,12 @@ detect_awg_environment() {
   DETECTED_CONTAINER="$(pick_existing_or_default "$configured_container" "$(find_awg_container)")"
   DETECTED_SERVER_NAME="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname 2>/dev/null || echo 'My VPN')")"
 
-  if [[ -n "$DETECTED_CONTAINER" ]] && require_command docker && docker inspect "$DETECTED_CONTAINER" >/dev/null 2>&1; then
+  if [[ -n "$DETECTED_CONTAINER" ]] && docker_is_accessible && docker inspect "$DETECTED_CONTAINER" >/dev/null 2>&1; then
     show_output="$(docker exec -i "$DETECTED_CONTAINER" awg show "${configured_interface:-awg0}" 2>/dev/null || true)"
     if [[ -z "$show_output" ]]; then
       show_output="$(docker exec -i "$DETECTED_CONTAINER" awg show 2>/dev/null || true)"
     fi
-    if [[ -n "$show_output" ]]; then
+    if [[ -n "$show_output" && "$show_output" == *"interface:"* ]]; then
       DETECTED_INTERFACE="$(extract_awg_value 'interface' "$show_output")"
       DETECTED_PUBLIC_KEY="$(extract_awg_value 'public key' "$show_output")"
       DETECTED_LISTEN_PORT="$(extract_awg_value 'listening port' "$show_output")"
@@ -327,14 +370,33 @@ detect_awg_environment() {
 }
 
 print_detected_awg_summary() {
+  local pk_summary="не найден"
+  [[ -n "$DETECTED_PUBLIC_KEY" ]] && pk_summary="${DETECTED_PUBLIC_KEY:0:16}..."
   print_line
   echo "Автоподбор AWG:"
   echo "Контейнер: ${DETECTED_CONTAINER:-не найден}"
   echo "Интерфейс: ${DETECTED_INTERFACE:-не найден}"
-  echo "Public key: ${DETECTED_PUBLIC_KEY:+найден}${DETECTED_PUBLIC_KEY:-не найден}"
+  echo "Public key: ${pk_summary}"
   echo "Endpoint: ${DETECTED_SERVER_IP:-не найден}"
   echo "Имя сервера: ${DETECTED_SERVER_NAME:-не найдено}"
   print_line
+}
+
+validate_awg_detection() {
+  local ok=0
+  if [[ -n "$DETECTED_CONTAINER" ]]; then
+    ok=1
+  else
+    warn "Не удалось автоматически найти AWG-контейнер."
+  fi
+  if [[ -z "$DETECTED_PUBLIC_KEY" ]]; then
+    warn "Не удалось автоматически определить SERVER_PUBLIC_KEY."
+  fi
+  if [[ -z "$DETECTED_SERVER_IP" ]]; then
+    warn "Не удалось автоматически определить внешний SERVER_IP."
+    warn "Если у сервера домен — лучше указать PUBLIC_HOST / домен вручную."
+  fi
+  return 0
 }
 
 download_repo() {
@@ -343,7 +405,7 @@ download_repo() {
   info "Скачиваю код из ${REPO_URL} (${REPO_BRANCH})..."
   curl -fL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
   tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name "${REPO_NAME}-*" | head -n1 || true)"
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
     warn "Не удалось скачать корректную структуру репозитория."
     warn "Содержимое временной папки:"
@@ -358,7 +420,7 @@ download_repo() {
 deploy_repo() {
   local tmp_dir="$1"
   local src_dir backup_dir=""
-  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
+  src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d -name "${REPO_NAME}-*" | head -n1 || true)"
 
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
     warn "Не найдены файлы репозитория для развёртывания."
@@ -378,7 +440,10 @@ deploy_repo() {
   rm -rf "$BOT_DIR"
   mkdir -p "$BOT_DIR"
 
-  if cp -a "$src_dir/bot/." "$BOT_DIR/"     && cp "$src_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh"     && chmod +x "$INSTALL_DIR/awg-tgbot.sh"     && ln -sfn "$INSTALL_DIR/awg-tgbot.sh" "$SELF_SYMLINK"; then
+  if cp -a "$src_dir/bot/." "$BOT_DIR/" \
+    && cp "$src_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh" \
+    && chmod +x "$INSTALL_DIR/awg-tgbot.sh" \
+    && ln -sfn "$INSTALL_DIR/awg-tgbot.sh" "$SELF_SYMLINK"; then
     [[ -n "$backup_dir" ]] && rm -rf "$backup_dir"
     return 0
   fi
@@ -416,7 +481,7 @@ ensure_secret() {
   if require_command openssl; then
     secret="$(openssl rand -hex 32)"
   else
-    secret="$(python3 - <<'PY'
+    secret="$("$PYTHON_BIN" - <<'PY'
 import secrets
 print(secrets.token_hex(32))
 PY
@@ -487,10 +552,29 @@ write_detected_awg_env() {
   [[ -n "$DETECTED_AWG_I5" ]] && set_env_value AWG_I5 "$DETECTED_AWG_I5"
 }
 
+configure_manual_awg_only() {
+  local value host port default_endpoint
+  value="$(prompt_with_default 'DOCKER_CONTAINER' "$(pick_existing_or_default "$(get_env_value DOCKER_CONTAINER)" "$DETECTED_CONTAINER")")"
+  set_env_value DOCKER_CONTAINER "$value"
+
+  value="$(prompt_with_default 'WG_INTERFACE' "$(pick_existing_or_default "$(get_env_value WG_INTERFACE)" "$DETECTED_INTERFACE")")"
+  set_env_value WG_INTERFACE "$value"
+
+  value="$(prompt_with_default 'SERVER_PUBLIC_KEY' "$(pick_existing_or_default "$(get_env_value SERVER_PUBLIC_KEY)" "$DETECTED_PUBLIC_KEY")")"
+  set_env_value SERVER_PUBLIC_KEY "$value"
+
+  host="$(get_public_host)"
+  port="${DETECTED_LISTEN_PORT:-}"
+  default_endpoint="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
+  if [[ -z "$default_endpoint" && -n "$host" && -n "$port" ]]; then
+    default_endpoint="${host}:${port}"
+  fi
+  value="$(prompt_with_default 'SERVER_IP (host:port)' "$default_endpoint")"
+  set_env_value SERVER_IP "$value"
+}
+
 configure_auto_install() {
   local api_token admin_id server_name secret
-  detect_awg_environment
-  print_detected_awg_summary
 
   api_token="$(prompt_api_token)"
   admin_id="$(prompt_admin_id)"
@@ -501,28 +585,13 @@ configure_auto_install() {
   write_detected_awg_env
 
   if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" || -z "$(get_env_value SERVER_IP)" ]]; then
-    warn "Не всё удалось определить автоматически из AWG. Скрипт попросит недостающие значения."
+    warn "Не всё удалось определить автоматически из AWG. Сейчас будут запрошены только недостающие значения."
     configure_manual_awg_only
   fi
 }
 
-configure_manual_awg_only() {
-  local value
-  value="$(prompt_with_default 'DOCKER_CONTAINER' "$(pick_existing_or_default "$(get_env_value DOCKER_CONTAINER)" "$DETECTED_CONTAINER")")"
-  set_env_value DOCKER_CONTAINER "$value"
-  value="$(prompt_with_default 'WG_INTERFACE' "$(pick_existing_or_default "$(get_env_value WG_INTERFACE)" "$DETECTED_INTERFACE")")"
-  set_env_value WG_INTERFACE "$value"
-  value="$(prompt_with_default 'SERVER_PUBLIC_KEY' "$(pick_existing_or_default "$(get_env_value SERVER_PUBLIC_KEY)" "$DETECTED_PUBLIC_KEY")")"
-  set_env_value SERVER_PUBLIC_KEY "$value"
-  value="$(prompt_with_default 'SERVER_IP (host:port)' "$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")")"
-  set_env_value SERVER_IP "$value"
-}
-
 configure_manual_install() {
   local api_token admin_id server_name secret value default
-  detect_awg_environment
-  print_detected_awg_summary
-
   api_token="$(prompt_api_token)"
   admin_id="$(prompt_admin_id)"
   server_name="$(prompt_with_default 'Введите название сервера' "$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")")"
@@ -540,7 +609,7 @@ configure_manual_install() {
   set_env_value STARS_PRICE_30_DAYS "$value"
 
   default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
-  value="$(prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default")"
+  value="$(prompt_with_default 'Ссылка на Amnezia / страницу скачивания' "$default")"
   set_env_value DOWNLOAD_URL "$value"
 
   default="$(get_env_value SUPPORT_USERNAME)"
@@ -650,8 +719,10 @@ install_or_reinstall_flow() {
   fi
 
   ensure_packages
+  ensure_docker_ready || warn "Продолжаю дальше, но автоподбор AWG может не сработать."
   detect_awg_environment
   print_detected_awg_summary
+  validate_awg_detection
 
   if [[ "$mode" == "install" ]]; then
     echo "1) Автоматическая установка"
@@ -664,8 +735,7 @@ install_or_reinstall_flow() {
   fi
   prompt_raw "Выбор: " choice
   case "$choice" in
-    1) ;;
-    2) ;;
+    1|2) ;;
     *) warn "Действие отменено."; return 0 ;;
   esac
 
@@ -699,6 +769,7 @@ update_bot() {
   print_line
   info "Обновление AWG Telegram Bot"
   ensure_packages
+  ensure_docker_ready || warn "Docker сейчас недоступен. Обновление кода продолжится, но автоподбор AWG может быть неполным."
   check_updates
 
   local tmp_dir api_token admin_id server_name secret

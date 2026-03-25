@@ -16,6 +16,9 @@ load_dotenv(ENV_FILE)
 
 DEFAULT_ENV: dict[str, str] = {
     'DOWNLOAD_URL': 'https://amnezia.org',
+    'PUBLIC_HOST': '',
+    'SERVER_HOST': '',
+    'SERVER_DOMAIN': '',
     'SUPPORT_USERNAME': '',
     'AWG_I1': '<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>',
     'AWG_PROTOCOL_VERSION': '2',
@@ -252,14 +255,12 @@ def _detect_public_host() -> str:
         public_candidates = [v for v in values if _is_public_ip(v)]
         if public_candidates:
             return public_candidates[0]
-        if values:
-            return values[0]
     except Exception:
         pass
 
     try:
         host = socket.getfqdn().strip()
-        if _hostname_like(host):
+        if _hostname_like(host) and host.lower() != 'localhost':
             return host
     except Exception:
         pass
@@ -427,7 +428,7 @@ if sys.stdin and sys.stdin.isatty():
         _save_env_value(key, value)
 
     for key in (
-        'ENCRYPTION_SECRET', 'DOCKER_CONTAINER', 'WG_INTERFACE', 'SERVER_PUBLIC_KEY', 'SERVER_IP',
+        'ENCRYPTION_SECRET', 'PUBLIC_HOST', 'SERVER_HOST', 'SERVER_DOMAIN', 'DOCKER_CONTAINER', 'WG_INTERFACE', 'SERVER_PUBLIC_KEY', 'SERVER_IP',
         'SERVER_NAME', 'DOWNLOAD_URL', 'SUPPORT_USERNAME', 'VPN_SUBNET_PREFIX',
         'PRIMARY_DNS', 'SECONDARY_DNS', 'CLIENT_MTU', 'PERSISTENT_KEEPALIVE', 'CLIENT_ALLOWED_IPS',
         'AWG_JC', 'AWG_JMIN', 'AWG_JMAX', 'AWG_S1', 'AWG_S2', 'AWG_S3', 'AWG_S4',
@@ -530,7 +531,7 @@ if ADMIN_ID <= 0:
 if not SERVER_PUBLIC_KEY:
     required_missing.append('SERVER_PUBLIC_KEY (не удалось определить из docker exec awg show)')
 if not SERVER_IP:
-    required_missing.append('SERVER_IP (не удалось собрать из внешнего IP/домена и порта контейнера)')
+    required_missing.append('SERVER_IP (не удалось собрать из PUBLIC_HOST / внешнего IP / домена и порта контейнера)')
 if not ENCRYPTION_SECRET:
     required_missing.append('ENCRYPTION_SECRET')
 if required_missing:

@@ -146,7 +146,7 @@ service_exists() { [[ -f "$SERVICE_FILE" ]]; }
 is_installed() { [[ -f "$SERVICE_FILE" && -d "$BOT_DIR" && -f "$BOT_DIR/app.py" ]]; }
 
 has_residual_files() {
-  [[ -d "$INSTALL_DIR" || -e "$SELF_SYMLINK" || -d "$APP_LOG_DIR" || -f "$INSTALL_LOG" || -f "$SERVICE_FILE" ]]
+  [[ -d "$INSTALL_DIR" || -e "$SELF_SYMLINK" || -f "$SERVICE_FILE" ]]
 }
 
 get_env_value() {
@@ -564,11 +564,11 @@ PY
 }
 
 prompt_api_token() {
-  local __resultvar="$1" token=""
+  local __resultvar="$1" __token=""
   while true; do
-    prompt_with_default 'Введите токен Telegram-бота' '' token
-    if [[ "$token" == *:* ]]; then
-      printf -v "$__resultvar" '%s' "$token"
+    prompt_with_default 'Введите токен Telegram-бота' '' __token
+    if [[ "$__token" == *:* ]]; then
+      printf -v "$__resultvar" '%s' "$__token"
       return 0
     fi
     warn "Нужен токен в формате 123456:ABCDEF..."
@@ -576,11 +576,11 @@ prompt_api_token() {
 }
 
 prompt_admin_id() {
-  local __resultvar="$1" admin_id=""
+  local __resultvar="$1" __admin_input=""
   while true; do
-    prompt_with_default 'Введите Telegram user_id администратора' '' admin_id
-    if [[ "$admin_id" =~ ^[0-9]+$ ]]; then
-      printf -v "$__resultvar" '%s' "$admin_id"
+    prompt_with_default 'Введите Telegram user_id администратора' '' __admin_input
+    if [[ "$__admin_input" =~ ^[0-9]+$ ]]; then
+      printf -v "$__resultvar" '%s' "$__admin_input"
       return 0
     fi
     warn "ADMIN_ID должен быть числом."

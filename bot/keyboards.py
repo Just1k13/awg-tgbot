@@ -47,9 +47,16 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
 
 
 def get_instruction_inline_kb(back_callback: str = CB_BACK_TO_PROFILE) -> InlineKeyboardMarkup:
+    refresh_callback = CB_SHOW_INSTRUCTION_PROFILE
+    if back_callback == CB_BACK_TO_CONFIGS:
+        refresh_callback = CB_SHOW_INSTRUCTION_CONFIGS
+    elif back_callback == CB_BACK_TO_ADMIN:
+        refresh_callback = CB_SHOW_INSTRUCTION
+    elif back_callback == CB_BACK_TO_PROFILE:
+        refresh_callback = CB_SHOW_INSTRUCTION_PROFILE
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📖 Обновить инструкцию", callback_data=CB_SHOW_INSTRUCTION)],
+            [InlineKeyboardButton(text="📖 Обновить инструкцию", callback_data=refresh_callback)],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)],
         ]
     )

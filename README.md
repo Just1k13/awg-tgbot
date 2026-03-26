@@ -137,7 +137,7 @@ wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh
 
 ### Бета-ветка (`beta`)
 
-Для тестирования именно `beta` используй запуск с переменной `REPO_BRANCH=beta`:
+Для первичной установки `beta` используй запуск с переменной `REPO_BRANCH=beta`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash
@@ -149,10 +149,10 @@ curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.s
 wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash
 ```
 
-Если потом обновляешь установленную beta-ветку вручную, тоже указывай `REPO_BRANCH=beta`:
+После первой установки ветка сохраняется автоматически в `/opt/amnezia/bot/.state/repo_branch`, поэтому дальнейшие обновления уже можно запускать обычной командой:
 
 ```bash
-sudo REPO_BRANCH=beta awg-tgbot update
+sudo awg-tgbot update
 ```
 
 ---
@@ -237,6 +237,7 @@ sudo REPO_BRANCH=beta awg-tgbot update
 - service: `vpn-bot.service`
 - install log: `/var/log/awg-tgbot-install.log`
 - app log: `/var/log/awg-tgbot/bot.log`
+- выбранная ветка: `/opt/amnezia/bot/.state/repo_branch`
 
 ---
 
@@ -283,7 +284,7 @@ sudo awg-tgbot check-updates
 ### Обновление beta-ветки
 
 ```bash
-sudo REPO_BRANCH=beta awg-tgbot update
+sudo awg-tgbot update
 ```
 
 ---

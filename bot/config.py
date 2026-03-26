@@ -1,8 +1,6 @@
 import ipaddress
 import logging
 import os
-import re
-import socket
 import subprocess
 from pathlib import Path
 
@@ -12,6 +10,7 @@ ENV_FILE = Path('.env')
 load_dotenv(ENV_FILE)
 
 DEFAULT_ENV: dict[str, str] = {
+    'SERVER_NAME': 'My VPN',
     'DOWNLOAD_URL': 'https://amnezia.org',
     'PUBLIC_HOST': '',
     'SUPPORT_USERNAME': '',
@@ -180,35 +179,19 @@ def _is_public_ip(value: str) -> bool:
         return False
 
 
-def _hostname_like(value: str) -> bool:
-    if not value or ' ' in value or ':' in value:
-        return False
-    if len(value) > 253:
-        return False
-    return bool(re.fullmatch(r'[A-Za-z0-9.-]+', value))
-
-
 def _resolve_public_ipv4(value: str) -> str:
     value = value.strip()
     if not value:
         return ''
     if _is_public_ip(value):
         return value
-    if _hostname_like(value):
-        try:
-            resolved = socket.gethostbyname(value).strip()
-            if _is_public_ip(resolved):
-                return resolved
-        except Exception:
-            return ''
     return ''
 
 
 def _detect_public_host() -> str:
-    for env_name in ('PUBLIC_HOST', 'SERVER_HOST', 'SERVER_DOMAIN'):
-        direct = _resolve_public_ipv4(os.getenv(env_name, '').strip())
-        if direct:
-            return direct
+    direct = _resolve_public_ipv4(os.getenv('PUBLIC_HOST', '').strip())
+    if direct:
+        return direct
 
     if _command_exists('curl'):
         for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://ipv4.icanhazip.com'):
@@ -219,19 +202,6 @@ def _detect_public_host() -> str:
             except Exception:
                 continue
     return ''
-
-
-def _detect_server_name() -> str:
-    direct = os.getenv('SERVER_NAME', '').strip()
-    if direct:
-        return direct
-    try:
-        value = _run_local_command(['hostname'], timeout=5).strip()
-        if value:
-            return value
-    except Exception:
-        pass
-    return 'My VPN'
 
 
 def _parse_subnet_prefix(show_output: str) -> str:
@@ -331,7 +301,7 @@ WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_IN
 _detected_awg = _detect_awg_from_container(DOCKER_CONTAINER_HINT, WG_INTERFACE_HINT)
 PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', _detect_public_host())
 PUBLIC_HOST_HINT = _resolve_public_ipv4(PUBLIC_HOST_HINT)
-SERVER_NAME_HINT = _env_with_runtime_default('SERVER_NAME', _detect_server_name())
+SERVER_NAME_HINT = os.getenv('SERVER_NAME', DEFAULT_ENV['SERVER_NAME']).strip() or DEFAULT_ENV['SERVER_NAME']
 SERVER_PUBLIC_KEY_HINT = _env_with_runtime_default('SERVER_PUBLIC_KEY', _detected_awg.get('SERVER_PUBLIC_KEY', '').strip())
 DETECTED_HOST_PORT_HINT = _detected_awg.get('DETECTED_HOST_PORT', '').strip()
 

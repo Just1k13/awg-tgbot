@@ -63,11 +63,15 @@ def get_config_result_kb() -> InlineKeyboardMarkup:
 
 
 def get_admin_inline_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_USERS_HUB), InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
-        [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC), InlineKeyboardButton(text="🧹 Очистить orphan", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_LIST)],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
+            [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC)],
+            [InlineKeyboardButton(text="🧹 Очистить orphan peer", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
+        ]
+    )
 
 
 def get_admin_users_hub_kb() -> InlineKeyboardMarkup:
@@ -138,15 +142,18 @@ def get_back_to_admin_kb() -> InlineKeyboardMarkup:
 
 
 def get_broadcast_confirm_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=CB_BROADCAST_CONFIRM)],
-        [InlineKeyboardButton(text="❌ Отменить", callback_data=CB_BROADCAST_CANCEL)],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_BACK_TO_ADMIN)],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data=CB_BROADCAST_CONFIRM)],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=CB_BROADCAST_CANCEL)],
+        ]
+    )
 
 
 def get_admin_confirm_kb(action_key: str, back_callback: str = CB_BACK_TO_ADMIN) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{action_key}"), InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_{action_key}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{action_key}")],
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_{action_key}")],
+        ]
+    )

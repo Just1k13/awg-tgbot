@@ -16,8 +16,9 @@ from config import (
     VPN_SUBNET_PREFIX, WG_INTERFACE, logger,
 )
 from database import (
-    add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, get_protected_public_keys,
-    get_reserved_ips_from_db, get_reserved_ips_from_db_conn, get_valid_db_public_keys, open_db, write_audit_log,
+    add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall,
+    get_protected_public_keys, get_reserved_ips_from_db, get_reserved_ips_from_db_conn, get_valid_db_public_keys,
+    open_db, write_audit_log,
 )
 from helpers import is_valid_awg_public_key, parse_server_host_port, utc_now_naive
 from security_utils import encrypt_text
@@ -172,6 +173,18 @@ async def count_free_ip_slots() -> int:
     return total_slots - len(used | reserved)
 
 
+def _is_managed_client_ip(ip: str | None) -> bool:
+    if not ip:
+        return False
+    if not ip.startswith(VPN_SUBNET_PREFIX):
+        return False
+    try:
+        octet = int(ip.split(".")[-1])
+    except ValueError:
+        return False
+    return FIRST_CLIENT_OCTET <= octet <= MAX_CLIENT_OCTET
+
+
 def _awg_settings() -> dict[str, str]:
     return {
         "Jc": AWG_JC,
@@ -268,30 +281,89 @@ def encode_vpn_key(payload: dict[str, Any]) -> str:
     return f"vpn://{encoded}"
 
 
+async def _cleanup_legacy_bootstrap_protected_peers() -> tuple[int, int]:
+    rows = await fetchall(
+        "SELECT public_key, reason FROM protected_peers WHERE reason = 'bootstrap-existing-peer'"
+    )
+    if not rows:
+        return 0, 0
 
+    peers = await get_awg_peers()
+    ip_by_key = {
+        (peer.get("public_key") or "").strip(): (peer.get("ip") or "").strip() or None
+        for peer in peers
+        if (peer.get("public_key") or "").strip()
+    }
+
+    removed = 0
+    normalized = 0
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        for public_key, _reason in rows:
+            ip = ip_by_key.get(public_key)
+            if _is_managed_client_ip(ip):
+                await db.execute(
+                    "DELETE FROM protected_peers WHERE public_key = ?",
+                    (public_key,),
+                )
+                removed += 1
+                logger.info(
+                    "Снята legacy-защита с managed peer: %s ip=%s",
+                    public_key,
+                    ip or '-',
+                )
+            else:
+                await db.execute(
+                    "UPDATE protected_peers SET reason = 'bootstrap-system-peer' WHERE public_key = ?",
+                    (public_key,),
+                )
+                normalized += 1
+        await db.commit()
+    finally:
+        await db.close()
+    return removed, normalized
 
 
 async def bootstrap_protected_peers() -> int:
+    removed_legacy, normalized_legacy = await _cleanup_legacy_bootstrap_protected_peers()
+    if removed_legacy or normalized_legacy:
+        logger.info(
+            'Legacy protected peer sync: removed=%s normalized=%s',
+            removed_legacy,
+            normalized_legacy,
+        )
+
     health = await db_health_info()
     if await count_protected_peers() > 0:
-        return 0
+        return removed_legacy
     if health.get('valid_keys_count', 0) > 0:
-        return 0
+        return removed_legacy
+
     peers = await get_awg_peers()
     added = 0
     protected = set(IGNORE_PEERS)
     for peer in peers:
         public_key = (peer.get('public_key') or '').strip()
+        peer_ip = (peer.get('ip') or '').strip() or None
         if not public_key:
             continue
-        reason = 'bootstrap-existing-peer'
         if public_key in protected:
-            reason = 'env-ignore-peer'
-        await add_protected_peer(public_key, reason)
+            await add_protected_peer(public_key, 'env-ignore-peer')
+            added += 1
+            continue
+        if _is_managed_client_ip(peer_ip):
+            logger.info(
+                'Bootstrap: peer оставлен незащищённым для orphan-проверки: %s ip=%s',
+                public_key,
+                peer_ip or '-',
+            )
+            continue
+        await add_protected_peer(public_key, 'bootstrap-system-peer')
         added += 1
     if added:
         logger.info('Добавлено protected peer при первом запуске: %s', added)
-    return added
+    return removed_legacy + added
 
 
 async def get_orphan_awg_peers() -> list[dict[str, str | None]]:

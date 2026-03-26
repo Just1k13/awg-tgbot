@@ -6,7 +6,10 @@ REPO_NAME="awg-tgbot"
 INSTALL_DIR="/opt/amnezia/bot"
 STATE_DIR="${INSTALL_DIR}/.state"
 REPO_BRANCH_FILE="${STATE_DIR}/repo_branch"
-REPO_BRANCH="${REPO_BRANCH:-$(tr -d '\r\n' < "$REPO_BRANCH_FILE" 2>/dev/null || true)}"
+REPO_BRANCH="${REPO_BRANCH:-}"
+if [[ -z "$REPO_BRANCH" && -f "$REPO_BRANCH_FILE" ]]; then
+  REPO_BRANCH="$(tr -d '\r\n' < "$REPO_BRANCH_FILE" 2>/dev/null || true)"
+fi
 REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
@@ -57,6 +60,29 @@ ok() { printf '[+] %s\n' "$*" >&2; }
 warn() { printf '[!] %s\n' "$*" >&2; }
 die() { warn "$*"; exit 1; }
 trap 'printf "[!] Ошибка на строке %s. Подробности: %s\n" "$LINENO" "$INSTALL_LOG" >&2' ERR
+
+branch_label() {
+  case "${1:-main}" in
+    main) printf '%s' 'stable (main)' ;;
+    beta) printf '%s' 'beta' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+sanitize_branch() {
+  case "${1:-}" in
+    beta) printf '%s' 'beta' ;;
+    main|stable) printf '%s' 'main' ;;
+    *) printf '%s' 'main' ;;
+  esac
+}
+
+refresh_repo_urls() {
+  REPO_BRANCH="$(sanitize_branch "$REPO_BRANCH")"
+  RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
+  TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
+  COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
+}
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -128,10 +154,10 @@ prompt_with_default() {
 
 confirm() {
   local prompt="$1"
-  local default="${2:-Y}"
+  local default="${2:-N}"
   local value=""
-  local suffix="[Y/n]"
-  [[ "$default" == "N" ]] && suffix="[y/N]"
+  local suffix="[y/N]"
+  [[ "$default" == "Y" ]] && suffix="[Y/n]"
   while true; do
     prompt_raw "$prompt $suffix: " value
     value="${value:-$default}"
@@ -143,13 +169,18 @@ confirm() {
   done
 }
 
+confirm_phrase() {
+  local phrase="$1"
+  local prompt="${2:-Для подтверждения введи ${phrase}}"
+  local value=""
+  prompt_raw "$prompt: " value
+  [[ "$value" == "$phrase" ]]
+}
+
 require_command() { command -v "$1" >/dev/null 2>&1; }
 service_exists() { [[ -f "$SERVICE_FILE" ]]; }
 is_installed() { [[ -f "$SERVICE_FILE" && -d "$BOT_DIR" && -f "$BOT_DIR/app.py" ]]; }
-
-has_residual_files() {
-  [[ -d "$INSTALL_DIR" || -e "$SELF_SYMLINK" || -f "$SERVICE_FILE" ]]
-}
+has_residual_files() { [[ -d "$INSTALL_DIR" || -e "$SELF_SYMLINK" || -f "$SERVICE_FILE" ]]; }
 
 get_env_value() {
   local key="$1"
@@ -263,6 +294,46 @@ try:
 except Exception:
     print('0')
 PY
+}
+
+is_valid_ip_port() {
+  local value="$1"
+  "$PYTHON_BIN" - "$value" <<'PY'
+import ipaddress, sys
+value = sys.argv[1].strip()
+try:
+    host, port = value.rsplit(':', 1)
+    addr = ipaddress.ip_address(host)
+    ok_ip = addr.version == 4 and not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified or addr.is_reserved)
+    ok_port = port.isdigit() and 1 <= int(port) <= 65535
+    print('1' if (ok_ip and ok_port) else '0')
+except Exception:
+    print('0')
+PY
+}
+
+prompt_public_host() {
+  local default="${1:-}" __resultvar="$2" value=""
+  while true; do
+    prompt_with_default "PUBLIC_HOST / внешний IPv4" "$default" value
+    if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
+      printf -v "$__resultvar" '%s' "$value"
+      return 0
+    fi
+    warn "Нужен публичный IPv4 без порта. Домены и внутренние IP не подходят."
+  done
+}
+
+prompt_server_ip() {
+  local default="${1:-}" __resultvar="$2" value=""
+  while true; do
+    prompt_with_default "SERVER_IP (публичный IPv4:port)" "$default" value
+    if [[ "$(is_valid_ip_port "$value")" == "1" ]]; then
+      printf -v "$__resultvar" '%s' "$value"
+      return 0
+    fi
+    warn "Нужен формат публичный IPv4:port, например 1.2.3.4:51820."
+  done
 }
 
 docker_exec_capture() {
@@ -470,6 +541,10 @@ print_detected_awg_summary() {
   return 0
 }
 
+auto_detection_is_complete() {
+  [[ -n "$DETECTED_PUBLIC_KEY" && -n "$DETECTED_SERVER_IP" ]]
+}
+
 download_repo() {
   local tmp_dir src_dir
   tmp_dir="$(mktemp -d)"
@@ -552,7 +627,7 @@ PY
 prompt_api_token() {
   local __resultvar="$1" __token=""
   while true; do
-    prompt_with_default 'Введите токен Telegram-бота' '' __token
+    prompt_with_default "Введите токен Telegram-бота" "" __token
     if [[ "$__token" == *:* ]]; then
       printf -v "$__resultvar" '%s' "$__token"
       return 0
@@ -564,7 +639,7 @@ prompt_api_token() {
 prompt_admin_id() {
   local __resultvar="$1" __admin_input=""
   while true; do
-    prompt_with_default 'Введите Telegram user_id администратора' '' __admin_input
+    prompt_with_default "Введите Telegram user_id администратора" "" __admin_input
     if [[ "$__admin_input" =~ ^[0-9]+$ ]]; then
       printf -v "$__resultvar" '%s' "$__admin_input"
       return 0
@@ -611,74 +686,48 @@ write_detected_awg_env() {
 configure_manual_awg_only() {
   local value default
   default="$(pick_existing_or_default "$(get_env_value DOCKER_CONTAINER)" "$DETECTED_CONTAINER")"
-  prompt_with_default 'DOCKER_CONTAINER' "$default" value
+  prompt_with_default "DOCKER_CONTAINER" "$default" value
   set_env_value DOCKER_CONTAINER "$value"
+
   default="$(pick_existing_or_default "$(get_env_value WG_INTERFACE)" "$DETECTED_INTERFACE")"
-  prompt_with_default 'WG_INTERFACE' "$default" value
+  prompt_with_default "WG_INTERFACE" "$default" value
   set_env_value WG_INTERFACE "$value"
+
   default="$(pick_existing_or_default "$(get_env_value SERVER_PUBLIC_KEY)" "$DETECTED_PUBLIC_KEY")"
-  prompt_with_default 'SERVER_PUBLIC_KEY' "$default" value
+  prompt_with_default "SERVER_PUBLIC_KEY" "$default" value
   set_env_value SERVER_PUBLIC_KEY "$value"
+
   default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-  prompt_with_default 'PUBLIC_HOST / внешний IP' "$default" value
+  prompt_public_host "$default" value
   set_env_value PUBLIC_HOST "$value"
-  default="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
-  prompt_with_default 'SERVER_IP (IP:port)' "$default" value
+
+  if [[ -n "$DETECTED_LISTEN_PORT" ]]; then
+    default="${value}:${DETECTED_LISTEN_PORT}"
+  else
+    default="$(pick_existing_or_default "$(get_env_value SERVER_IP)" "$DETECTED_SERVER_IP")"
+  fi
+  prompt_server_ip "$default" value
   set_env_value SERVER_IP "$value"
   return 0
 }
 
-configure_auto_install() {
-  local api_token admin_id server_name secret value default
-  prompt_api_token api_token
-  prompt_admin_id admin_id
-  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  prompt_with_default 'Введите название сервера' "$default" server_name
-  secret="$(ensure_secret)"
-  write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
-  write_detected_awg_env
-  if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" ]]; then
-    warn "Не удалось автоматически определить SERVER_PUBLIC_KEY. Нужен один ручной шаг."
-    prompt_with_default 'SERVER_PUBLIC_KEY' "$DETECTED_PUBLIC_KEY" value
-    set_env_value SERVER_PUBLIC_KEY "$value"
-  fi
-  if [[ -z "$(get_env_value SERVER_IP)" ]]; then
-    warn "Не удалось автоматически определить SERVER_IP. Укажи внешний IP и порт."
-    default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-    prompt_with_default 'PUBLIC_HOST / внешний IP' "$default" value
-    set_env_value PUBLIC_HOST "$value"
-    if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
-      set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
-    else
-      prompt_with_default 'SERVER_IP (IP:port)' "$DETECTED_SERVER_IP" value
-      set_env_value SERVER_IP "$value"
-    fi
-  fi
-  return 0
-}
-
-configure_manual_install() {
-  local api_token admin_id server_name secret value default
-  prompt_api_token api_token
-  prompt_admin_id admin_id
-  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  prompt_with_default 'Введите название сервера' "$default" server_name
-  secret="$(ensure_secret)"
-  write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
-  configure_manual_awg_only
+configure_manual_commercial() {
+  local value default
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
-  prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
+  prompt_with_default "Цена 7 дней в Telegram Stars" "$default" value
   set_env_value STARS_PRICE_7_DAYS "$value"
+
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
-  prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
+  prompt_with_default "Цена 30 дней в Telegram Stars" "$default" value
   set_env_value STARS_PRICE_30_DAYS "$value"
+
   default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
-  prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
+  prompt_with_default "Ссылка на Amnezia / инструкцию скачивания" "$default" value
   set_env_value DOWNLOAD_URL "$value"
+
   default="$(get_env_value SUPPORT_USERNAME)"
-  prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}" value
+  prompt_with_default "Username поддержки (можно @username)" "${default:-@support}" value
   set_env_value SUPPORT_USERNAME "$value"
-  return 0
 }
 
 ensure_venv_and_requirements() {
@@ -749,7 +798,7 @@ show_status() {
     echo "Репозиторий: ${REPO_URL}"
     echo "Папка: ${INSTALL_DIR}"
     echo "Сервис: ${SERVICE_NAME}"
-    echo "Ветка: ${REPO_BRANCH}"
+    echo "Ветка: ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))"
     echo "Версия: $(get_local_sha | cut -c1-12)"
     echo "Статус: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
     echo "Автозапуск: $(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true)"
@@ -766,7 +815,7 @@ check_updates() {
   remote_sha="$(fetch_remote_sha)"
   local_sha="$(get_local_sha)"
   print_line
-  echo "Ветка : ${REPO_BRANCH}"
+  echo "Ветка : ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))"
   echo "Remote: ${remote_sha:-не удалось получить}"
   echo "Local : ${local_sha:-нет локальной версии}"
   if [[ -n "$remote_sha" && -n "$local_sha" && "$remote_sha" == "$local_sha" ]]; then
@@ -778,36 +827,69 @@ check_updates() {
   return 0
 }
 
+choose_auto_or_manual() {
+  local __resultvar="$1" choice=""
+  print_line
+  echo "Выбери режим установки:"
+  echo "1) Автоматическая установка"
+  echo "2) Ручная установка"
+  echo "0) Отмена"
+  prompt_raw "Выбор: " choice
+  case "$choice" in
+    1) printf -v "$__resultvar" '%s' 'auto' ;;
+    2) printf -v "$__resultvar" '%s' 'manual' ;;
+    *) printf -v "$__resultvar" '%s' 'cancel' ;;
+  esac
+}
+
+handle_missing_awg_for_auto() {
+  local choice=""
+  print_line
+  warn "Автоматический режим не смог полностью определить AWG."
+  echo "Что сделать дальше:"
+  echo "1) Перейти к ручному вводу AWG параметров"
+  echo "2) Отменить установку / переустановку"
+  prompt_raw "Выбор: " choice
+  case "$choice" in
+    1) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 install_or_reinstall_flow() {
-  local mode="$1" tmp_dir choice api_token admin_id server_name secret value default
+  local mode="$1" tmp_dir install_mode api_token admin_id server_name secret
   print_line
   if [[ "$mode" == "install" ]]; then
     info "Установка AWG Telegram Bot"
-    echo "1) Автоматическая установка"
-    echo "2) Ручная установка"
-    echo "0) Отмена"
   else
     info "Переустановка AWG Telegram Bot"
-    echo "1) Автоматическая переустановка"
-    echo "2) Ручная переустановка"
-    echo "0) Отмена"
+    if ! confirm "Это переустановит код и сервис. Продолжить?" "N"; then
+      warn "Переустановка отменена."
+      return 0
+    fi
   fi
-  prompt_raw "Выбор: " choice
-  case "$choice" in
-    1|2) ;;
-    *) warn "Действие отменено."; return 0 ;;
-  esac
+
+  choose_auto_or_manual install_mode
+  [[ "$install_mode" == "cancel" ]] && { warn "Действие отменено."; return 0; }
 
   prompt_api_token api_token
   prompt_admin_id admin_id
   default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
-  prompt_with_default 'Введите название сервера' "$default" server_name
+  prompt_with_default "Введите название сервера" "$default" server_name
   secret="$(ensure_secret)"
 
   ensure_packages || die "Не удалось установить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
   detect_awg_environment
   print_detected_awg_summary
+
+  if [[ "$install_mode" == "auto" ]] && ! auto_detection_is_complete; then
+    if handle_missing_awg_for_auto; then
+      warn "Установка отменена."
+      return 0
+    fi
+    install_mode="manual"
+  fi
 
   tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
   stop_service_if_exists
@@ -817,39 +899,11 @@ install_or_reinstall_flow() {
 
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
 
-  if [[ "$choice" == "1" ]]; then
+  if [[ "$install_mode" == "auto" ]]; then
     write_detected_awg_env
-    if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" ]]; then
-      warn "Не удалось автоматически определить SERVER_PUBLIC_KEY. Нужен один ручной шаг."
-      prompt_with_default 'SERVER_PUBLIC_KEY' "$DETECTED_PUBLIC_KEY" value
-      set_env_value SERVER_PUBLIC_KEY "$value"
-    fi
-    if [[ -z "$(get_env_value SERVER_IP)" ]]; then
-      warn "Не удалось автоматически определить SERVER_IP. Укажи внешний IP и порт."
-      default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-      prompt_with_default 'PUBLIC_HOST / внешний IP' "$default" value
-      set_env_value PUBLIC_HOST "$value"
-      if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
-        set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
-      else
-        prompt_with_default 'SERVER_IP (IP:port)' "$DETECTED_SERVER_IP" value
-        set_env_value SERVER_IP "$value"
-      fi
-    fi
   else
     configure_manual_awg_only
-    default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
-    prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
-    set_env_value STARS_PRICE_7_DAYS "$value"
-    default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
-    prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
-    set_env_value STARS_PRICE_30_DAYS "$value"
-    default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
-    prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
-    set_env_value DOWNLOAD_URL "$value"
-    default="$(get_env_value SUPPORT_USERNAME)"
-    prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}" value
-    set_env_value SUPPORT_USERNAME "$value"
+    configure_manual_commercial
   fi
 
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
@@ -868,6 +922,10 @@ update_bot() {
   local tmp_dir api_token admin_id server_name secret
   if ! is_installed; then
     warn "Бот не установлен."
+    return 0
+  fi
+  if ! confirm "Обновить бот из ветки ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))?" "N"; then
+    warn "Обновление отменено."
     return 0
   fi
   print_line
@@ -900,6 +958,41 @@ update_bot() {
   ok "Обновление завершено."
   show_status
   return 0
+}
+
+switch_branch_interactive() {
+  local choice="" target=""
+  print_line
+  echo "Текущая ветка: ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))"
+  echo "Куда переключить installer и обновления?"
+  echo "1) stable (main)"
+  echo "2) beta"
+  echo "0) Отмена"
+  prompt_raw "Выбор: " choice
+  case "$choice" in
+    1) target="main" ;;
+    2) target="beta" ;;
+    *) warn "Переключение отменено."; return 0 ;;
+  esac
+
+  if [[ "$target" == "$REPO_BRANCH" ]]; then
+    warn "Эта ветка уже выбрана."
+    return 0
+  fi
+
+  if ! confirm "Переключить ветку на ${target} ($(branch_label "$target"))?" "N"; then
+    warn "Переключение отменено."
+    return 0
+  fi
+
+  REPO_BRANCH="$target"
+  refresh_repo_urls
+  persist_repo_branch
+  ok "Ветка переключена на ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))."
+
+  if is_installed && confirm "Сразу обновить установленный бот из новой ветки?" "Y"; then
+    update_bot
+  fi
 }
 
 remove_everything() {
@@ -960,13 +1053,14 @@ remove_bot() {
     warn "Бот уже удалён."
     return 0
   fi
-  echo "1) Удалить всё"
-  echo "2) Удалить всё, кроме БД и .env (нужно для расшифровки данных)"
+  echo "Как удалить бот?"
+  echo "1) Полностью удалить всё"
+  echo "2) Удалить код и сервис, но оставить БД и .env"
   echo "0) Отмена"
   prompt_raw "Выбор: " choice
   case "$choice" in
     1)
-      if ! confirm "Точно удалить все файлы, БД и логи?" "N"; then
+      if ! confirm_phrase "DELETE" "Для полного удаления введи DELETE"; then
         warn "Удаление отменено."
         return 0
       fi
@@ -974,7 +1068,7 @@ remove_bot() {
       ok "Удалено всё."
       ;;
     2)
-      if ! confirm "Точно удалить всё, кроме БД и .env?" "N"; then
+      if ! confirm_phrase "KEEP_DB" "Для удаления с сохранением БД и .env введи KEEP_DB"; then
         warn "Удаление отменено."
         return 0
       fi
@@ -997,6 +1091,7 @@ show_logs() {
     print_line
     return 0
   fi
+  echo "Логи:"
   echo "1) Последние 100 строк journalctl"
   echo "2) Смотреть journalctl -f"
   echo "3) Последние 100 строк bot.log"
@@ -1017,19 +1112,24 @@ show_logs() {
 print_not_installed_menu() {
   print_line
   echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
-  echo "Бот сейчас не установлен."
+  echo "Текущая ветка: $(branch_label "$REPO_BRANCH")"
+  echo
   echo "1) Установить"
-  echo "2) Отмена / Выход"
+  echo "2) Переключить ветку (stable/main ↔ beta)"
+  echo "0) Выход"
   print_line
 }
 
 print_residual_menu() {
   print_line
   echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
+  echo "Текущая ветка: $(branch_label "$REPO_BRANCH")"
   echo "Найдены остаточные файлы прошлой установки."
-  echo "1) Продолжить установку / переустановку поверх остатков"
-  echo "2) Удалить всё"
-  echo "3) Удалить всё, кроме БД и .env"
+  echo
+  echo "1) Установить / переустановить поверх остатков"
+  echo "2) Переключить ветку"
+  echo "3) Полностью удалить всё"
+  echo "4) Удалить код и сервис, но оставить БД и .env"
   echo "0) Выход"
   print_line
 }
@@ -1037,13 +1137,15 @@ print_residual_menu() {
 print_installed_menu() {
   print_line
   echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
-  echo "Бот уже установлен."
+  echo "Текущая ветка: $(branch_label "$REPO_BRANCH")"
+  echo
   echo "1) Переустановить"
   echo "2) Обновить"
-  echo "3) Удалить"
+  echo "3) Переключить ветку (stable/main ↔ beta)"
   echo "4) Проверить обновления"
   echo "5) Статус"
   echo "6) Логи"
+  echo "7) Удалить"
   echo "0) Выход"
   print_line
 }
@@ -1057,6 +1159,7 @@ run_action() {
     check-updates) check_updates ;;
     status) show_status ;;
     logs) show_logs ;;
+    switch-branch) switch_branch_interactive ;;
     remove|uninstall) remove_bot ;;
     *) return 0 ;;
   esac
@@ -1071,10 +1174,11 @@ main_menu() {
       case "$choice" in
         1) install_or_reinstall_flow reinstall ;;
         2) update_bot ;;
-        3) remove_bot ;;
+        3) switch_branch_interactive ;;
         4) check_updates ;;
         5) show_status ;;
         6) show_logs ;;
+        7) remove_bot ;;
         0) echo "Выход."; exit 0 ;;
         *) warn "Неизвестный пункт меню." ;;
       esac
@@ -1083,8 +1187,21 @@ main_menu() {
       prompt_raw "Выбери действие: " choice
       case "$choice" in
         1) install_or_reinstall_flow install ;;
-        2) remove_everything; ok "Удалено всё." ;;
-        3) remove_keep_db_and_env; ok "Удалено всё, кроме БД и .env." ;;
+        2) switch_branch_interactive ;;
+        3)
+          if confirm_phrase "DELETE" "Для полного удаления введи DELETE"; then
+            remove_everything; ok "Удалено всё."
+          else
+            warn "Удаление отменено."
+          fi
+          ;;
+        4)
+          if confirm_phrase "KEEP_DB" "Для удаления с сохранением БД и .env введи KEEP_DB"; then
+            remove_keep_db_and_env; ok "Удалено всё, кроме БД и .env."
+          else
+            warn "Удаление отменено."
+          fi
+          ;;
         0) echo "Выход."; exit 0 ;;
         *) warn "Неизвестный пункт меню." ;;
       esac
@@ -1093,7 +1210,8 @@ main_menu() {
       prompt_raw "Выбери действие: " choice
       case "$choice" in
         1) install_or_reinstall_flow install ;;
-        2|0) echo "Выход."; exit 0 ;;
+        2) switch_branch_interactive ;;
+        0) echo "Выход."; exit 0 ;;
         *) warn "Неизвестный пункт меню." ;;
       esac
     fi
@@ -1102,6 +1220,7 @@ main_menu() {
   done
 }
 
+refresh_repo_urls
 require_root
 setup_logging
 setup_tty_fd

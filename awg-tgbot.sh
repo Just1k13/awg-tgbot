@@ -257,16 +257,6 @@ except Exception:
 PY
 }
 
-is_hostname_like() {
-  local value="$1"
-  "$PYTHON_BIN" - "$value" <<'PY'
-import re, sys
-value = sys.argv[1].strip()
-ok = bool(value) and ' ' not in value and ':' not in value and len(value) <= 253 and value.lower() != 'localhost' and bool(re.fullmatch(r'[A-Za-z0-9.-]+', value))
-print('1' if ok else '0')
-PY
-}
-
 docker_exec_capture() {
   local container="$1"; shift
   docker exec -i "$container" "$@" 2>/dev/null || true
@@ -409,7 +399,7 @@ detect_awg_environment() {
   configured_interface="$(get_env_value WG_INTERFACE)"
   DETECTED_CONTAINER="$(pick_existing_or_default "$configured_container" "$(find_awg_container)")"
   DETECTED_INTERFACE="${configured_interface:-awg0}"
-  DETECTED_SERVER_NAME="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  DETECTED_SERVER_NAME="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
   DETECTED_PUBLIC_HOST="$(get_public_host)"
 
   if [[ -n "$DETECTED_CONTAINER" ]] && docker_is_accessible && docker inspect "$DETECTED_CONTAINER" >/dev/null 2>&1; then
@@ -446,13 +436,6 @@ detect_awg_environment() {
       DETECTED_AWG_I3="$(parse_conf_value 'I3' "$conf_output")"
       DETECTED_AWG_I4="$(parse_conf_value 'I4' "$conf_output")"
       DETECTED_AWG_I5="$(parse_conf_value 'I5' "$conf_output")"
-    fi
-  fi
-
-  if [[ -z "$DETECTED_PUBLIC_HOST" ]]; then
-    DETECTED_PUBLIC_HOST="$(printf '%s' "$DETECTED_SERVER_NAME" | tr -d '[:space:]')"
-    if [[ "$(is_hostname_like "$DETECTED_PUBLIC_HOST")" != "1" ]]; then
-      DETECTED_PUBLIC_HOST=""
     fi
   fi
 
@@ -807,7 +790,7 @@ install_or_reinstall_flow() {
 
   prompt_api_token api_token
   prompt_admin_id admin_id
-  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
   prompt_with_default 'Введите название сервера' "$default" server_name
   secret="$(ensure_secret)"
 
@@ -890,7 +873,7 @@ update_bot() {
 
   api_token="$(get_env_value API_TOKEN)"
   admin_id="$(get_env_value ADMIN_ID)"
-  server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
   secret="$(ensure_secret)"
   [[ -n "$api_token" ]] || prompt_api_token api_token
   [[ -n "$admin_id" ]] || prompt_admin_id admin_id

@@ -918,21 +918,54 @@ install_or_reinstall_flow() {
   return 0
 }
 
-update_bot() {
-  local tmp_dir api_token admin_id server_name secret
+update_or_check_bot() {
+  local remote_sha local_sha
   if ! is_installed; then
     warn "Бот не установлен."
     return 0
   fi
-  if ! confirm "Обновить бот из ветки ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))?" "N"; then
-    warn "Обновление отменено."
+
+  remote_sha="$(fetch_remote_sha)"
+  local_sha="$(get_local_sha)"
+
+  print_line
+  echo "Ветка : ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))"
+  echo "Remote: ${remote_sha:-не удалось получить}"
+  echo "Local : ${local_sha:-нет локальной версии}"
+
+  if [[ -n "$remote_sha" && -n "$local_sha" && "$remote_sha" == "$local_sha" ]]; then
+    ok "Установлена актуальная версия."
+    if ! confirm "Версия уже актуальна. Выполнить переустановку этой же версии?" "N"; then
+      return 0
+    fi
+  else
+    warn "Есть новая версия или локальная версия ещё не зафиксирована."
+    if ! confirm "Обновить бот из ветки ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))?" "Y"; then
+      warn "Обновление отменено."
+      return 0
+    fi
+  fi
+
+  update_bot do-not-check
+}
+
+update_bot() {
+  local skip_check="${1:-}" tmp_dir api_token admin_id server_name secret
+  if ! is_installed; then
+    warn "Бот не установлен."
     return 0
   fi
   print_line
   info "Обновление AWG Telegram Bot"
   ensure_packages || die "Не удалось обновить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
-  check_updates
+  if [[ "$skip_check" != "do-not-check" ]]; then
+    check_updates
+    if ! confirm "Продолжить обновление из ветки ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))?" "N"; then
+      warn "Обновление отменено."
+      return 0
+    fi
+  fi
 
   tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
   stop_service_if_exists
@@ -991,7 +1024,7 @@ switch_branch_interactive() {
   ok "Ветка переключена на ${REPO_BRANCH} ($(branch_label "$REPO_BRANCH"))."
 
   if is_installed && confirm "Сразу обновить установленный бот из новой ветки?" "Y"; then
-    update_bot
+    update_or_check_bot
   fi
 }
 
@@ -1140,12 +1173,11 @@ print_installed_menu() {
   echo "Текущая ветка: $(branch_label "$REPO_BRANCH")"
   echo
   echo "1) Переустановить"
-  echo "2) Обновить"
+  echo "2) Обновить / проверить обновления"
   echo "3) Переключить ветку (stable/main ↔ beta)"
-  echo "4) Проверить обновления"
-  echo "5) Статус"
-  echo "6) Логи"
-  echo "7) Удалить"
+  echo "4) Статус"
+  echo "5) Логи"
+  echo "6) Удалить"
   echo "0) Выход"
   print_line
 }
@@ -1155,8 +1187,7 @@ run_action() {
   case "$action" in
     install) install_or_reinstall_flow install ;;
     reinstall) install_or_reinstall_flow reinstall ;;
-    update) update_bot ;;
-    check-updates) check_updates ;;
+    update|check-updates) update_or_check_bot ;;
     status) show_status ;;
     logs) show_logs ;;
     switch-branch) switch_branch_interactive ;;
@@ -1173,12 +1204,11 @@ main_menu() {
       prompt_raw "Выбери действие: " choice
       case "$choice" in
         1) install_or_reinstall_flow reinstall ;;
-        2) update_bot ;;
+        2) update_or_check_bot ;;
         3) switch_branch_interactive ;;
-        4) check_updates ;;
-        5) show_status ;;
-        6) show_logs ;;
-        7) remove_bot ;;
+        4) show_status ;;
+        5) show_logs ;;
+        6) remove_bot ;;
         0) echo "Выход."; exit 0 ;;
         *) warn "Неизвестный пункт меню." ;;
       esac

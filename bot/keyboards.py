@@ -65,10 +65,8 @@ def get_config_result_kb() -> InlineKeyboardMarkup:
 def get_admin_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_LIST)],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
-            [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC)],
-            [InlineKeyboardButton(text="🧹 Очистить orphan peer", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
+            [InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_USERS_HUB), InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
+            [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC), InlineKeyboardButton(text="🧹 Очистить orphan", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
         ]
     )

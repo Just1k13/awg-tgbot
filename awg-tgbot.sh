@@ -399,7 +399,7 @@ detect_awg_environment() {
   configured_interface="$(get_env_value WG_INTERFACE)"
   DETECTED_CONTAINER="$(pick_existing_or_default "$configured_container" "$(find_awg_container)")"
   DETECTED_INTERFACE="${configured_interface:-awg0}"
-  DETECTED_SERVER_NAME="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
+  DETECTED_SERVER_NAME="$(pick_existing_or_default "${server_name:-$(get_env_value SERVER_NAME)}" "${SERVER_NAME:-My VPN}")"
   DETECTED_PUBLIC_HOST="$(get_public_host)"
 
   if [[ -n "$DETECTED_CONTAINER" ]] && docker_is_accessible && docker inspect "$DETECTED_CONTAINER" >/dev/null 2>&1; then

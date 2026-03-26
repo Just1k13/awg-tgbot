@@ -3,19 +3,21 @@ set -Eeuo pipefail
 
 REPO_OWNER="Just1k13"
 REPO_NAME="awg-tgbot"
+INSTALL_DIR="/opt/amnezia/bot"
+STATE_DIR="${INSTALL_DIR}/.state"
+REPO_BRANCH_FILE="${STATE_DIR}/repo_branch"
+REPO_BRANCH="${REPO_BRANCH:-$(tr -d '\r\n' < "$REPO_BRANCH_FILE" 2>/dev/null || true)}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
 TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
 COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
 
-INSTALL_DIR="/opt/amnezia/bot"
 BOT_DIR="${INSTALL_DIR}/bot"
 ENV_FILE="${INSTALL_DIR}/.env"
 VENV_DIR="${INSTALL_DIR}/.venv"
 SERVICE_NAME="vpn-bot.service"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
-STATE_DIR="${INSTALL_DIR}/.state"
 VERSION_FILE="${STATE_DIR}/release_sha"
 INSTALL_LOG="/var/log/awg-tgbot-install.log"
 APP_LOG_DIR="/var/log/awg-tgbot"
@@ -171,6 +173,12 @@ set_env_value() {
   return 0
 }
 
+persist_repo_branch() {
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$REPO_BRANCH" > "$REPO_BRANCH_FILE"
+  return 0
+}
+
 fetch_remote_sha() {
   local sha=""
   sha="$(curl -fsSL "$COMMIT_API_URL" 2>/dev/null | grep -m1 '"sha"' | sed -E 's/.*"sha": "([a-f0-9]+)".*/\1/' || true)"
@@ -254,16 +262,6 @@ try:
     print('1' if ok else '0')
 except Exception:
     print('0')
-PY
-}
-
-is_hostname_like() {
-  local value="$1"
-  "$PYTHON_BIN" - "$value" <<'PY'
-import re, sys
-value = sys.argv[1].strip()
-ok = bool(value) and ' ' not in value and ':' not in value and len(value) <= 253 and value.lower() != 'localhost' and bool(re.fullmatch(r'[A-Za-z0-9.-]+', value))
-print('1' if ok else '0')
 PY
 }
 
@@ -351,7 +349,7 @@ derive_public_key_from_private() {
 
 get_public_host() {
   local value route
-  for value in "$(get_env_value PUBLIC_HOST)" "$(get_env_value SERVER_HOST)" "$(get_env_value SERVER_DOMAIN)" "${PUBLIC_HOST:-}" "${SERVER_HOST:-}" "${SERVER_DOMAIN:-}"; do
+  for value in "$(get_env_value PUBLIC_HOST)" "${PUBLIC_HOST:-}"; do
     value="$(printf '%s' "$value" | tr -d '[:space:]')"
     [[ -z "$value" ]] && continue
     if [[ "$(is_public_ipv4 "$value")" == "1" ]]; then
@@ -409,7 +407,7 @@ detect_awg_environment() {
   configured_interface="$(get_env_value WG_INTERFACE)"
   DETECTED_CONTAINER="$(pick_existing_or_default "$configured_container" "$(find_awg_container)")"
   DETECTED_INTERFACE="${configured_interface:-awg0}"
-  DETECTED_SERVER_NAME="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  DETECTED_SERVER_NAME="$(pick_existing_or_default "${server_name:-$(get_env_value SERVER_NAME)}" "${SERVER_NAME:-My VPN}")"
   DETECTED_PUBLIC_HOST="$(get_public_host)"
 
   if [[ -n "$DETECTED_CONTAINER" ]] && docker_is_accessible && docker inspect "$DETECTED_CONTAINER" >/dev/null 2>&1; then
@@ -446,13 +444,6 @@ detect_awg_environment() {
       DETECTED_AWG_I3="$(parse_conf_value 'I3' "$conf_output")"
       DETECTED_AWG_I4="$(parse_conf_value 'I4' "$conf_output")"
       DETECTED_AWG_I5="$(parse_conf_value 'I5' "$conf_output")"
-    fi
-  fi
-
-  if [[ -z "$DETECTED_PUBLIC_HOST" ]]; then
-    DETECTED_PUBLIC_HOST="$(printf '%s' "$DETECTED_SERVER_NAME" | tr -d '[:space:]')"
-    if [[ "$(is_hostname_like "$DETECTED_PUBLIC_HOST")" != "1" ]]; then
-      DETECTED_PUBLIC_HOST=""
     fi
   fi
 
@@ -758,6 +749,7 @@ show_status() {
     echo "Репозиторий: ${REPO_URL}"
     echo "Папка: ${INSTALL_DIR}"
     echo "Сервис: ${SERVICE_NAME}"
+    echo "Ветка: ${REPO_BRANCH}"
     echo "Версия: $(get_local_sha | cut -c1-12)"
     echo "Статус: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
     echo "Автозапуск: $(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true)"
@@ -774,6 +766,7 @@ check_updates() {
   remote_sha="$(fetch_remote_sha)"
   local_sha="$(get_local_sha)"
   print_line
+  echo "Ветка : ${REPO_BRANCH}"
   echo "Remote: ${remote_sha:-не удалось получить}"
   echo "Local : ${local_sha:-нет локальной версии}"
   if [[ -n "$remote_sha" && -n "$local_sha" && "$remote_sha" == "$local_sha" ]]; then
@@ -807,7 +800,7 @@ install_or_reinstall_flow() {
 
   prompt_api_token api_token
   prompt_admin_id admin_id
-  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
   prompt_with_default 'Введите название сервера' "$default" server_name
   secret="$(ensure_secret)"
 
@@ -861,6 +854,7 @@ install_or_reinstall_flow() {
 
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
   write_service || die "Не удалось создать systemd сервис."
+  persist_repo_branch
   persist_remote_sha
   start_service || die "Не удалось запустить сервис."
   ok "Готово. Бот установлен/переустановлен."
@@ -890,7 +884,7 @@ update_bot() {
 
   api_token="$(get_env_value API_TOKEN)"
   admin_id="$(get_env_value ADMIN_ID)"
-  server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo 'My VPN')")"
+  server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
   secret="$(ensure_secret)"
   [[ -n "$api_token" ]] || prompt_api_token api_token
   [[ -n "$admin_id" ]] || prompt_admin_id admin_id
@@ -900,6 +894,7 @@ update_bot() {
   write_detected_awg_env
   ensure_venv_and_requirements || die "Не удалось обновить Python зависимости."
   write_service || die "Не удалось обновить systemd сервис."
+  persist_repo_branch
   persist_remote_sha
   start_service || die "Не удалось перезапустить сервис."
   ok "Обновление завершено."

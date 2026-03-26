@@ -51,7 +51,7 @@ Telegram-бот для продажи доступа и автоматическ
   - проверки обновлений,
   - просмотра статуса,
   - просмотра логов;
-- автоопределение контейнера AWG, интерфейса, `SERVER_PUBLIC_KEY`, endpoint и AWG-параметров;
+- автоопределение контейнера AWG, интерфейса, `SERVER_PUBLIC_KEY`, внешнего `SERVER_IP` и AWG-параметров;
 - создание и обновление `systemd`-сервиса;
 - хранение локального SHA установленной версии для проверки обновлений.
 
@@ -123,6 +123,8 @@ awg-tgbot/
 
 ## Быстрый запуск
 
+### Основная ветка (`main`)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash
 ```
@@ -132,6 +134,42 @@ curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.s
 ```bash
 wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash
 ```
+
+### Бета-ветка (`beta`)
+
+Для первичной установки `beta` используй запуск с переменной `REPO_BRANCH=beta`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash
+```
+
+или
+
+```bash
+wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash
+```
+
+После первой установки ветка сохраняется автоматически в `/opt/amnezia/bot/.state/repo_branch`, поэтому дальнейшие обновления уже можно запускать обычной командой:
+
+```bash
+sudo awg-tgbot update
+```
+
+### Как переключить уже установленного бота между `beta` и `main`
+
+Перейти с `beta` на `main`:
+
+```bash
+sudo REPO_BRANCH=main awg-tgbot update
+```
+
+Вернуться с `main` на `beta`:
+
+```bash
+sudo REPO_BRANCH=beta awg-tgbot update
+```
+
+После такого обновления новая ветка тоже сохранится автоматически.
 
 ---
 
@@ -175,8 +213,8 @@ wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh
 - интерфейс (`awg0` и т.д.);
 - путь к конфигу внутри контейнера;
 - `SERVER_PUBLIC_KEY`;
-- внешний endpoint `SERVER_IP`;
-- `PUBLIC_HOST`;
+- внешний endpoint `SERVER_IP` в формате `IPv4:port`;
+- `PUBLIC_HOST` как внешний IPv4 без порта;
 - часть AWG-параметров (`Jc`, `Jmin`, `Jmax`, `S1-S4`, `H1-H4`, `I1-I5`).
 
 Обычно руками вводятся только:
@@ -202,7 +240,7 @@ wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh
 - `DOWNLOAD_URL`;
 - `SUPPORT_USERNAME`.
 
-Этот режим полезен, если AWG работает в нестандартном контейнере, под нестандартным интерфейсом или за reverse proxy / нестандартной сетевой схемой.
+Этот режим полезен, если AWG работает в нестандартном контейнере, под нестандартным интерфейсом или если внешний IPv4 / порт нужно задать вручную.
 
 ---
 
@@ -215,6 +253,7 @@ wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh
 - service: `vpn-bot.service`
 - install log: `/var/log/awg-tgbot-install.log`
 - app log: `/var/log/awg-tgbot/bot.log`
+- выбранная ветка: `/opt/amnezia/bot/.state/repo_branch`
 
 ---
 
@@ -234,7 +273,19 @@ sudo bash /opt/amnezia/bot/awg-tgbot.sh
 
 ## Полезные команды
 
-### Статус
+### Статус через installer
+
+```bash
+sudo awg-tgbot status
+```
+
+### Логи через installer
+
+```bash
+sudo awg-tgbot logs
+```
+
+### Статус systemd
 
 ```bash
 systemctl status vpn-bot.service --no-pager -l
@@ -258,11 +309,29 @@ tail -f /var/log/awg-tgbot/bot.log
 sudo awg-tgbot check-updates
 ```
 
-### Обновление
+### Обновление текущей установленной ветки
 
 ```bash
 sudo awg-tgbot update
 ```
+
+---
+
+## Быстрая проверка после установки
+
+```bash
+sudo awg-tgbot status
+systemctl status vpn-bot.service --no-pager -l
+journalctl -u vpn-bot.service -n 50 --no-pager
+grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/bot/.env
+```
+
+Что стоит увидеть:
+
+- сервис `vpn-bot.service` в состоянии `active (running)`;
+- в логах есть строки про успешный запуск polling;
+- в `.env` заполнены `SERVER_NAME`, `SERVER_IP`, `SERVER_PUBLIC_KEY`;
+- в статусе installer показывается правильная текущая ветка.
 
 ---
 
@@ -275,15 +344,16 @@ sudo awg-tgbot update
 - `API_TOKEN` — токен Telegram-бота;
 - `ADMIN_ID` — Telegram user_id администратора;
 - `SERVER_PUBLIC_KEY` — публичный ключ сервера AWG;
-- `SERVER_IP` — endpoint в формате `IP:port` или `host:port`;
+- `SERVER_IP` — endpoint в формате `IPv4:port`;
 - `ENCRYPTION_SECRET` — ключ для шифрования чувствительных данных в БД.
 
 ### Настройки проекта
 
-- `SERVER_NAME` — имя сервера / отображаемое имя VPN;
+- `SERVER_NAME` — только отображаемое имя сервера / VPN в клиенте;
 - `DB_PATH` — путь к SQLite БД;
 - `DOWNLOAD_URL` — ссылка на клиент / инструкцию / сайт;
-- `SUPPORT_USERNAME` — username поддержки.
+- `SUPPORT_USERNAME` — username поддержки;
+- `PUBLIC_HOST` — внешний IPv4 без порта, используется для автосборки `SERVER_IP`.
 
 ### Настройки AWG
 
@@ -432,10 +502,10 @@ python app.py
 ### Создать Codespace через GitHub CLI
 
 ```bash
-gh codespace create -R Just1k13/awg-tgbot -b main
+gh codespace create -R Just1k13/awg-tgbot -b beta
 ```
 
-Либо открыть репозиторий на GitHub → **Code** → **Codespaces** → **Create codespace on main**.
+Либо открыть репозиторий на GitHub → **Code** → **Codespaces** → **Create codespace on beta**.
 
 ### Что делать внутри Codespace
 
@@ -453,14 +523,6 @@ cp bot/.env.example bot/.env
 - готовить PR;
 - частично запускать код, если подложить совместимое окружение и mock / доступ к нужному Docker runtime.
 
-### Быстро заменить README внутри Codespace
-
-```bash
-curl -L -o README.md <PUT-YOUR-RAW-README-URL-HERE>
-```
-
-или просто вставить новый текст вручную в `README.md`.
-
 ---
 
 ## Ограничения проекта
@@ -475,6 +537,8 @@ curl -L -o README.md <PUT-YOUR-RAW-README-URL-HERE>
 ## Важно
 
 - `API_TOKEN` и `ADMIN_ID` не подставляются автоматически — их нужно вводить вручную;
+- для этого проекта endpoint должен быть только по внешнему IPv4; домены и hostname как endpoint не используются;
+- `SERVER_NAME` не участвует в сборке endpoint и нужен только как отображаемое имя VPN;
 - если бот отвечает `Unauthorized`, перевыпусти токен в BotFather и обнови `.env`;
 - `ENCRYPTION_SECRET` должен быть сохранён и защищён;
 - при переносе БД на новый сервер без старого `ENCRYPTION_SECRET` расшифровка секретов не сработает;
@@ -491,4 +555,3 @@ curl -L -o README.md <PUT-YOUR-RAW-README-URL-HERE>
 - smoke tests / unit tests;
 - GitHub Actions для lint / test / release;
 - отдельный режим mock/dev без реального AWG-контейнера.
-

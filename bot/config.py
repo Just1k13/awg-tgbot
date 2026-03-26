@@ -1,8 +1,6 @@
 import ipaddress
 import logging
 import os
-import re
-import socket
 import subprocess
 from pathlib import Path
 
@@ -12,6 +10,7 @@ ENV_FILE = Path('.env')
 load_dotenv(ENV_FILE)
 
 DEFAULT_ENV: dict[str, str] = {
+    'SERVER_NAME': 'My VPN',
     'DOWNLOAD_URL': 'https://amnezia.org',
     'PUBLIC_HOST': '',
     'SUPPORT_USERNAME': '',
@@ -175,17 +174,9 @@ def _find_awg_container() -> str:
 def _is_public_ip(value: str) -> bool:
     try:
         addr = ipaddress.ip_address(value)
-        return not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified)
+        return addr.version == 4 and not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified)
     except ValueError:
         return False
-
-
-def _hostname_like(value: str) -> bool:
-    if not value or ' ' in value or ':' in value:
-        return False
-    if len(value) > 253:
-        return False
-    return bool(re.fullmatch(r'[A-Za-z0-9.-]+', value))
 
 
 def _resolve_public_ipv4(value: str) -> str:
@@ -194,21 +185,13 @@ def _resolve_public_ipv4(value: str) -> str:
         return ''
     if _is_public_ip(value):
         return value
-    if _hostname_like(value):
-        try:
-            resolved = socket.gethostbyname(value).strip()
-            if _is_public_ip(resolved):
-                return resolved
-        except Exception:
-            return ''
     return ''
 
 
 def _detect_public_host() -> str:
-    for env_name in ('PUBLIC_HOST', 'SERVER_HOST', 'SERVER_DOMAIN'):
-        direct = _resolve_public_ipv4(os.getenv(env_name, '').strip())
-        if direct:
-            return direct
+    direct = _resolve_public_ipv4(os.getenv('PUBLIC_HOST', '').strip())
+    if direct:
+        return direct
 
     if _command_exists('curl'):
         for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://ipv4.icanhazip.com'):
@@ -219,19 +202,6 @@ def _detect_public_host() -> str:
             except Exception:
                 continue
     return ''
-
-
-def _detect_server_name() -> str:
-    direct = os.getenv('SERVER_NAME', '').strip()
-    if direct:
-        return direct
-    try:
-        value = _run_local_command(['hostname'], timeout=5).strip()
-        if value:
-            return value
-    except Exception:
-        pass
-    return 'My VPN'
 
 
 def _parse_subnet_prefix(show_output: str) -> str:
@@ -329,19 +299,32 @@ def _env_with_runtime_default(name: str, default: str) -> str:
 DOCKER_CONTAINER_HINT = _find_awg_container()
 WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE'])
 _detected_awg = _detect_awg_from_container(DOCKER_CONTAINER_HINT, WG_INTERFACE_HINT)
+_raw_public_host = os.getenv('PUBLIC_HOST', '').strip()
 PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', _detect_public_host())
 PUBLIC_HOST_HINT = _resolve_public_ipv4(PUBLIC_HOST_HINT)
-SERVER_NAME_HINT = _env_with_runtime_default('SERVER_NAME', _detect_server_name())
+_public_host_error = ''
+if _raw_public_host and not PUBLIC_HOST_HINT:
+    _public_host_error = 'PUBLIC_HOST (ожидается публичный IPv4 без порта)'
+    logger.warning('PUBLIC_HOST задан некорректно: %r', _raw_public_host)
+SERVER_NAME_HINT = os.getenv('SERVER_NAME', DEFAULT_ENV['SERVER_NAME']).strip() or DEFAULT_ENV['SERVER_NAME']
 SERVER_PUBLIC_KEY_HINT = _env_with_runtime_default('SERVER_PUBLIC_KEY', _detected_awg.get('SERVER_PUBLIC_KEY', '').strip())
 DETECTED_HOST_PORT_HINT = _detected_awg.get('DETECTED_HOST_PORT', '').strip()
 
 _raw_server_ip = os.getenv('SERVER_IP', '').strip()
 SERVER_IP_HINT = ''
-if _raw_server_ip and ':' in _raw_server_ip:
-    raw_host, raw_port = _raw_server_ip.rsplit(':', 1)
-    resolved_host = _resolve_public_ipv4(raw_host)
-    if resolved_host and raw_port.isdigit():
-        SERVER_IP_HINT = f'{resolved_host}:{raw_port}'
+_server_ip_error = ''
+if _raw_server_ip:
+    if ':' in _raw_server_ip:
+        raw_host, raw_port = _raw_server_ip.rsplit(':', 1)
+        resolved_host = _resolve_public_ipv4(raw_host)
+        if resolved_host and raw_port.isdigit() and 1 <= int(raw_port) <= 65535:
+            SERVER_IP_HINT = f'{resolved_host}:{raw_port}'
+        else:
+            _server_ip_error = 'SERVER_IP (ожидается публичный IPv4:port)'
+            logger.warning('SERVER_IP задан некорректно: %r', _raw_server_ip)
+    else:
+        _server_ip_error = 'SERVER_IP (ожидается публичный IPv4:port)'
+        logger.warning('SERVER_IP задан некорректно: %r', _raw_server_ip)
 
 if not SERVER_IP_HINT and PUBLIC_HOST_HINT and DETECTED_HOST_PORT_HINT:
     SERVER_IP_HINT = f'{PUBLIC_HOST_HINT}:{DETECTED_HOST_PORT_HINT}'
@@ -447,12 +430,14 @@ if ADMIN_ID <= 0:
 if not SERVER_PUBLIC_KEY:
     required_missing.append('SERVER_PUBLIC_KEY')
 if not SERVER_IP:
-    required_missing.append('SERVER_IP')
+    required_missing.append(_server_ip_error or 'SERVER_IP')
+if _public_host_error:
+    required_missing.append(_public_host_error)
 if not ENCRYPTION_SECRET:
     required_missing.append('ENCRYPTION_SECRET')
 if required_missing:
     raise RuntimeError(
-        'Не заданы переменные окружения: '
+        'Не заданы или некорректны переменные окружения: '
         + ', '.join(required_missing)
         + '. Запусти установщик awg-tgbot.sh или заполни .env вручную.'
     )

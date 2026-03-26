@@ -4,7 +4,8 @@ from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS
 from ui_constants import (
     BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_GUIDE, BTN_PROFILE, BTN_SUPPORT,
     CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
-    CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7, CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION,
+    CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7, CB_CONFIG_DEVICE_PREFIX,
+    CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION,
 )
 
 
@@ -46,6 +47,15 @@ def get_instruction_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="📖 Открыть инструкцию", callback_data=CB_SHOW_INSTRUCTION)]]
     )
+
+
+def get_configs_devices_kb(configs: list[tuple[int, int, str, str]]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"📱 Устройство {device_num}", callback_data=f"{CB_CONFIG_DEVICE_PREFIX}{key_id}")]
+        for key_id, device_num, _, _ in configs
+    ]
+    rows.append([InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_admin_inline_kb() -> InlineKeyboardMarkup:

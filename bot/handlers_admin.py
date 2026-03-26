@@ -13,7 +13,7 @@ from awg_backend import (
     issue_subscription,
     revoke_user_access,
 )
-from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, logger
+from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, logger, get_support_username
 from database import (
     clear_pending_admin_action,
     clear_pending_broadcast,
@@ -45,6 +45,11 @@ from keyboards import (
 )
 from ui_constants import (
     BTN_ADMIN,
+    BTN_BUY,
+    BTN_CONFIGS,
+    BTN_GUIDE,
+    BTN_PROFILE,
+    BTN_SUPPORT,
     CB_ADMIN_ADD_CUSTOM_PREFIX,
     CB_ADMIN_BROADCAST,
     CB_ADMIN_CLEAN_ORPHANS,
@@ -62,6 +67,7 @@ from ui_constants import (
     CB_ADMIN_USERS_PAGE_PREFIX,
     CB_ADMIN_USERS_SEARCH,
     CB_BACK_TO_ADMIN,
+    CB_BACK_TO_PROFILE,
     CB_BROADCAST_CANCEL,
     CB_BROADCAST_CONFIRM,
 )
@@ -1107,4 +1113,27 @@ async def handle_admin_pending_input(message: types.Message):
         except Exception as e:
             logger.exception("Ошибка manual_days: %s", e)
             await message.answer("❌ Не удалось выдать доступ вручную.")
+        return
+
+    if message.text == BTN_PROFILE:
+        from handlers_user import _send_profile
+        await _send_profile(message, message.from_user)
+        return
+    if message.text == BTN_CONFIGS:
+        from handlers_user import _send_configs_menu
+        await _send_configs_menu(message, message.from_user)
+        return
+    if message.text == BTN_BUY:
+        from handlers_user import _send_buy_menu
+        await _send_buy_menu(message, message.from_user.id)
+        return
+    if message.text == BTN_GUIDE:
+        from handlers_user import _send_instruction
+        await _send_instruction(message, CB_BACK_TO_PROFILE)
+        return
+    if message.text == BTN_SUPPORT:
+        await message.answer(
+            f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(get_support_username())}</b>",
+            parse_mode="HTML",
+        )
         return

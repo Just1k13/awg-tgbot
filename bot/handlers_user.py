@@ -27,6 +27,8 @@ from ui_constants import (
     BTN_GUIDE,
     BTN_PROFILE,
     BTN_SUPPORT,
+    CB_BACK_TO_CONFIGS,
+    CB_BACK_TO_PROFILE,
     CB_CONFIG_DEVICE_PREFIX,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
@@ -66,6 +68,58 @@ async def _send_buy_menu(target, user_id: int):
     )
 
 
+async def _send_profile(target, user) -> None:
+    await ensure_user_exists(user.id, user.username, user.first_name)
+    if user.id == ADMIN_ID:
+        maybe_set_support_username(user.username)
+    sub_until = await get_user_subscription(user.id)
+    status_text, until_text = get_status_text(sub_until)
+    tg_username = format_tg_username(user.username)
+    first_name = escape_html(user.first_name)
+    is_active = subscription_is_active(sub_until)
+    remaining = format_remaining_time(sub_until) if is_active else "—"
+    await target.answer(
+        (
+            "👤 <b>Профиль</b>\n\n"
+            f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
+            f"👤 <b>Имя:</b> {first_name}\n"
+            f"✈️ <b>Telegram:</b> {escape_html(tg_username)}\n"
+            f"📌 <b>Статус:</b> {status_text}\n"
+            f"📅 <b>Действует до:</b> {until_text}\n"
+            f"⏳ <b>Осталось:</b> {remaining}"
+        ),
+        parse_mode="HTML",
+        reply_markup=get_profile_inline_kb(is_active),
+    )
+
+
+async def _send_configs_menu(target, user) -> None:
+    await ensure_user_exists(user.id, user.username, user.first_name)
+    if user.id == ADMIN_ID:
+        maybe_set_support_username(user.username)
+    configs = await get_user_keys(user.id)
+    if not configs:
+        await target.answer(
+            (
+                "🔑 <b>Конфиги</b>\n\n"
+                "У вас пока нет активных конфигураций.\n"
+                "Сначала оформите доступ.\n\n"
+                "Если нужна помощь — откройте инструкцию ниже."
+            ),
+            parse_mode="HTML",
+            reply_markup=get_instruction_inline_kb(CB_BACK_TO_PROFILE),
+        )
+        return
+    await target.answer(
+        (
+            "🔑 <b>Ваши конфиги</b>\n\n"
+            "Сначала выберите устройство. После выбора бот отправит <b>ключ доступа</b> и файл <b>.conf</b> для этого устройства."
+        ),
+        parse_mode="HTML",
+        reply_markup=get_configs_devices_kb(configs),
+    )
+
+
 @router.callback_query(F.data == "noop")
 async def noop_callback(cb: types.CallbackQuery):
     await cb.answer()
@@ -95,56 +149,12 @@ async def start(message: types.Message):
 
 @router.message(F.text == BTN_PROFILE)
 async def profile(message: types.Message):
-    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    if message.from_user.id == ADMIN_ID:
-        maybe_set_support_username(message.from_user.username)
-    sub_until = await get_user_subscription(message.from_user.id)
-    status_text, until_text = get_status_text(sub_until)
-    tg_username = format_tg_username(message.from_user.username)
-    first_name = escape_html(message.from_user.first_name)
-    is_active = subscription_is_active(sub_until)
-    remaining = format_remaining_time(sub_until) if is_active else "—"
-    await message.answer(
-        (
-            "👤 <b>Профиль</b>\n\n"
-            f"🆔 <b>ID:</b> <code>{message.from_user.id}</code>\n"
-            f"👤 <b>Имя:</b> {first_name}\n"
-            f"✈️ <b>Telegram:</b> {escape_html(tg_username)}\n"
-            f"📌 <b>Статус:</b> {status_text}\n"
-            f"📅 <b>Действует до:</b> {until_text}\n"
-            f"⏳ <b>Осталось:</b> {remaining}"
-        ),
-        parse_mode="HTML",
-        reply_markup=get_profile_inline_kb(is_active),
-    )
+    await _send_profile(message, message.from_user)
 
 
 @router.message(F.text == BTN_CONFIGS)
 async def my_keys(message: types.Message):
-    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    if message.from_user.id == ADMIN_ID:
-        maybe_set_support_username(message.from_user.username)
-    configs = await get_user_keys(message.from_user.id)
-    if not configs:
-        await message.answer(
-            (
-                "🔑 <b>Конфиги</b>\n\n"
-                "У вас пока нет активных конфигураций.\n"
-                "Сначала оформите доступ.\n\n"
-                "Если нужна помощь — откройте инструкцию ниже."
-            ),
-            parse_mode="HTML",
-            reply_markup=get_instruction_inline_kb(),
-        )
-        return
-    await message.answer(
-        (
-            "🔑 <b>Ваши конфиги</b>\n\n"
-            "Сначала выберите устройство. После выбора бот отправит <b>ключ доступа</b> и файл <b>.conf</b> для этого устройства."
-        ),
-        parse_mode="HTML",
-        reply_markup=get_configs_devices_kb(configs),
-    )
+    await _send_configs_menu(message, message.from_user)
 
 
 @router.callback_query(F.data.startswith(CB_CONFIG_DEVICE_PREFIX))
@@ -162,7 +172,7 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     if not selected:
         await cb.message.answer(
             "Не удалось найти конфиг для выбранного устройства. Попробуйте открыть раздел «Конфиги» ещё раз.",
-            reply_markup=get_instruction_inline_kb(),
+            reply_markup=get_instruction_inline_kb(CB_BACK_TO_CONFIGS),
         )
         return
 
@@ -184,18 +194,23 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     else:
         await cb.message.answer(
             "Для выбранного устройства не удалось собрать .conf. Напишите в поддержку или попросите администратора перевыдать доступ.",
-            reply_markup=get_instruction_inline_kb(),
+            reply_markup=get_instruction_inline_kb(CB_BACK_TO_CONFIGS),
         )
         return
     await cb.message.answer(
         "Если не знаете, что делать дальше, откройте инструкцию:",
-        reply_markup=get_instruction_inline_kb(),
+        reply_markup=get_instruction_inline_kb(CB_BACK_TO_CONFIGS),
     )
 
 
 @router.message(F.text == BTN_GUIDE)
 async def guide(message: types.Message):
-    await message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer(
+        get_instruction_text(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=get_instruction_inline_kb(CB_BACK_TO_PROFILE),
+    )
 
 
 @router.message(F.text == BTN_SUPPORT)
@@ -246,7 +261,24 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
 @router.callback_query(F.data == CB_SHOW_INSTRUCTION)
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
-    await cb.message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+    await cb.message.answer(
+        get_instruction_text(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=get_instruction_inline_kb(CB_BACK_TO_PROFILE),
+    )
+
+
+@router.callback_query(F.data == CB_BACK_TO_PROFILE)
+async def back_to_profile(cb: types.CallbackQuery):
+    await cb.answer()
+    await _send_profile(cb.message, cb.from_user)
+
+
+@router.callback_query(F.data == CB_BACK_TO_CONFIGS)
+async def back_to_configs(cb: types.CallbackQuery):
+    await cb.answer()
+    await _send_configs_menu(cb.message, cb.from_user)
 
 
 @router.message()

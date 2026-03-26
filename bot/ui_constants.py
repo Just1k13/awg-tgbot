@@ -9,6 +9,7 @@ CB_BUY_7 = "buy_7"
 CB_BUY_30 = "buy_30"
 CB_SHOW_INSTRUCTION = "show_instruction"
 CB_SHOW_BUY_MENU = "show_buy_menu"
+CB_CONFIG_DEVICE_PREFIX = "config_device_"
 
 CB_ADMIN_LIST = "admin_list"
 CB_ADMIN_STATS = "admin_stats"

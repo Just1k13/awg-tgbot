@@ -21,7 +21,7 @@ from config import (
     logger,
     maybe_set_support_username,
 )
-from database import close_shared_db, db_health_info, ensure_db_ready
+from database import close_shared_db, db_health_info, ensure_db_ready, execute, fetchone
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
 from payments import router as payments_router
@@ -108,6 +108,14 @@ dp.include_router(user_router)
 dp.include_router(fallback_router)
 
 
+async def cleanup_stale_pending_keys() -> int:
+    row = await fetchone("SELECT COUNT(*) FROM keys WHERE public_key LIKE 'pending:%'")
+    stale_count = int(row[0]) if row else 0
+    if stale_count:
+        await execute("DELETE FROM keys WHERE public_key LIKE 'pending:%'")
+    return stale_count
+
+
 async def main():
     global bg_worker_task
 
@@ -124,6 +132,13 @@ async def main():
         raise RuntimeError("Неверный API_TOKEN") from e
 
     await ensure_db_ready()
+
+    try:
+        cleaned_pending = await cleanup_stale_pending_keys()
+        if cleaned_pending:
+            logger.warning("Удалено stale pending-ключей при старте: %s", cleaned_pending)
+    except Exception as e:
+        logger.exception("Ошибка очистки stale pending-ключей: %s", e)
 
     try:
         await check_awg_container()

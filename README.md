@@ -155,6 +155,22 @@ wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh
 sudo awg-tgbot update
 ```
 
+### Как переключить уже установленного бота между `beta` и `main`
+
+Перейти с `beta` на `main`:
+
+```bash
+sudo REPO_BRANCH=main awg-tgbot update
+```
+
+Вернуться с `main` на `beta`:
+
+```bash
+sudo REPO_BRANCH=beta awg-tgbot update
+```
+
+После такого обновления новая ветка тоже сохранится автоматически.
+
 ---
 
 ## Режимы работы installer
@@ -257,7 +273,19 @@ sudo bash /opt/amnezia/bot/awg-tgbot.sh
 
 ## Полезные команды
 
-### Статус
+### Статус через installer
+
+```bash
+sudo awg-tgbot status
+```
+
+### Логи через installer
+
+```bash
+sudo awg-tgbot logs
+```
+
+### Статус systemd
 
 ```bash
 systemctl status vpn-bot.service --no-pager -l
@@ -281,11 +309,29 @@ tail -f /var/log/awg-tgbot/bot.log
 sudo awg-tgbot check-updates
 ```
 
-### Обновление beta-ветки
+### Обновление текущей установленной ветки
 
 ```bash
 sudo awg-tgbot update
 ```
+
+---
+
+## Быстрая проверка после установки
+
+```bash
+sudo awg-tgbot status
+systemctl status vpn-bot.service --no-pager -l
+journalctl -u vpn-bot.service -n 50 --no-pager
+grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/bot/.env
+```
+
+Что стоит увидеть:
+
+- сервис `vpn-bot.service` в состоянии `active (running)`;
+- в логах есть строки про успешный запуск polling;
+- в `.env` заполнены `SERVER_NAME`, `SERVER_IP`, `SERVER_PUBLIC_KEY`;
+- в статусе installer показывается правильная текущая ветка.
 
 ---
 

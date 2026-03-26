@@ -1,4 +1,6 @@
 from datetime import timedelta
+import asyncio
+import math
 
 from aiogram import Bot, F, Router, types
 from aiogram.filters import BaseFilter, Command, CommandObject
@@ -31,7 +33,9 @@ from keyboards import (
     get_admin_confirm_kb,
     get_admin_inline_kb,
     get_admin_user_actions_kb,
+    get_admin_users_page_kb,
     get_back_to_admin_kb,
+    get_back_to_users_page_kb,
     get_broadcast_confirm_kb,
 )
 from ui_constants import (
@@ -41,14 +45,16 @@ from ui_constants import (
     CB_ADMIN_LIST,
     CB_ADMIN_STATS,
     CB_ADMIN_SYNC,
+    CB_ADMIN_USER_PREFIX,
+    CB_ADMIN_USERS_PAGE_PREFIX,
     CB_BACK_TO_ADMIN,
     CB_BROADCAST_CANCEL,
     CB_BROADCAST_CONFIRM,
 )
-import asyncio
 
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
+ADMIN_USERS_PER_PAGE = 8
 
 
 def _cleanup_admin_rate_limit(now) -> None:
@@ -69,6 +75,13 @@ def admin_command_limited(action: str, actor_id: int = ADMIN_ID) -> bool:
 class IsAdmin(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
         return bool(message.from_user and message.from_user.id == ADMIN_ID)
+
+
+async def _edit_or_answer(message: types.Message, text: str, reply_markup=None) -> None:
+    try:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=reply_markup)
+    except Exception:
+        await message.answer(text, parse_mode="HTML", reply_markup=reply_markup)
 
 
 async def notify_user_subscription_granted(bot: Bot, user_id: int, days: int, new_until) -> bool:
@@ -114,15 +127,89 @@ async def build_stats_text() -> str:
     )
 
 
-async def _send_admin_panel(target) -> None:
+async def _send_admin_panel(target, *, edit: bool = False) -> None:
     stats_text = await build_stats_text()
     db_info = await db_health_info()
     db_status = "🟢 Нормально" if db_info["is_healthy"] else "🟡 Нужна проверка"
-    await target.answer(
-        stats_text + f"\n🗄 Статус БД: <b>{db_status}</b>",
-        parse_mode="HTML",
-        reply_markup=get_admin_inline_kb(),
+    text = (
+        "⚙️ <b>Админка</b>\n\n"
+        f"{stats_text}\n"
+        f"🗄 Статус БД: <b>{db_status}</b>\n\n"
+        "Выберите раздел:"
     )
+    if edit:
+        await _edit_or_answer(target, text, get_admin_inline_kb())
+    else:
+        await target.answer(text, parse_mode="HTML", reply_markup=get_admin_inline_kb())
+
+
+async def _get_users_page(page: int) -> tuple[list[tuple[int, str, str, str]], int, int]:
+    total_users = (await fetchone("SELECT COUNT(*) FROM users"))[0]
+    total_pages = max(1, math.ceil(total_users / ADMIN_USERS_PER_PAGE))
+    page = max(0, min(page, total_pages - 1))
+    rows = await fetchall(
+        "SELECT user_id, sub_until FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (ADMIN_USERS_PER_PAGE, page * ADMIN_USERS_PER_PAGE),
+    )
+    users: list[tuple[int, str, str, str]] = []
+    for uid, sub_until in rows:
+        tg_username, first_name = await get_user_meta(uid)
+        users.append((uid, sub_until, tg_username or "", first_name or ""))
+    return users, page, total_pages
+
+
+def _user_button_label(uid: int, sub_until: str, tg_username: str, first_name: str) -> str:
+    status_text, _ = get_status_text(sub_until)
+    icon = "🟢" if "Активна" in status_text else "⚪️"
+    label = f"@{tg_username}" if tg_username else (first_name or str(uid))
+    label = label.replace("\n", " ").strip()
+    if len(label) > 18:
+        label = label[:18] + "…"
+    return f"{icon} {label} · {uid}"
+
+
+async def _show_users_page(message: types.Message, page: int) -> None:
+    users, page, total_pages = await _get_users_page(page)
+    if not users:
+        await _edit_or_answer(message, "👥 <b>Пользователей пока нет.</b>", get_back_to_admin_kb())
+        return
+    keyboard_items = [
+        (uid, _user_button_label(uid, sub_until, tg_username, first_name))
+        for uid, sub_until, tg_username, first_name in users
+    ]
+    text = (
+        "👥 <b>Пользователи</b>\n\n"
+        f"Страница: <b>{page + 1}/{total_pages}</b>\n"
+        f"Пользователей на странице: <b>{len(users)}</b>\n\n"
+        "Выберите пользователя:"
+    )
+    await _edit_or_answer(message, text, get_admin_users_page_kb(keyboard_items, page, total_pages))
+
+
+async def _show_user_card(message: types.Message, uid: int, page: int) -> None:
+    row = await fetchone("SELECT sub_until FROM users WHERE user_id = ?", (uid,))
+    if not row:
+        await _edit_or_answer(message, "Пользователь не найден.", get_back_to_users_page_kb(page))
+        return
+    sub_until = row[0]
+    status_text, until_text = get_status_text(sub_until)
+    tg_username, first_name = await get_user_meta(uid)
+    text = (
+        "👤 <b>Пользователь</b>\n\n"
+        f"🆔 <code>{uid}</code>\n"
+        f"👤 Имя: {escape_html(first_name or '—')}\n"
+        f"✈️ Telegram: {format_tg_username(tg_username)}\n"
+        f"📌 {status_text}\n"
+        f"📅 До: <b>{until_text}</b>\n\n"
+        "Выберите действие:"
+    )
+    await _edit_or_answer(message, text, get_admin_user_actions_kb(uid, page))
+
+
+def _parse_uid_page(data: str, prefix: str) -> tuple[int, int]:
+    payload = data.removeprefix(prefix)
+    uid_raw, page_raw = payload.split(":", 1)
+    return int(uid_raw), int(page_raw)
 
 
 @router.message(F.text == BTN_ADMIN, IsAdmin())
@@ -136,7 +223,44 @@ async def back_to_admin(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
         return
     await cb.answer()
-    await _send_admin_panel(cb.message)
+    await _send_admin_panel(cb.message, edit=True)
+
+
+@router.callback_query(F.data == CB_ADMIN_LIST)
+async def admin_list_all(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await cb.answer()
+    await _show_users_page(cb.message, 0)
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_USERS_PAGE_PREFIX))
+async def admin_users_page(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        page = int(cb.data.removeprefix(CB_ADMIN_USERS_PAGE_PREFIX))
+    except ValueError:
+        await cb.answer("Некорректная страница", show_alert=True)
+        return
+    await cb.answer()
+    await _show_users_page(cb.message, page)
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_USER_PREFIX))
+async def admin_user_card(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        uid, page = _parse_uid_page(cb.data, CB_ADMIN_USER_PREFIX)
+    except Exception:
+        await cb.answer("Некорректный пользователь", show_alert=True)
+        return
+    await cb.answer()
+    await _show_user_card(cb.message, uid, page)
 
 
 @router.callback_query(F.data == CB_ADMIN_STATS)
@@ -144,8 +268,8 @@ async def admin_stats_cb(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    await cb.message.answer(await build_stats_text(), parse_mode="HTML", reply_markup=get_back_to_admin_kb())
     await cb.answer("Готово")
+    await _edit_or_answer(cb.message, await build_stats_text(), get_back_to_admin_kb())
 
 
 @router.callback_query(F.data == CB_ADMIN_SYNC)
@@ -157,7 +281,7 @@ async def admin_sync_awg(cb: types.CallbackQuery):
         db_info = await db_health_info()
         orphans = await get_orphan_awg_peers()
         details = []
-        for peer in orphans[:20]:
+        for peer in orphans[:15]:
             details.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'no ip'}")
         extra = "\n".join(details) if details else "Нет orphan peer."
         text = (
@@ -169,8 +293,8 @@ async def admin_sync_awg(cb: types.CallbackQuery):
             f"👻 Orphan peer в AWG: <b>{len(orphans)}</b>\n\n"
             f"{extra}"
         )
-        await cb.message.answer(text, parse_mode="HTML", reply_markup=get_back_to_admin_kb())
         await cb.answer("Синхронизация проверена")
+        await _edit_or_answer(cb.message, text, get_back_to_admin_kb())
     except Exception as e:
         logger.exception("Ошибка admin_sync_awg: %s", e)
         await cb.answer("❌ Ошибка проверки", show_alert=True)
@@ -183,15 +307,15 @@ async def admin_clean_orphans(cb: types.CallbackQuery):
         return
     orphans = await get_orphan_awg_peers()
     await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans"})
-    await cb.message.answer(
+    await cb.answer()
+    await _edit_or_answer(
+        cb.message,
         (
             "⚠️ <b>Подтвердите очистку orphan peer</b>\n\n"
             f"Будет удалено peer: <b>{len(orphans)}</b>"
         ),
-        parse_mode="HTML",
-        reply_markup=get_admin_confirm_kb("clean_orphans"),
+        get_admin_confirm_kb("clean_orphans", CB_BACK_TO_ADMIN),
     )
-    await cb.answer()
 
 
 @router.callback_query(F.data == "confirm_clean_orphans")
@@ -206,12 +330,12 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
     try:
         removed = await clean_orphan_awg_peers(force=False)
         await write_audit_log(ADMIN_ID, "clean_orphans", f"removed={removed}")
-        await cb.message.answer(
-            f"🧹 <b>Очистка orphan peer завершена</b>\n\nУдалено peer: <b>{removed}</b>",
-            parse_mode="HTML",
-            reply_markup=get_back_to_admin_kb(),
-        )
         await cb.answer("Очистка завершена")
+        await _edit_or_answer(
+            cb.message,
+            f"🧹 <b>Очистка orphan peer завершена</b>\n\nУдалено peer: <b>{removed}</b>",
+            get_back_to_admin_kb(),
+        )
     except Exception as e:
         logger.exception("Ошибка confirm_clean_orphans: %s", e)
         await cb.answer(str(e), show_alert=True)
@@ -220,38 +344,8 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
 @router.callback_query(F.data == "cancel_clean_orphans")
 async def cancel_clean_orphans(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans")
-    await cb.message.answer("❌ Очистка orphan peer отменена", reply_markup=get_back_to_admin_kb())
     await cb.answer("Отменено")
-
-
-@router.callback_query(F.data == CB_ADMIN_LIST)
-async def admin_list_all(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
-        return
-    users = await fetchall("SELECT user_id, sub_until FROM users ORDER BY created_at DESC LIMIT 30")
-    if not users:
-        await cb.message.answer("Список пользователей пуст.", reply_markup=get_back_to_admin_kb())
-        await cb.answer()
-        return
-    for uid, sub_until in users:
-        status_text, until_text = get_status_text(sub_until)
-        tg_username, first_name = await get_user_meta(uid)
-        await cb.message.answer(
-            (
-                f"👤 <b>Пользователь</b>\n"
-                f"🆔 <code>{uid}</code>\n"
-                f"👤 Имя: {escape_html(first_name)}\n"
-                f"✈️ Telegram: {format_tg_username(tg_username)}\n"
-                f"📌 {status_text}\n"
-                f"📅 До: <b>{until_text}</b>\n\n"
-                "Выберите действие:"
-            ),
-            parse_mode="HTML",
-            reply_markup=get_admin_user_actions_kb(uid),
-        )
-    await cb.message.answer("Вернуться в админ-панель:", reply_markup=get_back_to_admin_kb())
-    await cb.answer()
+    await _send_admin_panel(cb.message, edit=True)
 
 
 @router.callback_query(F.data.startswith("add_"))
@@ -260,9 +354,10 @@ async def admin_add_btn(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
         return
     try:
-        _prefix, days_raw, uid_raw = cb.data.split("_", 2)
+        _prefix, days_raw, uid_raw, page_raw = cb.data.split("_", 3)
         days = int(days_raw)
         uid = int(uid_raw)
+        page = int(page_raw)
         if days <= 0:
             await cb.answer("Некорректное количество дней", show_alert=True)
             return
@@ -272,15 +367,15 @@ async def admin_add_btn(cb: types.CallbackQuery):
         new_until = await issue_subscription(uid, days)
         notified = await notify_user_subscription_granted(cb.bot, uid, days, new_until)
         await write_audit_log(ADMIN_ID, f"admin_add_{days}", f"target={uid}; until={new_until.isoformat()}; notified={int(notified)}")
-        await cb.answer(f"✅ +{days} дней пользователю {uid}")
-        await cb.message.answer(
+        await cb.answer(f"✅ +{days} дней")
+        await _edit_or_answer(
+            cb.message,
             (
                 f"✅ <b>Пользователю выдано +{days} дней</b>\n\n"
                 f"🆔 <code>{uid}</code>\n"
                 f"📅 До: <b>{new_until.strftime('%d.%m.%Y %H:%M')}</b>"
             ),
-            parse_mode="HTML",
-            reply_markup=get_back_to_admin_kb(),
+            get_back_to_users_page_kb(page),
         )
         if not notified:
             await cb.message.answer("⚠️ Доступ выдан, но уведомление пользователю отправить не удалось.")
@@ -294,17 +389,23 @@ async def admin_revoke_btn(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    uid = int(cb.data.split("_")[1])
-    await set_pending_admin_action(ADMIN_ID, "revoke", {"action": "revoke", "target": uid})
-    await cb.message.answer(
+    try:
+        _prefix, uid_raw, page_raw = cb.data.split("_", 2)
+        uid = int(uid_raw)
+        page = int(page_raw)
+    except Exception:
+        await cb.answer("Некорректный пользователь", show_alert=True)
+        return
+    await set_pending_admin_action(ADMIN_ID, "revoke", {"action": "revoke", "target": uid, "page": page})
+    await cb.answer()
+    await _edit_or_answer(
+        cb.message,
         (
             "⚠️ <b>Подтвердите отключение доступа</b>\n\n"
             f"Пользователь: <code>{uid}</code>"
         ),
-        parse_mode="HTML",
-        reply_markup=get_admin_confirm_kb("revoke"),
+        get_admin_confirm_kb("revoke", f"{CB_ADMIN_USER_PREFIX}{uid}:{page}"),
     )
-    await cb.answer()
 
 
 @router.callback_query(F.data == "confirm_revoke")
@@ -317,19 +418,20 @@ async def confirm_revoke(cb: types.CallbackQuery):
         await cb.answer("Нет ожидающего действия", show_alert=True)
         return
     uid = int(action["target"])
+    page = int(action.get("page", 0))
     try:
         removed = await revoke_user_access(uid)
         await write_audit_log(ADMIN_ID, "admin_revoke", f"target={uid}; removed={removed}")
-        await cb.message.answer(
+        await cb.answer("Готово")
+        await _edit_or_answer(
+            cb.message,
             (
                 f"⛔ <b>Доступ отключён</b>\n\n"
                 f"🆔 <code>{uid}</code>\n"
                 f"🔌 Удалено peer: <b>{removed}</b>"
             ),
-            parse_mode="HTML",
-            reply_markup=get_back_to_admin_kb(),
+            get_back_to_users_page_kb(page),
         )
-        await cb.answer("Готово")
     except Exception as e:
         logger.exception("Ошибка confirm_revoke: %s", e)
         await cb.answer("❌ Не удалось отключить пользователя", show_alert=True)
@@ -337,9 +439,15 @@ async def confirm_revoke(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == "cancel_revoke")
 async def cancel_revoke(cb: types.CallbackQuery):
-    await clear_pending_admin_action(ADMIN_ID, "revoke")
-    await cb.message.answer("❌ Отключение отменено", reply_markup=get_back_to_admin_kb())
+    action = await pop_pending_admin_action(ADMIN_ID, "revoke")
+    if action and action.get("target") is not None:
+        uid = int(action["target"])
+        page = int(action.get("page", 0))
+        await cb.answer("Отменено")
+        await _show_user_card(cb.message, uid, page)
+        return
     await cb.answer("Отменено")
+    await _send_admin_panel(cb.message, edit=True)
 
 
 @router.callback_query(F.data.startswith("del_"))
@@ -347,17 +455,23 @@ async def admin_del_user(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    uid = int(cb.data.split("_")[1])
-    await set_pending_admin_action(ADMIN_ID, "delete_user", {"action": "delete_user", "target": uid})
-    await cb.message.answer(
+    try:
+        _prefix, uid_raw, page_raw = cb.data.split("_", 2)
+        uid = int(uid_raw)
+        page = int(page_raw)
+    except Exception:
+        await cb.answer("Некорректный пользователь", show_alert=True)
+        return
+    await set_pending_admin_action(ADMIN_ID, "delete_user", {"action": "delete_user", "target": uid, "page": page})
+    await cb.answer()
+    await _edit_or_answer(
+        cb.message,
         (
             "⚠️ <b>Подтвердите полное удаление пользователя</b>\n\n"
             f"Пользователь: <code>{uid}</code>"
         ),
-        parse_mode="HTML",
-        reply_markup=get_admin_confirm_kb("delete_user"),
+        get_admin_confirm_kb("delete_user", f"{CB_ADMIN_USER_PREFIX}{uid}:{page}"),
     )
-    await cb.answer()
 
 
 @router.callback_query(F.data == "confirm_delete_user")
@@ -370,19 +484,20 @@ async def confirm_delete_user(cb: types.CallbackQuery):
         await cb.answer("Нет ожидающего действия", show_alert=True)
         return
     uid = int(action["target"])
+    page = int(action.get("page", 0))
     try:
         peers_count, _ = await delete_user_everywhere(uid)
         await write_audit_log(ADMIN_ID, "admin_delete_user", f"target={uid}; removed={peers_count}")
-        await cb.message.answer(
+        await cb.answer("Готово")
+        await _edit_or_answer(
+            cb.message,
             (
                 f"🗑 <b>Пользователь удалён</b>\n\n"
                 f"🆔 <code>{uid}</code>\n"
                 f"🔌 Удалено peer: <b>{peers_count}</b>"
             ),
-            parse_mode="HTML",
-            reply_markup=get_back_to_admin_kb(),
+            get_back_to_users_page_kb(page),
         )
-        await cb.answer("Готово")
     except Exception as e:
         logger.exception("Ошибка confirm_delete_user: %s", e)
         await cb.answer("❌ Не удалось удалить пользователя", show_alert=True)
@@ -390,9 +505,15 @@ async def confirm_delete_user(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == "cancel_delete_user")
 async def cancel_delete_user(cb: types.CallbackQuery):
-    await clear_pending_admin_action(ADMIN_ID, "delete_user")
-    await cb.message.answer("❌ Удаление отменено", reply_markup=get_back_to_admin_kb())
+    action = await pop_pending_admin_action(ADMIN_ID, "delete_user")
+    if action and action.get("target") is not None:
+        uid = int(action["target"])
+        page = int(action.get("page", 0))
+        await cb.answer("Отменено")
+        await _show_user_card(cb.message, uid, page)
+        return
     await cb.answer("Отменено")
+    await _send_admin_panel(cb.message, edit=True)
 
 
 @router.callback_query(F.data == CB_ADMIN_BROADCAST)
@@ -401,15 +522,15 @@ async def admin_broadcast_btn(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
         return
     await cb.answer()
-    await cb.message.answer(
+    await _edit_or_answer(
+        cb.message,
         (
             "📢 <b>Рассылка</b>\n\n"
             "Используйте команду:\n"
             "<code>/send Ваш текст</code>\n\n"
             "Перед отправкой будет подтверждение."
         ),
-        parse_mode="HTML",
-        reply_markup=get_back_to_admin_kb(),
+        get_back_to_admin_kb(),
     )
 
 
@@ -435,16 +556,16 @@ async def broadcast_confirm(cb: types.CallbackQuery):
             logger.warning("Не удалось отправить сообщение user_id=%s: %s", uid, e)
     await clear_pending_broadcast(ADMIN_ID)
     await write_audit_log(ADMIN_ID, "broadcast", f"delivered={delivered}; failed={failed}")
-    await cb.message.answer(
+    await cb.answer("Отправлено")
+    await _edit_or_answer(
+        cb.message,
         (
             "📢 <b>Рассылка завершена</b>\n\n"
             f"✅ Доставлено: <b>{delivered}</b>\n"
             f"❌ Ошибок: <b>{failed}</b>"
         ),
-        parse_mode="HTML",
-        reply_markup=get_back_to_admin_kb(),
+        get_back_to_admin_kb(),
     )
-    await cb.answer("Отправлено")
 
 
 @router.callback_query(F.data == CB_BROADCAST_CANCEL)
@@ -454,8 +575,8 @@ async def broadcast_cancel(cb: types.CallbackQuery):
         return
     await clear_pending_broadcast(ADMIN_ID)
     await write_audit_log(ADMIN_ID, "broadcast_cancel", "")
-    await cb.message.answer("❌ Рассылка отменена", reply_markup=get_back_to_admin_kb())
     await cb.answer("Отменено")
+    await _send_admin_panel(cb.message, edit=True)
 
 
 @router.message(Command("give"), IsAdmin())
@@ -492,36 +613,9 @@ async def give_manual(message: types.Message, command: CommandObject):
         await message.answer("❌ Не удалось выдать доступ.")
 
 
-@router.message(Command("revoke"), IsAdmin())
-async def revoke_user_cmd(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("Формат: <code>/revoke ID</code>", parse_mode="HTML")
-        return
-    try:
-        uid = int(command.args)
-        await set_pending_admin_action(ADMIN_ID, "revoke", {"action": "revoke", "target": uid})
-        await message.answer(
-            f"⚠️ Подтвердите отключение пользователя <code>{uid}</code>",
-            parse_mode="HTML",
-            reply_markup=get_admin_confirm_kb("revoke"),
-        )
-    except Exception as e:
-        logger.exception("Ошибка /revoke: %s", e)
-        await message.answer("❌ Не удалось подготовить отключение пользователя")
-
-
 @router.message(Command("users"), IsAdmin())
 async def list_users_cmd(message: types.Message):
-    rows = await fetchall("SELECT user_id, sub_until FROM users ORDER BY created_at DESC LIMIT 50")
-    if not rows:
-        await message.answer("Пользователей пока нет.")
-        return
-    lines = ["👥 <b>Последние пользователи</b>\n"]
-    for uid, sub_until in rows:
-        status_text, until_text = get_status_text(sub_until)
-        tg_username, _ = await get_user_meta(uid)
-        lines.append(f"• <code>{uid}</code> — {format_tg_username(tg_username)} — {status_text} — {until_text}")
-    await message.answer("\n".join(lines), parse_mode="HTML")
+    await _show_users_page(message, 0)
 
 
 @router.message(Command("stats"), IsAdmin())

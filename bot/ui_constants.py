@@ -22,6 +22,8 @@ CB_ADMIN_STATS = "admin_stats"
 CB_ADMIN_SYNC = "admin_sync_awg"
 CB_ADMIN_CLEAN_ORPHANS = "admin_clean_orphans"
 CB_ADMIN_BROADCAST = "admin_broadcast"
+CB_ADMIN_USERS_PAGE_PREFIX = "admin_users_page_"
+CB_ADMIN_USER_PREFIX = "admin_user_"
 
 CB_BROADCAST_CONFIRM = "broadcast_confirm"
 CB_BROADCAST_CANCEL = "broadcast_cancel"

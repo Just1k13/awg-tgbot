@@ -4,6 +4,7 @@ from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS
 from ui_constants import (
     BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_GUIDE, BTN_PROFILE, BTN_SUPPORT,
     CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
+    CB_ADMIN_USER_PREFIX, CB_ADMIN_USERS_PAGE_PREFIX,
     CB_BACK_TO_ADMIN, CB_BACK_TO_CONFIGS, CB_BACK_TO_PROFILE,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7, CB_CONFIG_DEVICE_PREFIX,
     CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION_BUY, CB_SHOW_INSTRUCTION_CONFIGS,
@@ -73,30 +74,63 @@ def get_config_result_kb() -> InlineKeyboardMarkup:
     )
 
 
-def get_admin_user_actions_kb(user_id: int) -> InlineKeyboardMarkup:
+def get_admin_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="+7 дней", callback_data=f"add_7_{user_id}"),
-                InlineKeyboardButton(text="+30 дней", callback_data=f"add_30_{user_id}"),
-                InlineKeyboardButton(text="+90 дней", callback_data=f"add_90_{user_id}"),
+                InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_LIST),
+                InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS),
             ],
             [
-                InlineKeyboardButton(text="Отключить", callback_data=f"revoke_{user_id}"),
-                InlineKeyboardButton(text="Удалить", callback_data=f"del_{user_id}"),
+                InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC),
+                InlineKeyboardButton(text="🧹 Очистить orphan", callback_data=CB_ADMIN_CLEAN_ORPHANS),
             ],
+            [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
         ]
     )
 
 
-def get_admin_inline_kb() -> InlineKeyboardMarkup:
+def get_admin_users_page_kb(users: list[tuple[int, str]], page: int, total_pages: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for user_id, label in users:
+        rows.append([
+            InlineKeyboardButton(text=label, callback_data=f"{CB_ADMIN_USER_PREFIX}{user_id}:{page}")
+        ])
+
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page - 1}"))
+    nav_row.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page + 1 < total_pages:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page + 1}"))
+    rows.append(nav_row)
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_BACK_TO_ADMIN)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_admin_user_actions_kb(user_id: int, page: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_LIST)],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
-            [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC)],
-            [InlineKeyboardButton(text="🧹 Очистить orphan peer", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
-            [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
+            [
+                InlineKeyboardButton(text="+7 дней", callback_data=f"add_7_{user_id}_{page}"),
+                InlineKeyboardButton(text="+30 дней", callback_data=f"add_30_{user_id}_{page}"),
+                InlineKeyboardButton(text="+90 дней", callback_data=f"add_90_{user_id}_{page}"),
+            ],
+            [
+                InlineKeyboardButton(text="Отключить", callback_data=f"revoke_{user_id}_{page}"),
+                InlineKeyboardButton(text="Удалить", callback_data=f"del_{user_id}_{page}"),
+            ],
+            [InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")],
+            [InlineKeyboardButton(text="⬅️ В админку", callback_data=CB_BACK_TO_ADMIN)],
+        ]
+    )
+
+
+def get_back_to_users_page_kb(page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")],
+            [InlineKeyboardButton(text="⬅️ В админку", callback_data=CB_BACK_TO_ADMIN)],
         ]
     )
 
@@ -117,11 +151,11 @@ def get_broadcast_confirm_kb() -> InlineKeyboardMarkup:
     )
 
 
-def get_admin_confirm_kb(action_key: str) -> InlineKeyboardMarkup:
+def get_admin_confirm_kb(action_key: str, back_callback: str = CB_BACK_TO_ADMIN) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{action_key}")],
             [InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_{action_key}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_BACK_TO_ADMIN)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)],
         ]
     )

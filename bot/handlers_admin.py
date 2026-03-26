@@ -42,6 +42,7 @@ from keyboards import (
     get_back_to_admin_kb,
     get_back_to_users_page_kb,
     get_broadcast_confirm_kb,
+    get_main_menu,
 )
 from ui_constants import (
     BTN_ADMIN,
@@ -100,6 +101,10 @@ def admin_command_limited(action: str, actor_id: int = ADMIN_ID) -> bool:
     last = admin_command_rate_limit.get(key)
     admin_command_rate_limit[key] = now
     return bool(last and (now - last).total_seconds() < ADMIN_COMMAND_COOLDOWN_SECONDS)
+
+
+def _normalize_text(value: str | None) -> str:
+    return (value or "").strip().casefold()
 
 
 async def _edit_or_answer(message: types.Message, text: str, reply_markup=None) -> None:
@@ -1115,25 +1120,32 @@ async def handle_admin_pending_input(message: types.Message):
             await message.answer("❌ Не удалось выдать доступ вручную.")
         return
 
-    if message.text == BTN_PROFILE:
+    text = _normalize_text(message.text)
+    if text in {_normalize_text(BTN_PROFILE), "профиль", "👤 профиль"}:
         from handlers_user import _send_profile
         await _send_profile(message, message.from_user)
         return
-    if message.text == BTN_CONFIGS:
+    if text in {_normalize_text(BTN_CONFIGS), "конфиги", "🔑 конфиги"}:
         from handlers_user import _send_configs_menu
         await _send_configs_menu(message, message.from_user)
         return
-    if message.text == BTN_BUY:
+    if text in {_normalize_text(BTN_BUY), "купить", "купить / продлить", "💳 купить / продлить"}:
         from handlers_user import _send_buy_menu
         await _send_buy_menu(message, message.from_user.id)
         return
-    if message.text == BTN_GUIDE:
+    if text in {_normalize_text(BTN_GUIDE), "инструкция", "📖 инструкция"}:
         from handlers_user import _send_instruction
         await _send_instruction(message, CB_BACK_TO_PROFILE)
         return
-    if message.text == BTN_SUPPORT:
+    if text in {_normalize_text(BTN_SUPPORT), "поддержка", "🆘 поддержка"}:
         await message.answer(
             f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(get_support_username())}</b>",
             parse_mode="HTML",
         )
         return
+
+    logger.warning("Необработанное admin message text=%r", message.text)
+    await message.answer(
+        "Не понял действие. Используйте кнопки меню ниже.",
+        reply_markup=get_main_menu(message.from_user.id, ADMIN_ID),
+    )

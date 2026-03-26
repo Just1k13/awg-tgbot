@@ -1,27 +1,51 @@
 from datetime import timedelta
 
-
-from aiogram import F, Router, types
-from aiogram import Bot
+from aiogram import Bot, F, Router, types
 from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
-    clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
-    get_orphan_awg_peers, issue_subscription, revoke_user_access,
+    clean_orphan_awg_peers,
+    count_free_ip_slots,
+    delete_user_everywhere,
+    get_orphan_awg_peers,
+    issue_subscription,
+    revoke_user_access,
 )
 from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, logger
 from database import (
-    clear_pending_admin_action, clear_pending_broadcast, db_health_info, fetchall, fetchone,
-    get_pending_broadcast, get_recent_audit, get_user_meta, pop_pending_admin_action,
-    set_pending_admin_action, set_pending_broadcast, write_audit_log,
+    clear_pending_admin_action,
+    clear_pending_broadcast,
+    db_health_info,
+    fetchall,
+    fetchone,
+    get_pending_broadcast,
+    get_recent_audit,
+    get_user_meta,
+    pop_pending_admin_action,
+    set_pending_admin_action,
+    set_pending_broadcast,
+    write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
-import asyncio
-from keyboards import get_admin_confirm_kb, get_admin_inline_kb, get_back_to_admin_kb, get_broadcast_confirm_kb
-from ui_constants import (
-    BTN_ADMIN, CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
-    CB_BACK_TO_ADMIN, CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
+from keyboards import (
+    get_admin_confirm_kb,
+    get_admin_inline_kb,
+    get_admin_user_actions_kb,
+    get_back_to_admin_kb,
+    get_broadcast_confirm_kb,
 )
+from ui_constants import (
+    BTN_ADMIN,
+    CB_ADMIN_BROADCAST,
+    CB_ADMIN_CLEAN_ORPHANS,
+    CB_ADMIN_LIST,
+    CB_ADMIN_STATS,
+    CB_ADMIN_SYNC,
+    CB_BACK_TO_ADMIN,
+    CB_BROADCAST_CANCEL,
+    CB_BROADCAST_CONFIRM,
+)
+import asyncio
 
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
@@ -213,13 +237,6 @@ async def admin_list_all(cb: types.CallbackQuery):
     for uid, sub_until in users:
         status_text, until_text = get_status_text(sub_until)
         tg_username, first_name = await get_user_meta(uid)
-        kb = types.InlineKeyboardMarkup(
-            inline_keyboard=[[
-                types.InlineKeyboardButton(text="+30 дней", callback_data=f"add_30_{uid}"),
-                types.InlineKeyboardButton(text="Отключить", callback_data=f"revoke_{uid}"),
-                types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{uid}"),
-            ]]
-        )
         await cb.message.answer(
             (
                 f"👤 <b>Пользователь</b>\n"
@@ -227,32 +244,38 @@ async def admin_list_all(cb: types.CallbackQuery):
                 f"👤 Имя: {escape_html(first_name)}\n"
                 f"✈️ Telegram: {format_tg_username(tg_username)}\n"
                 f"📌 {status_text}\n"
-                f"📅 До: <b>{until_text}</b>"
+                f"📅 До: <b>{until_text}</b>\n\n"
+                "Выберите действие:"
             ),
             parse_mode="HTML",
-            reply_markup=kb,
+            reply_markup=get_admin_user_actions_kb(uid),
         )
     await cb.message.answer("Вернуться в админ-панель:", reply_markup=get_back_to_admin_kb())
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("add_30_"))
+@router.callback_query(F.data.startswith("add_"))
 async def admin_add_btn(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
     try:
-        uid = int(cb.data.split("_")[2])
-        if admin_command_limited("admin_add_30", cb.from_user.id):
+        _prefix, days_raw, uid_raw = cb.data.split("_", 2)
+        days = int(days_raw)
+        uid = int(uid_raw)
+        if days <= 0:
+            await cb.answer("Некорректное количество дней", show_alert=True)
+            return
+        if admin_command_limited(f"admin_add_{days}", cb.from_user.id):
             await cb.answer("Слишком часто", show_alert=True)
             return
-        new_until = await issue_subscription(uid, 30)
-        notified = await notify_user_subscription_granted(cb.bot, uid, 30, new_until)
-        await write_audit_log(ADMIN_ID, "admin_add_30", f"target={uid}; until={new_until.isoformat()}; notified={int(notified)}")
-        await cb.answer(f"✅ +30 дней пользователю {uid}")
+        new_until = await issue_subscription(uid, days)
+        notified = await notify_user_subscription_granted(cb.bot, uid, days, new_until)
+        await write_audit_log(ADMIN_ID, f"admin_add_{days}", f"target={uid}; until={new_until.isoformat()}; notified={int(notified)}")
+        await cb.answer(f"✅ +{days} дней пользователю {uid}")
         await cb.message.answer(
             (
-                f"✅ <b>Пользователю выдано +30 дней</b>\n\n"
+                f"✅ <b>Пользователю выдано +{days} дней</b>\n\n"
                 f"🆔 <code>{uid}</code>\n"
                 f"📅 До: <b>{new_until.strftime('%d.%m.%Y %H:%M')}</b>"
             ),
@@ -262,7 +285,7 @@ async def admin_add_btn(cb: types.CallbackQuery):
         if not notified:
             await cb.message.answer("⚠️ Доступ выдан, но уведомление пользователю отправить не удалось.")
     except Exception as e:
-        logger.exception("Ошибка add_30: %s", e)
+        logger.exception("Ошибка add_days: %s", e)
         await cb.answer("❌ Не удалось продлить доступ", show_alert=True)
 
 
@@ -441,7 +464,7 @@ async def give_manual(message: types.Message, command: CommandObject):
         await message.answer("⏳ Слишком частый вызов /give")
         return
     if not command.args:
-        await message.answer("Формат: <code>/give ID [ДНИ]</code>\nПо умолчанию: 30 дней", parse_mode="HTML")
+        await message.answer("Формат: <code>/give ID [ДНИ]</code>\nНапример: <code>/give 123456789 45</code>", parse_mode="HTML")
         return
     try:
         parts = command.args.split()
@@ -463,7 +486,7 @@ async def give_manual(message: types.Message, command: CommandObject):
         if not notified:
             await message.answer("⚠️ Доступ выдан, но уведомление пользователю отправить не удалось.")
     except ValueError:
-        await message.answer("Ошибка формата. Пример: <code>/give 123456789 30</code> или <code>/give 123456789</code>", parse_mode="HTML")
+        await message.answer("Ошибка формата. Пример: <code>/give 123456789 45</code>", parse_mode="HTML")
     except Exception as e:
         logger.exception("Ошибка /give: %s", e)
         await message.answer("❌ Не удалось выдать доступ.")

@@ -6,7 +6,7 @@ from ui_constants import (
     CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
     CB_BACK_TO_ADMIN, CB_BACK_TO_CONFIGS, CB_BACK_TO_PROFILE,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7, CB_CONFIG_DEVICE_PREFIX,
-    CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION, CB_SHOW_INSTRUCTION_BUY, CB_SHOW_INSTRUCTION_CONFIGS,
+    CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION_BUY, CB_SHOW_INSTRUCTION_CONFIGS,
     CB_SHOW_INSTRUCTION_PROFILE,
 )
 
@@ -47,16 +47,8 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
 
 
 def get_instruction_inline_kb(back_callback: str = CB_BACK_TO_PROFILE) -> InlineKeyboardMarkup:
-    refresh_callback = CB_SHOW_INSTRUCTION_PROFILE
-    if back_callback == CB_BACK_TO_CONFIGS:
-        refresh_callback = CB_SHOW_INSTRUCTION_CONFIGS
-    elif back_callback == CB_BACK_TO_ADMIN:
-        refresh_callback = CB_SHOW_INSTRUCTION
-    elif back_callback == CB_BACK_TO_PROFILE:
-        refresh_callback = CB_SHOW_INSTRUCTION_PROFILE
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📖 Обновить инструкцию", callback_data=refresh_callback)],
             [InlineKeyboardButton(text="⬅️ Назад", callback_data=back_callback)],
         ]
     )
@@ -77,6 +69,22 @@ def get_config_result_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION_CONFIGS)],
             [InlineKeyboardButton(text="⬅️ Назад к устройствам", callback_data=CB_BACK_TO_CONFIGS)],
+        ]
+    )
+
+
+def get_admin_user_actions_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="+7 дней", callback_data=f"add_7_{user_id}"),
+                InlineKeyboardButton(text="+30 дней", callback_data=f"add_30_{user_id}"),
+                InlineKeyboardButton(text="+90 дней", callback_data=f"add_90_{user_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="Отключить", callback_data=f"revoke_{user_id}"),
+                InlineKeyboardButton(text="Удалить", callback_data=f"del_{user_id}"),
+            ],
         ]
     )
 

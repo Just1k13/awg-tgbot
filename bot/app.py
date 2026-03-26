@@ -2,7 +2,7 @@ import asyncio
 from time import monotonic
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router, types
-from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.exceptions import TelegramUnauthorizedError, TokenValidationError
 
 from awg_backend import (
     bootstrap_protected_peers,
@@ -10,6 +10,7 @@ from awg_backend import (
     cleanup_expired_subscriptions,
     expired_subscriptions_worker,
     get_orphan_awg_peers,
+    run_docker,
 )
 from config import (
     ADMIN_ID,
@@ -119,7 +120,14 @@ async def cleanup_stale_pending_keys() -> int:
 async def main():
     global bg_worker_task
 
-    bot = Bot(token=API_TOKEN)
+    try:
+        bot = Bot(token=API_TOKEN)
+    except TokenValidationError as e:
+        logger.error(
+            "Некорректный формат API_TOKEN. Проверь токен в .env и обнови его через BotFather при необходимости."
+        )
+        raise RuntimeError("Некорректный формат API_TOKEN") from e
+
     logger.info("Запуск бота")
     logger.info("DB_PATH=%s", DB_PATH)
     logger.info("DOCKER_CONTAINER=%s WG_INTERFACE=%s", DOCKER_CONTAINER, WG_INTERFACE)
@@ -142,7 +150,8 @@ async def main():
 
     try:
         await check_awg_container()
-        logger.info("Контейнер и интерфейс AWG доступны")
+        await run_docker(["wg", "genpsk"])
+        logger.info("Контейнер, интерфейс AWG и генерация PSK доступны")
     except Exception as e:
         logger.exception("AWG недоступен: %s", e)
         await bot.session.close()
@@ -185,6 +194,10 @@ async def main():
     finally:
         if bg_worker_task:
             bg_worker_task.cancel()
+            try:
+                await bg_worker_task
+            except asyncio.CancelledError:
+                logger.info("Фоновый cleanup worker остановлен")
         await close_shared_db()
         await bot.session.close()
 

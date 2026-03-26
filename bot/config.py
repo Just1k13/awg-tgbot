@@ -1,3 +1,4 @@
+import base64
 import ipaddress
 import logging
 import os
@@ -6,7 +7,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-ENV_FILE = Path('.env')
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_FILE = Path(os.getenv('AWG_TGBOT_ENV_FILE', str(BASE_DIR / '.env')))
 load_dotenv(ENV_FILE)
 
 DEFAULT_ENV: dict[str, str] = {
@@ -79,6 +81,7 @@ _existing_env = _read_env_file(ENV_FILE)
 
 def _save_env_value(name: str, value: str) -> None:
     _existing_env[name] = value
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
     content = '\n'.join(f'{key}={val}' for key, val in sorted(_existing_env.items())) + '\n'
     ENV_FILE.write_text(content, encoding='utf-8')
     os.environ[name] = value
@@ -174,7 +177,9 @@ def _find_awg_container() -> str:
 def _is_public_ip(value: str) -> bool:
     try:
         addr = ipaddress.ip_address(value)
-        return addr.version == 4 and not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified)
+        return addr.version == 4 and not (
+            addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified
+        )
     except ValueError:
         return False
 
@@ -296,6 +301,27 @@ def _env_with_runtime_default(name: str, default: str) -> str:
     return default
 
 
+def _normalize_db_path(value: str) -> str:
+    raw = (value or '').strip()
+    if not raw:
+        raw = DEFAULT_ENV['DB_PATH']
+    path = Path(raw)
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return str(path)
+
+
+def _is_valid_awg_public_key(value: str) -> bool:
+    raw_value = (value or '').strip()
+    if not raw_value:
+        return False
+    try:
+        decoded = base64.b64decode(raw_value, validate=True)
+        return len(decoded) == 32
+    except Exception:
+        return False
+
+
 DOCKER_CONTAINER_HINT = _find_awg_container()
 WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE'])
 _detected_awg = _detect_awg_from_container(DOCKER_CONTAINER_HINT, WG_INTERFACE_HINT)
@@ -372,7 +398,7 @@ PUBLIC_HOST = PUBLIC_HOST_HINT
 
 DOCKER_CONTAINER = _env_with_runtime_default('DOCKER_CONTAINER', DOCKER_CONTAINER_HINT or DEFAULT_ENV['DOCKER_CONTAINER'])
 WG_INTERFACE = _env_with_runtime_default('WG_INTERFACE', _detected_awg.get('WG_INTERFACE', '').strip() or DEFAULT_ENV['WG_INTERFACE'])
-DB_PATH = _env_with_runtime_default('DB_PATH', DEFAULT_ENV['DB_PATH'])
+DB_PATH = _normalize_db_path(_env_with_runtime_default('DB_PATH', DEFAULT_ENV['DB_PATH']))
 
 DOWNLOAD_URL = _env_with_runtime_default('DOWNLOAD_URL', DEFAULT_ENV['DOWNLOAD_URL'])
 SUPPORT_USERNAME = _env_with_runtime_default('SUPPORT_USERNAME', DEFAULT_ENV['SUPPORT_USERNAME'])
@@ -429,9 +455,11 @@ if ADMIN_ID <= 0:
     required_missing.append('ADMIN_ID')
 if not SERVER_PUBLIC_KEY:
     required_missing.append('SERVER_PUBLIC_KEY')
+elif not _is_valid_awg_public_key(SERVER_PUBLIC_KEY):
+    required_missing.append('SERVER_PUBLIC_KEY (некорректный формат)')
 if not SERVER_IP:
     required_missing.append(_server_ip_error or 'SERVER_IP')
-if _public_host_error:
+if _public_host_error and not SERVER_IP:
     required_missing.append(_public_host_error)
 if not ENCRYPTION_SECRET:
     required_missing.append('ENCRYPTION_SECRET')

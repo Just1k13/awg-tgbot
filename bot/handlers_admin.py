@@ -17,10 +17,10 @@ from database import (
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
 import asyncio
-from keyboards import get_admin_confirm_kb, get_admin_inline_kb, get_broadcast_confirm_kb
+from keyboards import get_admin_confirm_kb, get_admin_inline_kb, get_back_to_admin_kb, get_broadcast_confirm_kb
 from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
-    CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
+    CB_BACK_TO_ADMIN, CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
 )
 
 router = Router()
@@ -90,16 +90,29 @@ async def build_stats_text() -> str:
     )
 
 
-@router.message(F.text == BTN_ADMIN, IsAdmin())
-async def admin_panel(message: types.Message):
+async def _send_admin_panel(target) -> None:
     stats_text = await build_stats_text()
     db_info = await db_health_info()
     db_status = "🟢 Нормально" if db_info["is_healthy"] else "🟡 Нужна проверка"
-    await message.answer(
+    await target.answer(
         stats_text + f"\n🗄 Статус БД: <b>{db_status}</b>",
         parse_mode="HTML",
         reply_markup=get_admin_inline_kb(),
     )
+
+
+@router.message(F.text == BTN_ADMIN, IsAdmin())
+async def admin_panel(message: types.Message):
+    await _send_admin_panel(message)
+
+
+@router.callback_query(F.data == CB_BACK_TO_ADMIN)
+async def back_to_admin(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await cb.answer()
+    await _send_admin_panel(cb.message)
 
 
 @router.callback_query(F.data == CB_ADMIN_STATS)
@@ -107,7 +120,7 @@ async def admin_stats_cb(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    await cb.message.answer(await build_stats_text(), parse_mode="HTML")
+    await cb.message.answer(await build_stats_text(), parse_mode="HTML", reply_markup=get_back_to_admin_kb())
     await cb.answer("Готово")
 
 
@@ -132,7 +145,7 @@ async def admin_sync_awg(cb: types.CallbackQuery):
             f"👻 Orphan peer в AWG: <b>{len(orphans)}</b>\n\n"
             f"{extra}"
         )
-        await cb.message.answer(text, parse_mode="HTML")
+        await cb.message.answer(text, parse_mode="HTML", reply_markup=get_back_to_admin_kb())
         await cb.answer("Синхронизация проверена")
     except Exception as e:
         logger.exception("Ошибка admin_sync_awg: %s", e)
@@ -172,6 +185,7 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
         await cb.message.answer(
             f"🧹 <b>Очистка orphan peer завершена</b>\n\nУдалено peer: <b>{removed}</b>",
             parse_mode="HTML",
+            reply_markup=get_back_to_admin_kb(),
         )
         await cb.answer("Очистка завершена")
     except Exception as e:
@@ -182,7 +196,7 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
 @router.callback_query(F.data == "cancel_clean_orphans")
 async def cancel_clean_orphans(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans")
-    await cb.message.answer("❌ Очистка orphan peer отменена")
+    await cb.message.answer("❌ Очистка orphan peer отменена", reply_markup=get_back_to_admin_kb())
     await cb.answer("Отменено")
 
 
@@ -193,7 +207,7 @@ async def admin_list_all(cb: types.CallbackQuery):
         return
     users = await fetchall("SELECT user_id, sub_until FROM users ORDER BY created_at DESC LIMIT 30")
     if not users:
-        await cb.message.answer("Список пользователей пуст.")
+        await cb.message.answer("Список пользователей пуст.", reply_markup=get_back_to_admin_kb())
         await cb.answer()
         return
     for uid, sub_until in users:
@@ -218,6 +232,7 @@ async def admin_list_all(cb: types.CallbackQuery):
             parse_mode="HTML",
             reply_markup=kb,
         )
+    await cb.message.answer("Вернуться в админ-панель:", reply_markup=get_back_to_admin_kb())
     await cb.answer()
 
 
@@ -242,6 +257,7 @@ async def admin_add_btn(cb: types.CallbackQuery):
                 f"📅 До: <b>{new_until.strftime('%d.%m.%Y %H:%M')}</b>"
             ),
             parse_mode="HTML",
+            reply_markup=get_back_to_admin_kb(),
         )
         if not notified:
             await cb.message.answer("⚠️ Доступ выдан, но уведомление пользователю отправить не удалось.")
@@ -288,6 +304,7 @@ async def confirm_revoke(cb: types.CallbackQuery):
                 f"🔌 Удалено peer: <b>{removed}</b>"
             ),
             parse_mode="HTML",
+            reply_markup=get_back_to_admin_kb(),
         )
         await cb.answer("Готово")
     except Exception as e:
@@ -298,7 +315,7 @@ async def confirm_revoke(cb: types.CallbackQuery):
 @router.callback_query(F.data == "cancel_revoke")
 async def cancel_revoke(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "revoke")
-    await cb.message.answer("❌ Отключение отменено")
+    await cb.message.answer("❌ Отключение отменено", reply_markup=get_back_to_admin_kb())
     await cb.answer("Отменено")
 
 
@@ -340,6 +357,7 @@ async def confirm_delete_user(cb: types.CallbackQuery):
                 f"🔌 Удалено peer: <b>{peers_count}</b>"
             ),
             parse_mode="HTML",
+            reply_markup=get_back_to_admin_kb(),
         )
         await cb.answer("Готово")
     except Exception as e:
@@ -350,7 +368,7 @@ async def confirm_delete_user(cb: types.CallbackQuery):
 @router.callback_query(F.data == "cancel_delete_user")
 async def cancel_delete_user(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "delete_user")
-    await cb.message.answer("❌ Удаление отменено")
+    await cb.message.answer("❌ Удаление отменено", reply_markup=get_back_to_admin_kb())
     await cb.answer("Отменено")
 
 
@@ -368,6 +386,7 @@ async def admin_broadcast_btn(cb: types.CallbackQuery):
             "Перед отправкой будет подтверждение."
         ),
         parse_mode="HTML",
+        reply_markup=get_back_to_admin_kb(),
     )
 
 
@@ -400,6 +419,7 @@ async def broadcast_confirm(cb: types.CallbackQuery):
             f"❌ Ошибок: <b>{failed}</b>"
         ),
         parse_mode="HTML",
+        reply_markup=get_back_to_admin_kb(),
     )
     await cb.answer("Отправлено")
 
@@ -411,7 +431,7 @@ async def broadcast_cancel(cb: types.CallbackQuery):
         return
     await clear_pending_broadcast(ADMIN_ID)
     await write_audit_log(ADMIN_ID, "broadcast_cancel", "")
-    await cb.message.answer("❌ Рассылка отменена")
+    await cb.message.answer("❌ Рассылка отменена", reply_markup=get_back_to_admin_kb())
     await cb.answer("Отменено")
 
 

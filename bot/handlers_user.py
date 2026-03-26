@@ -15,6 +15,7 @@ from database import ensure_user_exists, get_user_keys, get_user_subscription
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active
 from keyboards import (
     get_buy_inline_kb,
+    get_config_result_kb,
     get_configs_devices_kb,
     get_instruction_inline_kb,
     get_main_menu,
@@ -32,6 +33,9 @@ from ui_constants import (
     CB_CONFIG_DEVICE_PREFIX,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
+    CB_SHOW_INSTRUCTION_BUY,
+    CB_SHOW_INSTRUCTION_CONFIGS,
+    CB_SHOW_INSTRUCTION_PROFILE,
 )
 
 router = Router()
@@ -120,6 +124,15 @@ async def _send_configs_menu(target, user) -> None:
     )
 
 
+async def _send_instruction(target, back_callback: str) -> None:
+    await target.answer(
+        get_instruction_text(),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=get_instruction_inline_kb(back_callback),
+    )
+
+
 @router.callback_query(F.data == "noop")
 async def noop_callback(cb: types.CallbackQuery):
     await cb.answer()
@@ -194,23 +207,18 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     else:
         await cb.message.answer(
             "Для выбранного устройства не удалось собрать .conf. Напишите в поддержку или попросите администратора перевыдать доступ.",
-            reply_markup=get_instruction_inline_kb(CB_BACK_TO_CONFIGS),
+            reply_markup=get_config_result_kb(),
         )
         return
     await cb.message.answer(
-        "Если не знаете, что делать дальше, откройте инструкцию:",
-        reply_markup=get_instruction_inline_kb(CB_BACK_TO_CONFIGS),
+        "Готово. Можно открыть инструкцию или вернуться к списку устройств:",
+        reply_markup=get_config_result_kb(),
     )
 
 
 @router.message(F.text == BTN_GUIDE)
 async def guide(message: types.Message):
-    await message.answer(
-        get_instruction_text(),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=get_instruction_inline_kb(CB_BACK_TO_PROFILE),
-    )
+    await _send_instruction(message, CB_BACK_TO_PROFILE)
 
 
 @router.message(F.text == BTN_SUPPORT)
@@ -261,12 +269,25 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
 @router.callback_query(F.data == CB_SHOW_INSTRUCTION)
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
-    await cb.message.answer(
-        get_instruction_text(),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=get_instruction_inline_kb(CB_BACK_TO_PROFILE),
-    )
+    await _send_instruction(cb.message, CB_BACK_TO_PROFILE)
+
+
+@router.callback_query(F.data == CB_SHOW_INSTRUCTION_PROFILE)
+async def show_instruction_profile_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    await _send_instruction(cb.message, CB_BACK_TO_PROFILE)
+
+
+@router.callback_query(F.data == CB_SHOW_INSTRUCTION_CONFIGS)
+async def show_instruction_configs_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    await _send_instruction(cb.message, CB_BACK_TO_CONFIGS)
+
+
+@router.callback_query(F.data == CB_SHOW_INSTRUCTION_BUY)
+async def show_instruction_buy_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    await _send_instruction(cb.message, CB_BACK_TO_PROFILE)
 
 
 @router.callback_query(F.data == CB_BACK_TO_PROFILE)

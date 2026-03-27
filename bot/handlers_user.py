@@ -15,6 +15,7 @@ from database import ensure_user_exists, get_user_keys, get_user_subscription
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active
 from keyboards import (
     get_buy_inline_kb,
+    get_config_result_kb,
     get_configs_devices_kb,
     get_instruction_inline_kb,
     get_main_menu,
@@ -197,8 +198,8 @@ async def show_selected_device_config(cb: types.CallbackQuery):
         )
         return
     await cb.message.answer(
-        "Готово ✅ Если нужна помощь с импортом — откройте инструкцию:",
-        reply_markup=get_instruction_inline_kb(),
+        "Готово ✅ Можно вернуться к списку устройств или открыть инструкцию:",
+        reply_markup=get_config_result_kb(),
     )
 
 

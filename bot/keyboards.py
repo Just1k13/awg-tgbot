@@ -59,6 +59,15 @@ def get_configs_devices_kb(configs: list[tuple[int, int, str, str]]) -> InlineKe
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def get_config_result_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад к устройствам", callback_data="open_configs")],
+            [InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION)],
+        ]
+    )
+
+
 def get_admin_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

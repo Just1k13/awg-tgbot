@@ -133,27 +133,35 @@ awg-tgbot/
 ### Основная ветка (`main`)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash
+set -euo pipefail
+curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash -s --
 ```
 
 или
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash
+set -euo pipefail
+wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/main/awg-tgbot.sh | sudo bash -s --
 ```
+
+
+
+> Почему добавлен `set -euo pipefail`: если `curl/wget` не смог скачать скрипт, без `pipefail` `bash` может завершиться с `0` на пустом stdin и это выглядит как «silent no-op». С `pipefail` команда падает явно.
 
 ### Бета-ветка (`beta`)
 
 Для первичной установки `beta` используй запуск с переменной `REPO_BRANCH=beta`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash
+set -euo pipefail
+curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash -s --
 ```
 
 или
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash
+set -euo pipefail
+wget -qO- https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.sh | sudo REPO_BRANCH=beta bash -s --
 ```
 
 После первой установки ветка сохраняется автоматически в `/opt/amnezia/bot/.state/repo_branch`, поэтому дальнейшие обновления уже можно запускать обычной командой:

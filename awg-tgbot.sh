@@ -226,7 +226,6 @@ set_repo_branch() {
   RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
   TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
   COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
-  persist_repo_branch
   return 0
 }
 
@@ -321,6 +320,31 @@ print_exit_hint() {
     echo "sudo bash ${INSTALL_DIR}/awg-tgbot.sh"
   fi
   print_line
+  return 0
+}
+
+cleanup_transient_install_state() {
+  if service_exists || [[ -d "$BOT_DIR" ]] || [[ -f "$ENV_FILE" ]] || [[ -e "$SELF_SYMLINK" ]] || [[ -f "$INSTALL_DIR/awg-tgbot.sh" ]]; then
+    return 0
+  fi
+
+  if [[ -f "$REPO_BRANCH_FILE" ]]; then
+    rm -f "$REPO_BRANCH_FILE" || true
+  fi
+
+  if [[ -d "$STATE_DIR" ]]; then
+    rmdir "$STATE_DIR" 2>/dev/null || true
+  fi
+
+  if [[ -d "$INSTALL_DIR" ]]; then
+    local entries=""
+    entries="$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -printf '%f
+' 2>/dev/null || true)"
+    if [[ -z "$entries" ]]; then
+      rmdir "$INSTALL_DIR" 2>/dev/null || true
+    fi
+  fi
+
   return 0
 }
 fetch_remote_sha() {
@@ -1669,7 +1693,7 @@ main_menu() {
           6) remove_bot ;;
           7) choose_branch_menu; should_pause=0 ;;
           8) should_pause=0 ;;
-          0) clear_if_tty; print_exit_hint; exit 0 ;;
+          0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1680,7 +1704,7 @@ main_menu() {
           1) install_or_reinstall_flow install ;;
           2) choose_branch_menu; should_pause=0 ;;
           3) should_pause=0 ;;
-          0) clear_if_tty; print_exit_hint; exit 0 ;;
+          0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1694,7 +1718,7 @@ main_menu() {
           4) remove_bot ;;
           5) choose_branch_menu; should_pause=0 ;;
           6) should_pause=0 ;;
-          0) clear_if_tty; print_exit_hint; exit 0 ;;
+          0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1704,7 +1728,7 @@ main_menu() {
         case "$choice" in
           1) choose_branch_menu; should_pause=0 ;;
           2) should_pause=0 ;;
-          0) clear_if_tty; print_exit_hint; exit 0 ;;
+          0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;

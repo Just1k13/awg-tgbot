@@ -130,6 +130,30 @@ clear_if_tty() {
   fi
 }
 
+screen_line() {
+  if has_tty; then
+    printf '%s\n' "------------------------------------------------------------" >&3
+  else
+    print_line
+  fi
+}
+
+screen_echo() {
+  if has_tty; then
+    printf '%s\n' "$*" >&3
+  else
+    printf '%s\n' "$*"
+  fi
+}
+
+screen_run() {
+  if has_tty; then
+    "$@" >&3 2>&1 || true
+  else
+    "$@" || true
+  fi
+}
+
 prompt_raw() {
   local prompt="$1"
   local __resultvar="$2"
@@ -1687,23 +1711,23 @@ run_log_snapshot() {
   case "$mode" in
     journal)
       if service_exists; then
-        journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+        screen_run journalctl -u "$SERVICE_NAME" -n 100 --no-pager
       else
-        warn "Сервис $SERVICE_NAME не найден."
+        if has_tty; then printf '[!] %s\n' "Сервис $SERVICE_NAME не найден." >&3; else warn "Сервис $SERVICE_NAME не найден."; fi
       fi
       ;;
     app)
       if [[ -f "$APP_LOG_FILE" ]]; then
-        tail -n 100 "$APP_LOG_FILE" || true
+        if has_tty; then tail -n 100 "$APP_LOG_FILE" >&3 2>&1 || true; else tail -n 100 "$APP_LOG_FILE" || true; fi
       else
-        warn "Файл логов приложения не найден: $APP_LOG_FILE"
+        if has_tty; then printf '[!] %s\n' "Файл логов приложения не найден: $APP_LOG_FILE" >&3; else warn "Файл логов приложения не найден: $APP_LOG_FILE"; fi
       fi
       ;;
     install)
       if [[ -f "$INSTALL_LOG" ]]; then
-        tail -n 100 "$INSTALL_LOG" || true
+        if has_tty; then tail -n 100 "$INSTALL_LOG" >&3 2>&1 || true; else tail -n 100 "$INSTALL_LOG" || true; fi
       else
-        warn "Лог установки не найден: $INSTALL_LOG"
+        if has_tty; then printf '[!] %s\n' "Лог установки не найден: $INSTALL_LOG" >&3; else warn "Лог установки не найден: $INSTALL_LOG"; fi
       fi
       ;;
   esac
@@ -1714,40 +1738,40 @@ watch_logs_live() {
   local mode="$1" key=""
   while true; do
     clear_if_tty
-    print_line
+    screen_line
     case "$mode" in
       journal)
-        echo "Live: systemd / journalctl"
-        echo "Обновление каждые 2 сек. Нажми q для возврата."
-        print_line
+        screen_echo "Live: systemd / journalctl"
+        screen_echo "Обновление каждые 2 сек. Нажми q для возврата."
+        screen_line
         if service_exists; then
-          journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+          screen_run journalctl -u "$SERVICE_NAME" -n 40 --no-pager
         else
-          warn "Сервис $SERVICE_NAME не найден."
+          if has_tty; then printf '[!] %s\n' "Сервис $SERVICE_NAME не найден." >&3; else warn "Сервис $SERVICE_NAME не найден."; fi
         fi
         ;;
       app)
-        echo "Live: bot.log"
-        echo "Обновление каждые 2 сек. Нажми q для возврата."
-        print_line
+        screen_echo "Live: bot.log"
+        screen_echo "Обновление каждые 2 сек. Нажми q для возврата."
+        screen_line
         if [[ -f "$APP_LOG_FILE" ]]; then
-          tail -n 40 "$APP_LOG_FILE" || true
+          if has_tty; then tail -n 40 "$APP_LOG_FILE" >&3 2>&1 || true; else tail -n 40 "$APP_LOG_FILE" || true; fi
         else
-          warn "Файл логов приложения не найден: $APP_LOG_FILE"
+          if has_tty; then printf '[!] %s\n' "Файл логов приложения не найден: $APP_LOG_FILE" >&3; else warn "Файл логов приложения не найден: $APP_LOG_FILE"; fi
         fi
         ;;
       install)
-        echo "Live: install log"
-        echo "Обновление каждые 2 сек. Нажми q для возврата."
-        print_line
+        screen_echo "Live: install log"
+        screen_echo "Обновление каждые 2 сек. Нажми q для возврата."
+        screen_line
         if [[ -f "$INSTALL_LOG" ]]; then
-          tail -n 40 "$INSTALL_LOG" || true
+          if has_tty; then tail -n 40 "$INSTALL_LOG" >&3 2>&1 || true; else tail -n 40 "$INSTALL_LOG" || true; fi
         else
-          warn "Лог установки не найден: $INSTALL_LOG"
+          if has_tty; then printf '[!] %s\n' "Лог установки не найден: $INSTALL_LOG" >&3; else warn "Лог установки не найден: $INSTALL_LOG"; fi
         fi
         ;;
     esac
-    print_line
+    screen_line
     if has_tty; then
       if read -r -u 3 -t 2 -n 1 key 2>/dev/null; then
         echo >&3
@@ -1782,7 +1806,7 @@ show_logs() {
     echo "6) install log — live просмотр"
     echo "0) Назад"
     print_line
-    prompt_raw "Выбор: " choice
+    prompt_menu_key "Выбор: " choice
     case "$choice" in
       1)
         print_line
@@ -1847,7 +1871,6 @@ print_menu_awg_yes_bot_yes() {
   echo
   echo "6) Диагностика"
   echo "7) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
-  echo "8) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -1913,7 +1936,6 @@ main_menu() {
           5) remove_bot ;;
           6) print_detailed_startup_summary ;;
           7) choose_branch_menu; should_pause=0 ;;
-          8) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac

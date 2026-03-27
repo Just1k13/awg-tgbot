@@ -99,6 +99,10 @@ async def init_db() -> None:
         await ensure_column(db, "keys", "psk_key", "TEXT")
         await ensure_column(db, "keys", "vpn_key", "TEXT")
         await ensure_column(db, "keys", "client_private_key", "TEXT")
+        await ensure_column(db, "keys", "provisioning_id", "TEXT")
+        await ensure_column(db, "keys", "provision_state", "TEXT NOT NULL DEFAULT 'active'")
+        await ensure_column(db, "keys", "provision_public_key", "TEXT")
+        await ensure_column(db, "keys", "last_error", "TEXT")
 
         await db.execute(
             """
@@ -118,6 +122,9 @@ async def init_db() -> None:
         await ensure_column(db, "payments", "provisioned_until", "TEXT")
         await ensure_column(db, "payments", "error_message", "TEXT")
         await ensure_column(db, "payments", "raw_payload_json", "TEXT")
+        await ensure_column(db, "payments", "provisioning_op_id", "TEXT")
+        await ensure_column(db, "payments", "retries", "INTEGER NOT NULL DEFAULT 0")
+        await ensure_column(db, "payments", "last_retry_at", "TEXT")
 
         await db.execute(
             """
@@ -166,10 +173,23 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub_until ON users(sub_until)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_user_id ON keys(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_ip ON keys(ip)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_provisioning_id ON keys(provisioning_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_provision_state ON keys(provision_state)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_op ON payments(provisioning_op_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created_at ON payments(user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
 
+        await db.execute(
+            """
+            UPDATE keys
+            SET provision_state = CASE
+                WHEN public_key LIKE 'pending:%' THEN 'reserved'
+                ELSE 'active'
+            END
+            WHERE provision_state IS NULL OR TRIM(provision_state) = ''
+            """
+        )
         await db.commit()
     finally:
         await db.close()
@@ -336,6 +356,7 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
         JOIN users u ON u.user_id = k.user_id
         WHERE k.user_id = ?
           AND k.public_key NOT LIKE 'pending:%'
+          AND COALESCE(k.provision_state, 'active') = 'active'
           AND k.ip IS NOT NULL
           AND TRIM(k.ip) != ''
           AND u.sub_until != '0'
@@ -422,7 +443,7 @@ async def claim_payment_for_provisioning(telegram_payment_charge_id: str) -> boo
             UPDATE payments
             SET status = 'provisioning'
             WHERE telegram_payment_charge_id = ?
-              AND status = 'received'
+              AND status IN ('received', 'failed_retriable')
             """,
             (telegram_payment_charge_id,),
         )
@@ -444,10 +465,80 @@ async def update_payment_status(
         SET status = ?,
             provisioned_until = COALESCE(?, provisioned_until),
             error_message = ?,
+            last_retry_at = CASE WHEN ? IN ('failed_retriable', 'provisioning') THEN ? ELSE last_retry_at END,
             provider_payment_charge_id = provider_payment_charge_id
         WHERE telegram_payment_charge_id = ?
         """,
-        (status, provisioned_until, error_message, telegram_payment_charge_id),
+        (status, provisioned_until, error_message, status, utc_now_naive().isoformat(), telegram_payment_charge_id),
+    )
+
+
+async def set_payment_operation(telegram_payment_charge_id: str, operation_id: str) -> None:
+    await execute(
+        """
+        UPDATE payments
+        SET provisioning_op_id = COALESCE(provisioning_op_id, ?)
+        WHERE telegram_payment_charge_id = ?
+        """,
+        (operation_id, telegram_payment_charge_id),
+    )
+
+
+async def get_payment_processing_info(payment_id: str) -> dict[str, Any] | None:
+    row = await fetchone(
+        """
+        SELECT user_id, payload, status, provisioned_until, provisioning_op_id, retries
+        FROM payments
+        WHERE telegram_payment_charge_id = ?
+        """,
+        (payment_id,),
+    )
+    if not row:
+        return None
+    return {
+        "user_id": int(row[0]),
+        "payload": row[1],
+        "status": row[2],
+        "provisioned_until": row[3],
+        "provisioning_op_id": row[4],
+        "retries": int(row[5] or 0),
+    }
+
+
+async def list_incomplete_payments() -> list[dict[str, Any]]:
+    rows = await fetchall(
+        """
+        SELECT telegram_payment_charge_id, user_id, payload, status, provisioned_until, provisioning_op_id, retries
+        FROM payments
+        WHERE status IN ('received', 'provisioning', 'failed_retriable')
+        ORDER BY created_at ASC
+        """
+    )
+    return [
+        {
+            "payment_id": row[0],
+            "user_id": int(row[1]),
+            "payload": row[2],
+            "status": row[3],
+            "provisioned_until": row[4],
+            "provisioning_op_id": row[5],
+            "retries": int(row[6] or 0),
+        }
+        for row in rows
+    ]
+
+
+async def bump_payment_retry(payment_id: str, error_message: str) -> None:
+    await execute(
+        """
+        UPDATE payments
+        SET retries = COALESCE(retries, 0) + 1,
+            last_retry_at = ?,
+            error_message = ?,
+            status = 'failed_retriable'
+        WHERE telegram_payment_charge_id = ?
+        """,
+        (utc_now_naive().isoformat(), error_message[:500], payment_id),
     )
 
 

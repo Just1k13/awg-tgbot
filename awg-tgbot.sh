@@ -75,17 +75,26 @@ setup_logging() {
 }
 
 setup_tty_fd() {
-  if [[ -e "$TTY_DEVICE" ]] && ([[ -t 0 ]] || [[ -t 1 ]]); then
+  if [[ -e "$TTY_DEVICE" ]]; then
     exec 3<>"$TTY_DEVICE" 2>/dev/null || true
   fi
 }
 
 has_tty() { [[ -e /proc/$$/fd/3 ]]; }
 
+tty_print() {
+  local message="$1"
+  if has_tty; then
+    printf '%s' "$message" >&3
+  else
+    printf '%s' "$message" >&2
+  fi
+}
+
 pause_if_tty() {
   if has_tty; then
-    echo
-    read -r -u 3 -p "Нажми Enter, чтобы продолжить..." _dummy || true
+    tty_print $'\nНажми Enter, чтобы продолжить...'
+    IFS= read -r -u 3 _dummy || true
   fi
 }
 
@@ -100,9 +109,17 @@ prompt_raw() {
   local __resultvar="$2"
   local __input=""
   if has_tty; then
-    if ! read -r -u 3 -p "$prompt" __input; then
-      __input=""
+    tty_print "$prompt"
+    if ! IFS= read -r -u 3 __input; then
+      die "Не удалось прочитать ввод с TTY. Запусти скрипт локально: curl -fsSL ${RAW_BASE_URL}/awg-tgbot.sh -o /tmp/awg-tgbot.sh && sudo REPO_BRANCH=${REPO_BRANCH} bash /tmp/awg-tgbot.sh"
     fi
+  elif [[ -t 0 ]]; then
+    printf '%s' "$prompt" >&2
+    if ! IFS= read -r __input; then
+      die "Не удалось прочитать ввод из stdin."
+    fi
+  else
+    die "Интерактивная установка требует TTY. Запусти так: curl -fsSL ${RAW_BASE_URL}/awg-tgbot.sh -o /tmp/awg-tgbot.sh && sudo REPO_BRANCH=${REPO_BRANCH} bash /tmp/awg-tgbot.sh"
   fi
   printf -v "$__resultvar" '%s' "$__input"
 }
@@ -1233,6 +1250,10 @@ main_menu() {
 require_root
 setup_logging
 setup_tty_fd
+
+if [[ $# -eq 0 ]] && ! has_tty && ! [[ -t 0 ]]; then
+  die "Интерактивный режим недоступен без TTY. Скачай скрипт в файл и запусти локально."
+fi
 
 if [[ $# -gt 0 ]]; then
   run_action "$1"

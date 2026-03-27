@@ -143,6 +143,20 @@ prompt_raw() {
   printf -v "$__resultvar" '%s' "$__input"
 }
 
+prompt_menu_key() {
+  local prompt="$1"
+  local __resultvar="$2"
+  local __input=""
+  if ! has_tty; then
+    die "Невозможно запросить ввод без TTY (menu: ${prompt}). Запусти скрипт в интерактивном терминале."
+  fi
+  if ! read -r -u 3 -n 1 -p "$prompt" __input; then
+    __input=""
+  fi
+  echo >&3
+  printf -v "$__resultvar" '%s' "$__input"
+}
+
 prompt_with_default() {
   local prompt="$1"
   local default="${2:-}"
@@ -1809,7 +1823,7 @@ main_menu() {
     case "$STARTUP_STATE_CODE" in
       awg_yes_bot_yes)
         print_menu_awg_yes_bot_yes
-        prompt_raw "Выбери действие: " choice
+        prompt_menu_key "Выбери действие: " choice
         case "$choice" in
           1) show_status ;;
           2) show_logs ;;
@@ -1825,7 +1839,7 @@ main_menu() {
         ;;
       awg_yes_bot_no)
         print_menu_awg_yes_bot_no
-        prompt_raw "Выбери действие: " choice
+        prompt_menu_key "Выбери действие: " choice
         case "$choice" in
           1) install_or_reinstall_flow install ;;
           2) print_detailed_startup_summary ;;
@@ -1837,7 +1851,7 @@ main_menu() {
         ;;
       awg_no_bot_yes)
         print_menu_awg_no_bot_yes
-        prompt_raw "Выбери действие: " choice
+        prompt_menu_key "Выбери действие: " choice
         case "$choice" in
           1) show_status ;;
           2) show_logs ;;
@@ -1852,7 +1866,7 @@ main_menu() {
         ;;
       awg_no_bot_no|*)
         print_menu_awg_no_bot_no
-        prompt_raw "Выбери действие: " choice
+        prompt_menu_key "Выбери действие: " choice
         case "$choice" in
           1) print_detailed_startup_summary ;;
           2) choose_branch_menu; should_pause=0 ;;

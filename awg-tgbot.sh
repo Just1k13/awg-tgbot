@@ -306,6 +306,23 @@ choose_branch_menu() {
   toggle_branch_action
   return 0
 }
+
+print_exit_hint() {
+  print_line
+  echo "Выход из awg-tgbot."
+  echo "Текущая ветка: ${REPO_BRANCH}"
+  echo
+  echo "Повторный запуск installer:"
+  echo "curl -fsSL ${RAW_BASE_URL}/awg-tgbot.sh | sudo REPO_BRANCH=${REPO_BRANCH} bash -s --"
+  if [[ -x "$SELF_SYMLINK" || -f "$INSTALL_DIR/awg-tgbot.sh" ]]; then
+    echo
+    echo "Если скрипт уже установлен локально:"
+    echo "sudo awg-tgbot"
+    echo "sudo bash ${INSTALL_DIR}/awg-tgbot.sh"
+  fi
+  print_line
+  return 0
+}
 fetch_remote_sha() {
   local sha=""
   sha="$(curl -fsSL "$COMMIT_API_URL" 2>/dev/null | grep -m1 '"sha"' | sed -E 's/.*"sha": "([a-f0-9]+)".*/\1/' || true)"
@@ -1652,7 +1669,7 @@ main_menu() {
           6) remove_bot ;;
           7) choose_branch_menu; should_pause=0 ;;
           8) should_pause=0 ;;
-          0) clear_if_tty; exit 0 ;;
+          0) clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1663,7 +1680,7 @@ main_menu() {
           1) install_or_reinstall_flow install ;;
           2) choose_branch_menu; should_pause=0 ;;
           3) should_pause=0 ;;
-          0) clear_if_tty; exit 0 ;;
+          0) clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1677,7 +1694,7 @@ main_menu() {
           4) remove_bot ;;
           5) choose_branch_menu; should_pause=0 ;;
           6) should_pause=0 ;;
-          0) clear_if_tty; exit 0 ;;
+          0) clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1687,7 +1704,7 @@ main_menu() {
         case "$choice" in
           1) choose_branch_menu; should_pause=0 ;;
           2) should_pause=0 ;;
-          0) clear_if_tty; exit 0 ;;
+          0) clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;

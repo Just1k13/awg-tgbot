@@ -36,8 +36,8 @@ router = Router()
 
 
 def _config_filename_prefix() -> str:
-    base = re.sub(r"[^\w.-]+", "_", (SERVER_NAME or "vpn").strip(), flags=re.UNICODE).strip("._")
-    return base or "vpn"
+    base = re.sub(r"[^\w.-]+", "_", (SERVER_NAME or "configs").strip(), flags=re.UNICODE).strip("._")
+    return base or "configs"
 
 
 async def _send_buy_menu(target, user_id: int):
@@ -78,12 +78,15 @@ async def start(message: types.Message):
         maybe_set_support_username(message.from_user.username)
     await message.answer(
         (
-            "🌐 <b>Добро пожаловать в VPN-бот</b>\n\n"
-            "Здесь всё по шагам:\n"
-            "1) оформите подписку,\n"
-            "2) откройте <b>Мои устройства</b>,\n"
-            "3) получите <code>vpn://</code> или <code>.conf</code>.\n\n"
-            "Ниже — основное меню."
+            "🌐 <b>Свободный интернет</b>\n\n"
+            "Здесь можно:\n"
+            "• оформить или продлить подписку\n"
+            "• получить ключ доступа\n"
+            "• скачать <b>.conf</b>\n"
+            "• проверить срок действия\n"
+            "• открыть инструкцию\n"
+            "• написать в поддержку\n\n"
+            "Выберите действие в меню ниже."
         ),
         parse_mode="HTML",
         reply_markup=get_main_menu(message.from_user.id, ADMIN_ID),
@@ -126,7 +129,7 @@ async def my_keys(message: types.Message):
     if not configs:
         await message.answer(
             (
-                "📱 <b>Мои устройства</b>\n\n"
+                "🔑 <b>Конфиги</b>\n\n"
                 "У вас пока нет активных конфигураций.\n"
                 "Сначала оформите или продлите подписку.\n\n"
                 "Если нужна помощь — откройте инструкцию ниже."
@@ -137,7 +140,7 @@ async def my_keys(message: types.Message):
         return
     await message.answer(
         (
-            "📱 <b>Мои устройства</b>\n\n"
+            "🔑 <b>Конфиги</b>\n\n"
             "Выберите устройство. Я отправлю:\n"
             "• <code>vpn://</code> — быстрый импорт в Amnezia,\n"
             "• <code>.conf</code> — универсальный файл для ручного импорта."

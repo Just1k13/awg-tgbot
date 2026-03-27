@@ -1,5 +1,5 @@
 BTN_PROFILE = "👤 Профиль"
-BTN_CONFIGS = "📱 Мои устройства"
+BTN_CONFIGS = "🔑 Конфиги"
 BTN_BUY = "💳 Купить / Продлить"
 BTN_GUIDE = "📖 Инструкция"
 BTN_SUPPORT = "🆘 Поддержка"

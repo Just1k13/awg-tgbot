@@ -426,48 +426,60 @@ async def save_payment(
     raw_payload_json: str | None = None,
 ) -> None:
     now_iso = utc_now_naive().isoformat()
-    await execute(
-        """
-        INSERT INTO payments (
-            telegram_payment_charge_id,
-            provider_payment_charge_id,
-            user_id,
-            payload,
-            amount,
-            currency,
-            payment_method,
-            status,
-            raw_payload_json,
-            created_at,
-            updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(telegram_payment_charge_id) DO UPDATE SET
-            provider_payment_charge_id = COALESCE(excluded.provider_payment_charge_id, provider_payment_charge_id),
-            raw_payload_json = COALESCE(excluded.raw_payload_json, raw_payload_json),
-            updated_at = excluded.updated_at
-        """,
-        (
-            telegram_payment_charge_id,
-            provider_payment_charge_id,
-            user_id,
-            payload,
-            amount,
-            currency,
-            payment_method,
-            status,
-            raw_payload_json,
-            now_iso,
-            now_iso,
-        ),
-    )
-    await execute(
-        """
-        INSERT INTO provisioning_jobs (payment_id, user_id, payload, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(payment_id) DO NOTHING
-        """,
-        (telegram_payment_charge_id, user_id, payload, status, now_iso, now_iso),
-    )
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """
+            INSERT INTO payments (
+                telegram_payment_charge_id,
+                provider_payment_charge_id,
+                user_id,
+                payload,
+                amount,
+                currency,
+                payment_method,
+                status,
+                raw_payload_json,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_payment_charge_id) DO UPDATE SET
+                provider_payment_charge_id = COALESCE(excluded.provider_payment_charge_id, provider_payment_charge_id),
+                raw_payload_json = COALESCE(excluded.raw_payload_json, raw_payload_json),
+                updated_at = excluded.updated_at
+            """,
+            (
+                telegram_payment_charge_id,
+                provider_payment_charge_id,
+                user_id,
+                payload,
+                amount,
+                currency,
+                payment_method,
+                status,
+                raw_payload_json,
+                now_iso,
+                now_iso,
+            ),
+        )
+        await db.execute(
+            """
+            INSERT INTO provisioning_jobs (payment_id, user_id, payload, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(payment_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            """,
+            (telegram_payment_charge_id, user_id, payload, status, now_iso, now_iso),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
 
 
 async def claim_payment_for_provisioning(telegram_payment_charge_id: str) -> bool:

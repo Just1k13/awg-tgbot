@@ -286,29 +286,26 @@ print(value if isinstance(value, str) else "")
 PY
 }
 
-choose_branch_menu() {
-  local choice custom_branch current
-  current="${REPO_BRANCH}"
-  print_line
-  echo "Текущая ветка: ${current}"
-  echo "1) main"
-  echo "2) beta"
-  echo "3) Ввести вручную"
-  echo "0) Назад"
-  prompt_raw "Выбор: " choice
-  case "$choice" in
-    1) set_repo_branch "main" ;;
-    2) set_repo_branch "beta" ;;
-    3)
-      prompt_with_default "Введите имя ветки" "$current" custom_branch
-      set_repo_branch "$custom_branch"
-      ;;
-    *) return 0 ;;
-  esac
-  ok "Выбрана ветка: ${REPO_BRANCH}"
+target_branch_for_toggle() {
+  if [[ "$REPO_BRANCH" == "beta" ]]; then
+    printf '%s' "main"
+  else
+    printf '%s' "beta"
+  fi
+}
+
+toggle_branch_action() {
+  local next_branch
+  next_branch="$(target_branch_for_toggle)"
+  set_repo_branch "$next_branch" || die "Не удалось переключить ветку."
+  ok "Ветка переключена: ${REPO_BRANCH}"
   return 0
 }
 
+choose_branch_menu() {
+  toggle_branch_action
+  return 0
+}
 fetch_remote_sha() {
   local sha=""
   sha="$(curl -fsSL "$COMMIT_API_URL" 2>/dev/null | grep -m1 '"sha"' | sed -E 's/.*"sha": "([a-f0-9]+)".*/\1/' || true)"
@@ -1577,7 +1574,7 @@ show_logs() {
 print_menu_awg_yes_bot_no() {
   echo "Доступные действия:"
   echo "1) Установить"
-  echo "2) Выбор ветки"
+  echo "2) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
   echo "3) Повторить проверку"
   echo "0) Выход"
   print_line
@@ -1591,7 +1588,7 @@ print_menu_awg_yes_bot_yes() {
   echo "4) Обновить"
   echo "5) Переустановить"
   echo "6) Удалить"
-  echo "7) Выбор ветки"
+  echo "7) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
   echo "8) Повторить проверку"
   echo "0) Выход"
   print_line
@@ -1603,7 +1600,7 @@ print_menu_awg_no_bot_yes() {
   echo "2) Логи"
   echo "3) Переустановить"
   echo "4) Удалить"
-  echo "5) Выбор ветки"
+  echo "5) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
   echo "6) Повторить проверку"
   echo "0) Выход"
   print_line
@@ -1611,7 +1608,7 @@ print_menu_awg_no_bot_yes() {
 
 print_menu_awg_no_bot_no() {
   echo "Доступные действия:"
-  echo "1) Выбор ветки"
+  echo "1) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
   echo "2) Повторить проверку"
   echo "0) Выход"
   print_line

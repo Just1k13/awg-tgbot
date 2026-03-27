@@ -1770,7 +1770,17 @@ run_log_snapshot() {
     service:last) print_journal_tail_tty_safe 50 ;;
     service:error) print_journal_matches_tty_safe 'error|failed|traceback|exception|permission denied' 20 ;;
     bot:last) print_file_tail_tty_safe "$APP_LOG_FILE" 50 ;;
-    bot:warn) print_file_matches_tty_safe "$APP_LOG_FILE" 'warning|error|traceback|exception|failed|unauthorized|permission denied' 20 ;;
+    bot:warn)
+      if [[ -f "$APP_LOG_FILE" ]]; then
+        if has_tty; then
+          grep -E '\| (WARNING|ERROR) \|' "$APP_LOG_FILE" | grep -Ev 'Received SIGTERM signal' | tail -n 20 >&3 2>/dev/null || true
+        else
+          grep -E '\| (WARNING|ERROR) \|' "$APP_LOG_FILE" | grep -Ev 'Received SIGTERM signal' | tail -n 20 2>/dev/null || true
+        fi
+      else
+        screen_warn "Файл не найден: $APP_LOG_FILE"
+      fi
+      ;;
     install:last) print_file_tail_tty_safe "$INSTALL_LOG" 50 ;;
     paths:show)
       screen_echo "Пути логов:"
@@ -1847,7 +1857,7 @@ show_logs_doctor() {
 
   screen_echo "Docker daemon: $(status_available_text "$STATE_DOCKER_DAEMON")"
   screen_echo "AWG: $(status_found_text "$STATE_AWG_FOUND")"
-  screen_echo "ENV: $(status_found_text "$STATE_ENV_FOUND")"
+  screen_echo "ENV: $(status_found_text "$STATE_BOT_ENV_FOUND")"
   screen_echo "bot.log: $( [[ -f "$APP_LOG_FILE" ]] && printf 'найден' || printf 'не найден' )"
   screen_echo "install log: $( [[ -f "$INSTALL_LOG" ]] && printf 'найден' || printf 'не найден' )"
 
@@ -1869,7 +1879,15 @@ show_logs_doctor() {
   screen_line
   screen_echo "Последние WARNING / ERROR бота:"
   screen_line
-  print_file_matches_tty_safe "$APP_LOG_FILE" 'warning|error|traceback|exception|failed|unauthorized|permission denied' 10
+  if [[ -f "$APP_LOG_FILE" ]]; then
+    if has_tty; then
+      grep -E '\| (WARNING|ERROR) \|' "$APP_LOG_FILE" | grep -Ev 'Received SIGTERM signal' | tail -n 10 >&3 2>/dev/null || true
+    else
+      grep -E '\| (WARNING|ERROR) \|' "$APP_LOG_FILE" | grep -Ev 'Received SIGTERM signal' | tail -n 10 2>/dev/null || true
+    fi
+  else
+    screen_warn "Файл не найден: $APP_LOG_FILE"
+  fi
 
   screen_line
   pause_if_tty

@@ -1706,29 +1706,80 @@ remove_bot() {
 }
 
 
+
+screen_warn() {
+  local msg="$*"
+  if has_tty; then
+    printf '[!] %s\n' "$msg" >&3
+  else
+    warn "$msg"
+  fi
+}
+
+print_file_tail_tty_safe() {
+  local file="$1" lines="${2:-50}"
+  if [[ -f "$file" ]]; then
+    if has_tty; then
+      tail -n "$lines" "$file" >&3 2>&1 || true
+    else
+      tail -n "$lines" "$file" || true
+    fi
+  else
+    screen_warn "Файл не найден: $file"
+  fi
+}
+
+print_file_matches_tty_safe() {
+  local file="$1" pattern="$2" lines="${3:-20}"
+  if [[ ! -f "$file" ]]; then
+    screen_warn "Файл не найден: $file"
+    return 0
+  fi
+  if has_tty; then
+    grep -Ei "$pattern" "$file" | tail -n "$lines" >&3 2>/dev/null || true
+  else
+    grep -Ei "$pattern" "$file" | tail -n "$lines" 2>/dev/null || true
+  fi
+}
+
+print_journal_tail_tty_safe() {
+  local lines="${1:-50}"
+  if service_exists; then
+    screen_run journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+  else
+    screen_warn "Сервис $SERVICE_NAME не найден."
+  fi
+}
+
+print_journal_matches_tty_safe() {
+  local pattern="$1" lines="${2:-20}"
+  if service_exists; then
+    if has_tty; then
+      journalctl -u "$SERVICE_NAME" -n 200 --no-pager | grep -Ei "$pattern" | tail -n "$lines" >&3 2>/dev/null || true
+    else
+      journalctl -u "$SERVICE_NAME" -n 200 --no-pager | grep -Ei "$pattern" | tail -n "$lines" 2>/dev/null || true
+    fi
+  else
+    screen_warn "Сервис $SERVICE_NAME не найден."
+  fi
+}
+
 run_log_snapshot() {
-  local mode="$1"
-  case "$mode" in
-    journal)
-      if service_exists; then
-        screen_run journalctl -u "$SERVICE_NAME" -n 100 --no-pager
-      else
-        if has_tty; then printf '[!] %s\n' "Сервис $SERVICE_NAME не найден." >&3; else warn "Сервис $SERVICE_NAME не найден."; fi
-      fi
+  local mode="$1" variant="${2:-last}"
+  case "$mode:$variant" in
+    service:last) print_journal_tail_tty_safe 50 ;;
+    service:error) print_journal_matches_tty_safe 'error|failed|traceback|exception|permission denied' 20 ;;
+    bot:last) print_file_tail_tty_safe "$APP_LOG_FILE" 50 ;;
+    bot:warn) print_file_matches_tty_safe "$APP_LOG_FILE" 'warning|error|traceback|exception|failed|unauthorized|permission denied' 20 ;;
+    install:last) print_file_tail_tty_safe "$INSTALL_LOG" 50 ;;
+    paths:show)
+      screen_echo "Пути логов:"
+      screen_echo "• bot.log: ${APP_LOG_FILE}"
+      screen_echo "• install log: ${INSTALL_LOG}"
+      screen_echo "• systemd service: ${SERVICE_NAME}"
       ;;
-    app)
-      if [[ -f "$APP_LOG_FILE" ]]; then
-        if has_tty; then tail -n 100 "$APP_LOG_FILE" >&3 2>&1 || true; else tail -n 100 "$APP_LOG_FILE" || true; fi
-      else
-        if has_tty; then printf '[!] %s\n' "Файл логов приложения не найден: $APP_LOG_FILE" >&3; else warn "Файл логов приложения не найден: $APP_LOG_FILE"; fi
-      fi
-      ;;
-    install)
-      if [[ -f "$INSTALL_LOG" ]]; then
-        if has_tty; then tail -n 100 "$INSTALL_LOG" >&3 2>&1 || true; else tail -n 100 "$INSTALL_LOG" || true; fi
-      else
-        if has_tty; then printf '[!] %s\n' "Лог установки не найден: $INSTALL_LOG" >&3; else warn "Лог установки не найден: $INSTALL_LOG"; fi
-      fi
+    *)
+      screen_warn "Неизвестный режим логов: ${mode}:${variant}"
       ;;
   esac
   return 0
@@ -1740,35 +1791,27 @@ watch_logs_live() {
     clear_if_tty
     screen_line
     case "$mode" in
-      journal)
-        screen_echo "Live: systemd / journalctl"
+      service)
+        screen_echo "Лог сервиса — live"
         screen_echo "Обновление каждые 2 сек. Нажми q для возврата."
         screen_line
-        if service_exists; then
-          screen_run journalctl -u "$SERVICE_NAME" -n 40 --no-pager
-        else
-          if has_tty; then printf '[!] %s\n' "Сервис $SERVICE_NAME не найден." >&3; else warn "Сервис $SERVICE_NAME не найден."; fi
-        fi
+        print_journal_tail_tty_safe 40
         ;;
-      app)
-        screen_echo "Live: bot.log"
+      bot)
+        screen_echo "Лог бота — live"
         screen_echo "Обновление каждые 2 сек. Нажми q для возврата."
         screen_line
-        if [[ -f "$APP_LOG_FILE" ]]; then
-          if has_tty; then tail -n 40 "$APP_LOG_FILE" >&3 2>&1 || true; else tail -n 40 "$APP_LOG_FILE" || true; fi
-        else
-          if has_tty; then printf '[!] %s\n' "Файл логов приложения не найден: $APP_LOG_FILE" >&3; else warn "Файл логов приложения не найден: $APP_LOG_FILE"; fi
-        fi
+        print_file_tail_tty_safe "$APP_LOG_FILE" 40
         ;;
       install)
-        screen_echo "Live: install log"
+        screen_echo "install log — live"
         screen_echo "Обновление каждые 2 сек. Нажми q для возврата."
         screen_line
-        if [[ -f "$INSTALL_LOG" ]]; then
-          if has_tty; then tail -n 40 "$INSTALL_LOG" >&3 2>&1 || true; else tail -n 40 "$INSTALL_LOG" || true; fi
-        else
-          if has_tty; then printf '[!] %s\n' "Лог установки не найден: $INSTALL_LOG" >&3; else warn "Лог установки не найден: $INSTALL_LOG"; fi
-        fi
+        print_file_tail_tty_safe "$INSTALL_LOG" 40
+        ;;
+      *)
+        screen_warn "Неизвестный live-режим: $mode"
+        return 0
         ;;
     esac
     screen_line
@@ -1776,13 +1819,124 @@ watch_logs_live() {
       if read -r -u 3 -t 2 -n 1 key 2>/dev/null; then
         echo >&3
         case "$key" in
-          q|Q|й|Й) clear_if_tty; return 0 ;;
+          q|Q|й|Й|0) clear_if_tty; return 0 ;;
           *) ;;
         esac
       fi
     else
       sleep 2
     fi
+  done
+}
+
+show_logs_doctor() {
+  local active="unknown" enabled="unknown"
+  local journal_hits="" bot_hits=""
+  clear_if_tty
+  screen_line
+  screen_echo "Что не так?"
+  screen_line
+
+  if service_exists; then
+    active="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true)"
+    screen_echo "Сервис: ${SERVICE_NAME} (${active:-unknown}, ${enabled:-unknown})"
+  else
+    screen_warn "Сервис ${SERVICE_NAME} не найден."
+  fi
+
+  screen_echo "Docker daemon: $(status_available_text "$STATE_DOCKER_DAEMON")"
+  screen_echo "AWG: $(status_found_text "$STATE_AWG_FOUND")"
+  screen_echo "ENV: $(status_found_text "$STATE_ENV_FOUND")"
+  screen_echo "bot.log: $( [[ -f "$APP_LOG_FILE" ]] && printf 'найден' || printf 'не найден' )"
+  screen_echo "install log: $( [[ -f "$INSTALL_LOG" ]] && printf 'найден' || printf 'не найден' )"
+
+  if [[ "$STATE_DOCKER_DAEMON" != "1" ]]; then
+    screen_warn "Docker daemon недоступен."
+  fi
+  if [[ "$STATE_AWG_FOUND" != "1" ]]; then
+    screen_warn "AWG сейчас не обнаружен."
+  fi
+  if service_exists && [[ "$active" != "active" ]]; then
+    screen_warn "Сервис не запущен или работает нестабильно."
+  fi
+
+  screen_line
+  screen_echo "Последние важные сообщения сервиса:"
+  screen_line
+  print_journal_matches_tty_safe 'error|failed|traceback|exception|permission denied' 10
+
+  screen_line
+  screen_echo "Последние WARNING / ERROR бота:"
+  screen_line
+  print_file_matches_tty_safe "$APP_LOG_FILE" 'warning|error|traceback|exception|failed|unauthorized|permission denied' 10
+
+  screen_line
+  pause_if_tty
+  clear_if_tty
+  return 0
+}
+
+show_bot_logs_menu() {
+  local choice=""
+  while true; do
+    screen_line
+    screen_echo "Лог бота:"
+    screen_echo "1) Последние 50 строк"
+    screen_echo "2) Только WARNING / ERROR"
+    screen_echo "3) Live просмотр"
+    screen_echo "0) Назад"
+    screen_line
+    prompt_menu_key "Выбор: " choice
+    case "$choice" in
+      1) screen_line; run_log_snapshot bot last; screen_line; pause_if_tty; clear_if_tty ;;
+      2) screen_line; run_log_snapshot bot warn; screen_line; pause_if_tty; clear_if_tty ;;
+      3) watch_logs_live bot ;;
+      0) clear_if_tty; return 0 ;;
+      *) screen_warn "Неизвестный пункт меню."; pause_if_tty; clear_if_tty ;;
+    esac
+  done
+}
+
+show_service_logs_menu() {
+  local choice=""
+  while true; do
+    screen_line
+    screen_echo "Лог сервиса:"
+    screen_echo "1) Последние 50 строк"
+    screen_echo "2) Только ошибки"
+    screen_echo "3) Live просмотр"
+    screen_echo "0) Назад"
+    screen_line
+    prompt_menu_key "Выбор: " choice
+    case "$choice" in
+      1) screen_line; run_log_snapshot service last; screen_line; pause_if_tty; clear_if_tty ;;
+      2) screen_line; run_log_snapshot service error; screen_line; pause_if_tty; clear_if_tty ;;
+      3) watch_logs_live service ;;
+      0) clear_if_tty; return 0 ;;
+      *) screen_warn "Неизвестный пункт меню."; pause_if_tty; clear_if_tty ;;
+    esac
+  done
+}
+
+show_extra_logs_menu() {
+  local choice=""
+  while true; do
+    screen_line
+    screen_echo "Дополнительно:"
+    screen_echo "1) install log — последние 50 строк"
+    screen_echo "2) install log — live просмотр"
+    screen_echo "3) Пути логов"
+    screen_echo "0) Назад"
+    screen_line
+    prompt_menu_key "Выбор: " choice
+    case "$choice" in
+      1) screen_line; run_log_snapshot install last; screen_line; pause_if_tty; clear_if_tty ;;
+      2) watch_logs_live install ;;
+      3) screen_line; run_log_snapshot paths show; screen_line; pause_if_tty; clear_if_tty ;;
+      0) clear_if_tty; return 0 ;;
+      *) screen_warn "Неизвестный пункт меню."; pause_if_tty; clear_if_tty ;;
+    esac
   done
 }
 
@@ -1796,60 +1950,26 @@ show_logs() {
   fi
 
   while true; do
-    print_line
-    echo "Логи:"
-    echo "1) journalctl — последние 100 строк"
-    echo "2) journalctl — live просмотр"
-    echo "3) bot.log — последние 100 строк"
-    echo "4) bot.log — live просмотр"
-    echo "5) install log — последние 100 строк"
-    echo "6) install log — live просмотр"
-    echo "0) Назад"
-    print_line
+    screen_line
+    screen_echo "Логи:"
+    screen_echo "1) Что не так?"
+    screen_echo "2) Лог бота"
+    screen_echo "3) Лог сервиса"
+    screen_echo "4) Дополнительно"
+    screen_echo "0) Назад"
+    screen_line
     prompt_menu_key "Выбор: " choice
     case "$choice" in
-      1)
-        print_line
-        run_log_snapshot journal
-        print_line
-        pause_if_tty
-        clear_if_tty
-        ;;
-      2)
-        watch_logs_live journal
-        ;;
-      3)
-        print_line
-        run_log_snapshot app
-        print_line
-        pause_if_tty
-        clear_if_tty
-        ;;
-      4)
-        watch_logs_live app
-        ;;
-      5)
-        print_line
-        run_log_snapshot install
-        print_line
-        pause_if_tty
-        clear_if_tty
-        ;;
-      6)
-        watch_logs_live install
-        ;;
-      0)
-        clear_if_tty
-        return 0
-        ;;
-      *)
-        warn "Неизвестный пункт меню."
-        pause_if_tty
-        clear_if_tty
-        ;;
+      1) show_logs_doctor ;;
+      2) show_bot_logs_menu ;;
+      3) show_service_logs_menu ;;
+      4) show_extra_logs_menu ;;
+      0) clear_if_tty; return 0 ;;
+      *) screen_warn "Неизвестный пункт меню."; pause_if_tty; clear_if_tty ;;
     esac
   done
 }
+
 
 print_menu_awg_yes_bot_no() {
   echo "Доступные действия:"

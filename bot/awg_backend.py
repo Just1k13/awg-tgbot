@@ -13,7 +13,7 @@ from config import (
     AWG_S4, AWG_TRANSPORT_PROTO, CLIENT_ALLOWED_IPS, CLIENT_MTU, CONFIGS_PER_USER, DOCKER_CONTAINER,
     DOCKER_RETRIES, DOCKER_RETRY_BASE_DELAY, DOCKER_TIMEOUT_SECONDS, FIRST_CLIENT_OCTET, IGNORE_PEERS, MAX_CLIENT_OCTET,
     PENDING_KEY_TTL_SECONDS, PERSISTENT_KEEPALIVE, PRIMARY_DNS, SECONDARY_DNS, SERVER_IP, SERVER_NAME, SERVER_PUBLIC_KEY,
-    VPN_SUBNET_PREFIX, WG_INTERFACE, logger,
+    VPN_SUBNET_PREFIX, WG_INTERFACE, AWG_HELPER_PATH, AWG_HELPER_USE_SUDO, logger,
 )
 from database import (
     add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall,
@@ -33,8 +33,12 @@ def _invalidate_peers_cache() -> None:
 
 
 async def run_docker_once(args: list[str], input_data: str | None = None, timeout: int = DOCKER_TIMEOUT_SECONDS) -> str:
+    cmd = [AWG_HELPER_PATH]
+    if AWG_HELPER_USE_SUDO:
+        cmd = ["sudo", "-n", AWG_HELPER_PATH]
     process = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-i", DOCKER_CONTAINER, *args,
+        *cmd,
+        *args,
         stdin=asyncio.subprocess.PIPE if input_data is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -56,34 +60,58 @@ async def run_docker(args: list[str], input_data: str | None = None, timeout: in
         try:
             return await run_docker_once(args, input_data=input_data, timeout=timeout)
         except asyncio.TimeoutError:
-            last_error = RuntimeError(f"docker timeout: {' '.join(args)}")
-            logger.warning("docker timeout attempt=%s/%s cmd=%s", attempt, DOCKER_RETRIES, args)
+            last_error = RuntimeError(f"helper timeout: {' '.join(args)}")
+            logger.warning("helper timeout attempt=%s/%s cmd=%s", attempt, DOCKER_RETRIES, args)
         except Exception as e:
-            last_error = RuntimeError(f"docker exec failed: {e}")
-            logger.warning("docker error attempt=%s/%s cmd=%s error=%s", attempt, DOCKER_RETRIES, args, e)
+            last_error = RuntimeError(f"helper exec failed: {e}")
+            logger.warning("helper error attempt=%s/%s cmd=%s error=%s", attempt, DOCKER_RETRIES, args, e)
         if attempt < DOCKER_RETRIES:
             await asyncio.sleep(DOCKER_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
-    raise last_error if last_error else RuntimeError("docker exec failed")
+    raise last_error if last_error else RuntimeError("helper exec failed")
+
+
+def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
+    lines = show_output.splitlines()
+    peers: list[dict[str, str | None]] = []
+    current_pub: str | None = None
+    current_ip: str | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        lowered = line.lower()
+        if lowered.startswith("peer:"):
+            if current_pub:
+                peers.append({"public_key": current_pub, "ip": current_ip})
+            current_pub = line.split(":", 1)[1].strip()
+            current_ip = None
+            continue
+        if lowered.startswith("allowed ips:"):
+            allowed = line.split(":", 1)[1].strip()
+            m = re.search(rf"({re.escape(VPN_SUBNET_PREFIX)}\d+)/32", allowed)
+            if m:
+                current_ip = m.group(1)
+    if current_pub:
+        peers.append({"public_key": current_pub, "ip": current_ip})
+    return peers
 
 
 async def check_awg_container() -> None:
-    result = await run_docker(["awg", "show", WG_INTERFACE])
+    result = await run_docker(["check-awg"])
     if "interface:" not in result:
         raise RuntimeError(f"Не удалось проверить интерфейс {WG_INTERFACE}")
 
 
 async def generate_keypair() -> tuple[str, str]:
-    private_key = (await run_docker(["awg", "genkey"])).strip()
+    private_key = (await run_docker(["genkey"])).strip()
     if not private_key:
         raise RuntimeError("awg genkey вернул пустой private key")
-    public_key = (await run_docker(["awg", "pubkey"], input_data=private_key)).strip()
+    public_key = (await run_docker(["pubkey"], input_data=private_key)).strip()
     if not public_key or not is_valid_awg_public_key(public_key):
         raise RuntimeError("awg pubkey вернул некорректный public key")
     return private_key, public_key
 
 
 async def generate_psk() -> str:
-    psk = (await run_docker(["wg", "genpsk"])).strip()
+    psk = (await run_docker(["genpsk"])).strip()
     if not psk:
         raise RuntimeError("wg genpsk вернул пустой PSK")
     return psk
@@ -92,17 +120,21 @@ async def generate_psk() -> str:
 async def add_peer_to_awg(public_key: str, ip: str, psk_key: str) -> None:
     if not is_valid_awg_public_key(public_key):
         raise RuntimeError("Некорректный public key перед awg set")
-    await run_docker(
-        ["awg", "set", WG_INTERFACE, "peer", public_key, "preshared-key", "/dev/stdin", "allowed-ips", f"{ip}/32"],
-        input_data=psk_key,
-    )
+    await run_docker([
+        "add-peer",
+        "--public-key", public_key,
+        "--ip", ip,
+    ], input_data=psk_key)
     _invalidate_peers_cache()
 
 
 async def remove_peer_from_awg(public_key: str) -> None:
     if not is_valid_awg_public_key(public_key):
         raise RuntimeError("Некорректный public key для удаления peer")
-    await run_docker(["awg", "set", WG_INTERFACE, "peer", public_key, "remove"])
+    await run_docker([
+        "remove-peer",
+        "--public-key", public_key,
+    ])
     _invalidate_peers_cache()
 
 
@@ -113,26 +145,8 @@ async def get_awg_peers() -> list[dict[str, str | None]]:
     if cached is not None and isinstance(expires_at, (int, float)) and now_ts < expires_at:
         return list(cached)
 
-    output = await run_docker(["awg", "show", WG_INTERFACE])
-    lines = output.splitlines()
-    peers: list[dict[str, str | None]] = []
-    current_pub: str | None = None
-    current_ip: str | None = None
-    for raw_line in lines:
-        line = raw_line.strip()
-        if line.startswith("peer: "):
-            if current_pub:
-                peers.append({"public_key": current_pub, "ip": current_ip})
-            current_pub = line.replace("peer: ", "", 1).strip()
-            current_ip = None
-            continue
-        if line.startswith("allowed ips:"):
-            allowed = line.replace("allowed ips:", "", 1).strip()
-            m = re.search(rf"({re.escape(VPN_SUBNET_PREFIX)}\d+)/32", allowed)
-            if m:
-                current_ip = m.group(1)
-    if current_pub:
-        peers.append({"public_key": current_pub, "ip": current_ip})
+    output = await run_docker(["show"])
+    peers = parse_awg_show_output(output)
     _peers_cache["data"] = list(peers)
     _peers_cache["expires_at"] = now_ts + AWG_PEERS_CACHE_TTL_SECONDS
     return peers
@@ -560,29 +574,70 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
 async def revoke_user_access(user_id: int) -> int:
     db = await open_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """
+            UPDATE keys
+            SET state='revoke_pending',
+                state_updated_at=?,
+                delete_reason='revoke_expired_or_admin'
+            WHERE user_id = ?
+              AND public_key NOT LIKE 'pending:%'
+              AND state != 'deleted'
+            """,
+            (utc_now_naive().isoformat(), user_id),
+        )
         async with db.execute(
-            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state IN ('active','delete_pending','revoke_pending')",
             (user_id,),
         ) as cursor:
             rows = await cursor.fetchall()
+        await db.commit()
     finally:
         await db.close()
 
     public_keys = [row[0] for row in rows]
     removed_keys: list[str] = []
+    failed_remove: list[str] = []
     for public_key in public_keys:
         try:
             await remove_peer_from_awg(public_key)
             removed_keys.append(public_key)
         except Exception as e:
-            logger.error("Ошибка удаления peer %s для user %s: %s", public_key, user_id, e)
+            current_keys = {(peer.get("public_key") or "").strip() for peer in await get_awg_peers()}
+            if public_key and public_key not in current_keys:
+                removed_keys.append(public_key)
+                logger.info("Peer %s уже отсутствует в AWG при revoke, считаем удаленным", public_key)
+            else:
+                logger.error("Ошибка удаления peer %s для user %s: %s", public_key, user_id, e)
+                failed_remove.append(public_key)
+
+    if failed_remove:
+        await write_audit_log(
+            user_id,
+            "revoke_user_access_pending",
+            f"failed_peers={len(failed_remove)}; total_found={len(public_keys)}",
+        )
+        raise RuntimeError(f"Не удалось удалить {len(failed_remove)} peer в AWG. Пользователь оставлен в состоянии revoke_pending.")
 
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
         if removed_keys:
-            await db.executemany("DELETE FROM keys WHERE public_key = ?", [(key,) for key in removed_keys])
-        await db.execute("DELETE FROM keys WHERE user_id = ? AND (public_key LIKE 'pending:%' OR state='pending' OR state='delete_pending')", (user_id,))
+            await db.executemany(
+                "UPDATE keys SET state='deleted', state_updated_at=? WHERE public_key = ?",
+                [(utc_now_naive().isoformat(), key) for key in removed_keys],
+            )
+        async with db.execute(
+            "SELECT COUNT(*) FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state='revoke_pending'",
+            (user_id,),
+        ) as cursor:
+            still_pending = (await cursor.fetchone())[0]
+        if still_pending > 0:
+            await db.commit()
+            await write_audit_log(user_id, "revoke_user_access_retry_needed", f"pending_keys={still_pending}")
+            raise RuntimeError("Не все peer удалены при revoke, требуется повторный запуск.")
+        await db.execute("DELETE FROM keys WHERE user_id = ?", (user_id,))
         await db.execute("UPDATE users SET sub_until = '0' WHERE user_id = ?", (user_id,))
         await db.commit()
     finally:
@@ -596,7 +651,7 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
     db = await open_db()
     try:
         async with db.execute(
-            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state != 'delete_pending'",
+            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state != 'deleted'",
             (user_id,),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -610,7 +665,7 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
     try:
         await db.execute("BEGIN IMMEDIATE")
         await db.execute(
-            "UPDATE keys SET state='delete_pending', state_updated_at=?, delete_reason='user_delete' WHERE user_id = ?",
+            "UPDATE keys SET state='delete_pending', state_updated_at=?, delete_reason='user_delete' WHERE user_id = ? AND state != 'deleted'",
             (utc_now_naive().isoformat(), user_id),
         )
         await db.commit()
@@ -622,8 +677,13 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
             await remove_peer_from_awg(public_key)
             removed_keys.append(public_key)
         except Exception as e:
-            logger.error("Не удалось удалить peer %s: %s", public_key, e)
-            failed_remove.append(public_key)
+            current_keys = {(peer.get("public_key") or "").strip() for peer in await get_awg_peers()}
+            if public_key and public_key not in current_keys:
+                removed_keys.append(public_key)
+                logger.info("Peer %s уже отсутствует в AWG, считаем удаленным", public_key)
+            else:
+                logger.error("Не удалось удалить peer %s: %s", public_key, e)
+                failed_remove.append(public_key)
 
     if failed_remove:
         await write_audit_log(
@@ -636,8 +696,25 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
+        if removed_keys:
+            await db.executemany(
+                "UPDATE keys SET state='deleted', state_updated_at=? WHERE public_key = ?",
+                [(utc_now_naive().isoformat(), key) for key in removed_keys],
+            )
+        async with db.execute(
+            "SELECT COUNT(*) FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state='delete_pending'",
+            (user_id,),
+        ) as cursor:
+            still_pending = (await cursor.fetchone())[0]
+        if still_pending > 0:
+            await db.commit()
+            await write_audit_log(user_id, "delete_user_everywhere_retry_needed", f"pending_keys={still_pending}")
+            raise RuntimeError("Не все peer удалены, требуется повторный запуск delete.")
         cur_keys = await db.execute("DELETE FROM keys WHERE user_id = ?", (user_id,))
-        cur_users = await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        cur_users = await db.execute(
+            "DELETE FROM users WHERE user_id = ? AND NOT EXISTS (SELECT 1 FROM keys WHERE keys.user_id = users.user_id)",
+            (user_id,),
+        )
         await db.commit()
         affected = (cur_keys.rowcount or 0) + (cur_users.rowcount or 0) + len(removed_keys)
     finally:

@@ -54,6 +54,8 @@ Telegram-бот для продажи доступа и автоматическ
 - автоопределение контейнера AWG, интерфейса, `SERVER_PUBLIC_KEY`, внешнего `SERVER_IP` и AWG-параметров;
 - создание и обновление `systemd`-сервиса;
 - запуск сервиса под отдельным системным пользователем `awg-bot` (least-privilege);
+- AWG операции выполняются через ограниченный root-helper с allowlist команд (без добавления бота в `docker` group);
+- helper использует policy-файл `/etc/awg-bot-helper.json` как целевой allowlist для `container/interface`;
 - хранение локального SHA установленной версии для проверки обновлений.
 - crash-safe обработка платежей со статусами `received/provisioning/applied/failed/needs_repair`;
 - recovery worker для повторной выдачи доступа после сбоев;
@@ -118,6 +120,7 @@ awg-tgbot/
 
 - Ubuntu / Debian;
 - root-доступ;
+- Python >= 3.10;
 - установленный Docker;
 - уже поднятый и рабочий контейнер AmneziaWG / AWG;
 - токен Telegram-бота;
@@ -179,6 +182,8 @@ sudo REPO_BRANCH=beta awg-tgbot update
 
 ## Режимы работы installer
 
+> Важно по safety: без TTY интерактивное меню и любые prompt-зависимые сценарии завершаются с понятной ошибкой (safe-fail). Для non-interactive запуска используй только явные action-команды (`status`, `check-updates`, `update`, `sync-helper-policy`), которые не требуют ввода.
+
 ### Если бот не установлен
 
 ```text
@@ -209,6 +214,18 @@ sudo REPO_BRANCH=beta awg-tgbot update
 7) Переустановить
 0) Выход
 ```
+
+### Non-interactive action-команды
+
+```bash
+sudo awg-tgbot status
+sudo awg-tgbot check-updates
+sudo awg-tgbot update
+sudo awg-tgbot sync-helper-policy
+```
+
+- destructive сценарии (`remove-default`, `remove-full`) требуют явного подтверждения с реальным вводом и безопасно отказываются без TTY;
+- `remove-default` больше не подтверждается «молчаливым default».
 
 ---
 
@@ -248,6 +265,20 @@ sudo REPO_BRANCH=beta awg-tgbot update
 - `SUPPORT_USERNAME`.
 
 Этот режим полезен, если AWG работает в нестандартном контейнере, под нестандартным интерфейсом или если внешний IPv4 / порт нужно задать вручную.
+
+## Консистентность `.env` и helper policy
+
+- Runtime использует `DOCKER_CONTAINER`/`WG_INTERFACE` из `.env`.
+- Root-helper дополнительно ограничен policy-файлом `/etc/awg-bot-helper.json`.
+- Installer при установке/обновлении синхронизирует policy из `.env` и валидирует значения заранее.
+- `sudo awg-tgbot status` показывает target из `.env` и из policy, а при рассинхроне выдаёт явное предупреждение.
+
+Если ты вручную поменял `DOCKER_CONTAINER` или `WG_INTERFACE` в `.env`, обязательно синхронизируй policy:
+
+```bash
+sudo awg-tgbot sync-helper-policy
+sudo awg-tgbot status
+```
 
 ---
 
@@ -380,6 +411,8 @@ grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/b
 - `AWG_I1`, `AWG_I2`, `AWG_I3`, `AWG_I4`, `AWG_I5`
 - `AWG_PROTOCOL_VERSION`
 - `AWG_TRANSPORT_PROTO`
+- `AWG_HELPER_PATH`
+- `AWG_HELPER_USE_SUDO`
 
 ### Коммерческие настройки
 
@@ -398,6 +431,7 @@ grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/b
 - `AWG_PEERS_CACHE_TTL_SECONDS`
 - `CLEANUP_INTERVAL_SECONDS`
 - `IGNORE_PEERS`
+- `ENCRYPTION_PBKDF2_ITERATIONS`
 
 ---
 
@@ -465,6 +499,7 @@ grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/b
 2. `Полностью удалить` — удаляет всё, включая БД и `.env`.
 
 Для полного удаления требуется явное подтверждение вводом слова `DELETE`.
+⚠️ При любом режиме удаления peer внутри AWG-контейнера автоматически не удаляются.
 
 ---
 
@@ -549,6 +584,7 @@ cp bot/.env.example bot/.env
 - `SERVER_NAME` не участвует в сборке endpoint и нужен только как отображаемое имя VPN;
 - если бот отвечает `Unauthorized`, перевыпусти токен в BotFather и обнови `.env`;
 - `ENCRYPTION_SECRET` должен быть сохранён и защищён;
+- шифрование новых значений использует PBKDF2 (scheme `enc:v2`), старые `enc:v1` остаются читаемыми;
 - при переносе БД на новый сервер без старого `ENCRYPTION_SECRET` расшифровка секретов не сработает;
 - installer ждёт освобождения `apt/dpkg lock`, если пакетный менеджер занят.
 
@@ -563,3 +599,10 @@ cp bot/.env.example bot/.env
 - smoke tests / unit tests;
 - GitHub Actions для lint / test / release;
 - отдельный режим mock/dev без реального AWG-контейнера.
+
+---
+
+## Дополнительная документация
+
+- `docs/security.md` — модель привилегий и схема шифрования.
+- `docs/migration.md` — шаги обновления и проверки после миграции.

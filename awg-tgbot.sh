@@ -24,6 +24,9 @@ INSTALL_LOG="/var/log/awg-tgbot-install.log"
 APP_LOG_DIR="/var/log/awg-tgbot"
 APP_LOG_FILE="${APP_LOG_DIR}/bot.log"
 PYTHON_BIN="/usr/bin/python3"
+AWG_HELPER_TARGET="/usr/local/libexec/awg-bot-helper"
+AWG_HELPER_SUDOERS="/etc/sudoers.d/awg-bot-helper"
+AWG_HELPER_POLICY="/etc/awg-bot-helper.json"
 TTY_DEVICE="/dev/tty"
 SELF_SYMLINK="/usr/local/bin/awg-tgbot"
 
@@ -75,26 +78,17 @@ setup_logging() {
 }
 
 setup_tty_fd() {
-  if [[ -e "$TTY_DEVICE" ]]; then
+  if [[ -e "$TTY_DEVICE" ]] && ([[ -t 0 ]] || [[ -t 1 ]]); then
     exec 3<>"$TTY_DEVICE" 2>/dev/null || true
   fi
 }
 
 has_tty() { [[ -e /proc/$$/fd/3 ]]; }
 
-tty_print() {
-  local message="$1"
-  if has_tty; then
-    printf '%s' "$message" >&3
-  else
-    printf '%s' "$message" >&2
-  fi
-}
-
 pause_if_tty() {
   if has_tty; then
-    tty_print $'\nНажми Enter, чтобы продолжить...'
-    IFS= read -r -u 3 _dummy || true
+    echo
+    read -r -u 3 -p "Нажми Enter, чтобы продолжить..." _dummy || true
   fi
 }
 
@@ -108,18 +102,11 @@ prompt_raw() {
   local prompt="$1"
   local __resultvar="$2"
   local __input=""
-  if has_tty; then
-    tty_print "$prompt"
-    if ! IFS= read -r -u 3 __input; then
-      die "Не удалось прочитать ввод с TTY. Запусти скрипт локально: curl -fsSL ${RAW_BASE_URL}/awg-tgbot.sh -o /tmp/awg-tgbot.sh && sudo REPO_BRANCH=${REPO_BRANCH} bash /tmp/awg-tgbot.sh"
-    fi
-  elif [[ -t 0 ]]; then
-    printf '%s' "$prompt" >&2
-    if ! IFS= read -r __input; then
-      die "Не удалось прочитать ввод из stdin."
-    fi
-  else
-    die "Интерактивная установка требует TTY. Запусти так: curl -fsSL ${RAW_BASE_URL}/awg-tgbot.sh -o /tmp/awg-tgbot.sh && sudo REPO_BRANCH=${REPO_BRANCH} bash /tmp/awg-tgbot.sh"
+  if ! has_tty; then
+    die "Невозможно запросить ввод без TTY (prompt: ${prompt}). Запусти скрипт в интерактивном терминале."
+  fi
+  if ! read -r -u 3 -p "$prompt" __input; then
+    __input=""
   fi
   printf -v "$__resultvar" '%s' "$__input"
 }
@@ -157,6 +144,19 @@ confirm() {
       y|yes|д|да) return 0 ;;
       n|no|н|нет) return 1 ;;
       *) warn "Введите y или n." ;;
+    esac
+  done
+}
+
+confirm_explicit() {
+  local prompt="$1"
+  local value=""
+  while true; do
+    prompt_raw "$prompt [y/n]: " value
+    case "${value,,}" in
+      y|yes|д|да) return 0 ;;
+      n|no|н|нет) return 1 ;;
+      *) warn "Нужно явное подтверждение: введи y или n." ;;
     esac
   done
 }
@@ -212,6 +212,62 @@ set_repo_branch() {
   COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
   persist_repo_branch
   return 0
+}
+
+is_safe_name() {
+  local value="$1"
+  [[ "$value" =~ ^[a-zA-Z0-9_.-]+$ ]]
+}
+
+validate_awg_target_values() {
+  local container="$1" interface="$2"
+  if ! is_safe_name "$container"; then
+    die "Некорректное значение DOCKER_CONTAINER: '${container}'. Разрешены только [a-zA-Z0-9_.-]."
+  fi
+  if ! is_safe_name "$interface"; then
+    die "Некорректное значение WG_INTERFACE: '${interface}'. Разрешены только [a-zA-Z0-9_.-]."
+  fi
+  return 0
+}
+
+write_awg_helper_policy() {
+  local container="$1" interface="$2"
+  validate_awg_target_values "$container" "$interface"
+  local tmp
+  tmp="$(mktemp)"
+  cat > "$tmp" <<POLICY
+{
+  "container": "${container}",
+  "interface": "${interface}"
+}
+POLICY
+  install -o root -g root -m 640 "$tmp" "$AWG_HELPER_POLICY"
+  rm -f "$tmp"
+  return 0
+}
+
+sync_awg_helper_policy_from_env() {
+  local container interface
+  container="$(get_env_value DOCKER_CONTAINER)"
+  interface="$(get_env_value WG_INTERFACE)"
+  [[ -n "$container" ]] || die "DOCKER_CONTAINER не задан в ${ENV_FILE}. Синхронизация policy невозможна."
+  [[ -n "$interface" ]] || die "WG_INTERFACE не задан в ${ENV_FILE}. Синхронизация policy невозможна."
+  write_awg_helper_policy "$container" "$interface"
+  ok "Helper policy синхронизирована: ${AWG_HELPER_POLICY} (${container}/${interface})"
+  return 0
+}
+
+helper_policy_field() {
+  local field="$1"
+  [[ -f "$AWG_HELPER_POLICY" ]] || return 0
+  "$PYTHON_BIN" - "$AWG_HELPER_POLICY" "$field" <<'PY' 2>/dev/null || true
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+value = data.get(key, "")
+print(value if isinstance(value, str) else "")
+PY
 }
 
 choose_branch_menu() {
@@ -274,7 +330,7 @@ ensure_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt_get_safe update -y
   apt_get_safe install -y --no-install-recommends \
-    ca-certificates curl tar gzip openssl python3 python3-venv python3-pip iproute2 psmisc
+    ca-certificates curl tar gzip openssl sudo python3 python3-venv python3-pip iproute2 psmisc
   if ! require_command docker; then
     warn "Docker не найден. Устанавливаю docker.io..."
     apt_get_safe install -y --no-install-recommends docker.io
@@ -284,6 +340,15 @@ ensure_packages() {
     sleep 2
   fi
   return 0
+}
+
+ensure_python_compatible() {
+  "$PYTHON_BIN" - <<'PY'
+import sys
+if sys.version_info < (3, 10):
+    raise SystemExit(1)
+print(f"python={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+PY
 }
 
 docker_is_accessible() { require_command docker && docker ps >/dev/null 2>&1; }
@@ -739,8 +804,21 @@ configure_manual_install() {
   return 0
 }
 
+
+ensure_bot_not_in_docker_group() {
+  if ! getent group docker >/dev/null 2>&1; then
+    return 0
+  fi
+  if id -nG "$BOT_USER" 2>/dev/null | tr ' ' '
+' | grep -qx docker; then
+    gpasswd -d "$BOT_USER" docker >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
 ensure_venv_and_requirements() {
   info "Настраиваю Python окружение..."
+  ensure_python_compatible || die "Требуется Python >= 3.10."
   [[ -d "$VENV_DIR" ]] || "$PYTHON_BIN" -m venv "$VENV_DIR" || return 1
   "$VENV_DIR/bin/pip" install --upgrade pip wheel || return 1
   "$VENV_DIR/bin/pip" install -r "$BOT_DIR/requirements.txt" || return 1
@@ -751,11 +829,23 @@ ensure_bot_user() {
   if ! id -u "$BOT_USER" >/dev/null 2>&1; then
     useradd --system --home "$INSTALL_DIR" --shell /usr/sbin/nologin "$BOT_USER" || return 1
   fi
-  usermod -aG docker "$BOT_USER" 2>/dev/null || true
+  ensure_bot_not_in_docker_group
   mkdir -p "$APP_LOG_DIR"
   touch "$APP_LOG_FILE"
   chown -R "$BOT_USER:$BOT_USER" "$INSTALL_DIR" "$APP_LOG_DIR"
   chmod 750 "$INSTALL_DIR" || true
+  return 0
+}
+
+install_awg_helper() {
+  [[ -f "$BOT_DIR/awg_helper.py" ]] || return 1
+  install -d -m 755 /usr/local/libexec
+  install -o root -g root -m 750 "$BOT_DIR/awg_helper.py" "$AWG_HELPER_TARGET"
+  sync_awg_helper_policy_from_env
+  cat > "$AWG_HELPER_SUDOERS" <<SUDOERS
+${BOT_USER} ALL=(root) NOPASSWD: ${AWG_HELPER_TARGET} *
+SUDOERS
+  chmod 440 "$AWG_HELPER_SUDOERS"
   return 0
 }
 
@@ -778,7 +868,8 @@ Restart=always
 RestartSec=3
 User=${BOT_USER}
 Group=${BOT_USER}
-NoNewPrivileges=true
+# sudo к root helper требует возможности повышения привилегий.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
@@ -818,7 +909,7 @@ stop_service_if_exists() {
 }
 
 show_status() {
-  local active_state enabled_state local_sha branch_info env_state
+  local active_state enabled_state local_sha branch_info env_state env_container env_interface policy_container policy_interface docker_membership
   print_line
   branch_info="$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)"
   [[ -n "$branch_info" ]] || branch_info="$REPO_BRANCH"
@@ -830,6 +921,10 @@ show_status() {
   [[ -n "$local_sha" ]] || local_sha="неизвестно"
   env_state="нет"
   [[ -f "$ENV_FILE" ]] && env_state="есть"
+  env_container="$(get_env_value DOCKER_CONTAINER)"
+  env_interface="$(get_env_value WG_INTERFACE)"
+  policy_container="$(helper_policy_field container)"
+  policy_interface="$(helper_policy_field interface)"
 
   echo "Проект: ${REPO_OWNER}/${REPO_NAME}"
   echo "Установлен: $([[ -d "$INSTALL_DIR" ]] && echo 'да' || echo 'нет')"
@@ -842,6 +937,24 @@ show_status() {
   echo "Локальная версия: ${local_sha}"
   echo "Логи приложения: ${APP_LOG_FILE}"
   echo "Лог установки: ${INSTALL_LOG}"
+  if id -u "$BOT_USER" >/dev/null 2>&1 && id -nG "$BOT_USER" 2>/dev/null | tr ' ' '
+' | grep -qx docker; then
+    docker_membership="в группе docker (небезопасно)"
+  else
+    docker_membership="не в группе docker"
+  fi
+  echo "${BOT_USER}: ${docker_membership}"
+  echo "AWG target (.env): ${env_container:-не задан}/${env_interface:-не задан}"
+  if [[ -f "$AWG_HELPER_POLICY" ]]; then
+    echo "AWG target (helper policy): ${policy_container:-не задан}/${policy_interface:-не задан}"
+    if [[ -n "$env_container" && -n "$env_interface" ]] && [[ "$env_container" != "$policy_container" || "$env_interface" != "$policy_interface" ]]; then
+      warn "Обнаружен рассинхрон .env и helper policy. Выполни: sudo awg-tgbot sync-helper-policy"
+    else
+      ok "AWG target в .env и helper policy синхронизированы."
+    fi
+  else
+    warn "Helper policy не найдена: ${AWG_HELPER_POLICY}"
+  fi
   if is_installed; then
     echo
     echo "Health summary:"
@@ -954,6 +1067,7 @@ install_or_reinstall_flow() {
 
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
   ensure_bot_user || die "Не удалось подготовить service пользователя."
+  install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось создать systemd сервис."
   persist_repo_branch
   persist_remote_sha
@@ -997,6 +1111,7 @@ update_bot() {
   write_detected_awg_env
   ensure_venv_and_requirements || die "Не удалось обновить Python зависимости."
   ensure_bot_user || die "Не удалось подготовить service пользователя."
+  install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось обновить systemd сервис."
   persist_repo_branch
   persist_remote_sha
@@ -1012,6 +1127,7 @@ remove_everything() {
   systemctl daemon-reload || true
   systemctl reset-failed || true
   rm -f "$SELF_SYMLINK"
+  rm -f "$AWG_HELPER_SUDOERS" "$AWG_HELPER_TARGET"
   rm -rf "$INSTALL_DIR" "$APP_LOG_DIR"
   rm -f "$INSTALL_LOG"
   return 0
@@ -1058,7 +1174,7 @@ remove_keep_db_and_env() {
 }
 
 remove_default() {
-  if ! confirm "Удалить приложение и сервис, оставив БД и .env?" "Y"; then
+  if ! confirm_explicit "Удалить приложение и сервис, оставив БД и .env?"; then
     warn "Удаление отменено."
     return 0
   fi
@@ -1070,6 +1186,7 @@ remove_default() {
 remove_full() {
   print_line
   warn "Полное удаление уничтожит код, сервис, БД, .env и логи."
+  warn "Внимание: AWG peer в контейнере этим действием не удаляются автоматически."
   if ! confirm_delete_word; then
     warn "Полное удаление отменено (неверное подтверждение)."
     return 0
@@ -1197,6 +1314,7 @@ run_action() {
     status) show_status ;;
     logs) show_logs ;;
     choose-branch) choose_branch_menu ;;
+    sync-helper-policy) sync_awg_helper_policy_from_env ;;
     remove-default) remove_default ;;
     remove-full) remove_full ;;
     remove|uninstall) remove_bot ;;
@@ -1251,13 +1369,13 @@ require_root
 setup_logging
 setup_tty_fd
 
-if [[ $# -eq 0 ]] && ! has_tty && ! [[ -t 0 ]]; then
-  die "Интерактивный режим недоступен без TTY. Скачай скрипт в файл и запусти локально."
-fi
-
 if [[ $# -gt 0 ]]; then
   run_action "$1"
   exit 0
+fi
+
+if ! has_tty; then
+  die "Интерактивное меню требует TTY. Используй action-команды (например: status, update, sync-helper-policy)."
 fi
 
 main_menu

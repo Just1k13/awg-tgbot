@@ -1634,8 +1634,9 @@ run_action() {
 }
 
 main_menu() {
-  local choice=""
+  local choice="" should_pause=1
   while true; do
+    should_pause=1
     detect_install_state
     print_startup_summary
     case "$STARTUP_STATE_CODE" in
@@ -1649,9 +1650,9 @@ main_menu() {
           4) update_bot ;;
           5) install_or_reinstall_flow reinstall ;;
           6) remove_bot ;;
-          7) choose_branch_menu ;;
-          8) ;;
-          0) echo "Выход."; exit 0 ;;
+          7) choose_branch_menu; should_pause=0 ;;
+          8) should_pause=0 ;;
+          0) clear_if_tty; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1660,9 +1661,9 @@ main_menu() {
         prompt_raw "Выбери действие: " choice
         case "$choice" in
           1) install_or_reinstall_flow install ;;
-          2) choose_branch_menu ;;
-          3) ;;
-          0) echo "Выход."; exit 0 ;;
+          2) choose_branch_menu; should_pause=0 ;;
+          3) should_pause=0 ;;
+          0) clear_if_tty; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1674,9 +1675,9 @@ main_menu() {
           2) show_logs ;;
           3) install_or_reinstall_flow reinstall ;;
           4) remove_bot ;;
-          5) choose_branch_menu ;;
-          6) ;;
-          0) echo "Выход."; exit 0 ;;
+          5) choose_branch_menu; should_pause=0 ;;
+          6) should_pause=0 ;;
+          0) clear_if_tty; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
@@ -1684,14 +1685,16 @@ main_menu() {
         print_menu_awg_no_bot_no
         prompt_raw "Выбери действие: " choice
         case "$choice" in
-          1) choose_branch_menu ;;
-          2) ;;
-          0) echo "Выход."; exit 0 ;;
+          1) choose_branch_menu; should_pause=0 ;;
+          2) should_pause=0 ;;
+          0) clear_if_tty; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
         ;;
     esac
-    pause_if_tty
+    if [[ "$should_pause" == "1" ]]; then
+      pause_if_tty
+    fi
     clear_if_tty
   done
 }

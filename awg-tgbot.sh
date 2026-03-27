@@ -55,6 +55,22 @@ DETECTED_AWG_I3=""
 DETECTED_AWG_I4=""
 DETECTED_AWG_I5=""
 
+STATE_DOCKER_INSTALLED=0
+STATE_DOCKER_DAEMON=0
+STATE_AWG_CONTAINER_FOUND=0
+STATE_AWG_INTERFACE_FOUND=0
+STATE_AWG_CONFIG_FOUND=0
+STATE_AWG_FOUND=0
+STATE_BOT_SERVICE_FOUND=0
+STATE_BOT_DIR_FOUND=0
+STATE_BOT_APP_FOUND=0
+STATE_BOT_SYMLINK_FOUND=0
+STATE_BOT_ENV_FOUND=0
+STATE_BOT_STATE_FOUND=0
+STATE_BOT_INSTALLED=0
+STATE_BOT_RESIDUAL=0
+STARTUP_STATE_CODE="unknown"
+
 print_line() { printf '%s\n' "------------------------------------------------------------"; }
 info() { printf '[*] %s\n' "$*" >&2; }
 ok() { printf '[+] %s\n' "$*" >&2; }
@@ -593,6 +609,173 @@ print_detected_awg_summary() {
   return 0
 }
 
+status_found_text() {
+  [[ "${1:-0}" == "1" ]] && printf 'найден' || printf 'не найден'
+}
+
+status_installed_text() {
+  [[ "${1:-0}" == "1" ]] && printf 'установлен' || printf 'не установлен'
+}
+
+status_available_text() {
+  [[ "${1:-0}" == "1" ]] && printf 'доступен' || printf 'недоступен'
+}
+
+reset_system_state() {
+  STATE_DOCKER_INSTALLED=0
+  STATE_DOCKER_DAEMON=0
+  STATE_AWG_CONTAINER_FOUND=0
+  STATE_AWG_INTERFACE_FOUND=0
+  STATE_AWG_CONFIG_FOUND=0
+  STATE_AWG_FOUND=0
+  STATE_BOT_SERVICE_FOUND=0
+  STATE_BOT_DIR_FOUND=0
+  STATE_BOT_APP_FOUND=0
+  STATE_BOT_SYMLINK_FOUND=0
+  STATE_BOT_ENV_FOUND=0
+  STATE_BOT_STATE_FOUND=0
+  STATE_BOT_INSTALLED=0
+  STATE_BOT_RESIDUAL=0
+  STARTUP_STATE_CODE="unknown"
+}
+
+check_awg_installed() {
+  local show_output="" interface_name=""
+  STATE_DOCKER_INSTALLED=0
+  STATE_DOCKER_DAEMON=0
+  STATE_AWG_CONTAINER_FOUND=0
+  STATE_AWG_INTERFACE_FOUND=0
+  STATE_AWG_CONFIG_FOUND=0
+  STATE_AWG_FOUND=0
+
+  if require_command docker; then
+    STATE_DOCKER_INSTALLED=1
+  fi
+
+  if docker_is_accessible; then
+    STATE_DOCKER_DAEMON=1
+  fi
+
+  detect_awg_environment
+
+  if [[ "$STATE_DOCKER_DAEMON" != "1" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$DETECTED_CONTAINER" ]] && docker inspect "$DETECTED_CONTAINER" >/dev/null 2>&1; then
+    STATE_AWG_CONTAINER_FOUND=1
+  else
+    return 0
+  fi
+
+  show_output="$(docker_exec_capture "$DETECTED_CONTAINER" awg show "$DETECTED_INTERFACE")"
+  [[ -n "$show_output" ]] || show_output="$(docker_exec_capture "$DETECTED_CONTAINER" awg show)"
+  interface_name="$(extract_awg_show_value 'interface' "$show_output")"
+  if [[ -n "$interface_name" ]]; then
+    DETECTED_INTERFACE="$interface_name"
+    STATE_AWG_INTERFACE_FOUND=1
+  fi
+
+  if [[ -n "$DETECTED_CONFIG_PATH" ]]; then
+    STATE_AWG_CONFIG_FOUND=1
+  fi
+
+  if [[ "$STATE_AWG_INTERFACE_FOUND" == "1" || "$STATE_AWG_CONFIG_FOUND" == "1" ]]; then
+    STATE_AWG_FOUND=1
+  fi
+  return 0
+}
+
+check_bot_installed() {
+  STATE_BOT_SERVICE_FOUND=0
+  STATE_BOT_DIR_FOUND=0
+  STATE_BOT_APP_FOUND=0
+  STATE_BOT_SYMLINK_FOUND=0
+  STATE_BOT_ENV_FOUND=0
+  STATE_BOT_STATE_FOUND=0
+  STATE_BOT_INSTALLED=0
+  STATE_BOT_RESIDUAL=0
+
+  [[ -f "$SERVICE_FILE" ]] && STATE_BOT_SERVICE_FOUND=1
+  [[ -d "$BOT_DIR" ]] && STATE_BOT_DIR_FOUND=1
+  [[ -f "$BOT_DIR/app.py" ]] && STATE_BOT_APP_FOUND=1
+  [[ -L "$SELF_SYMLINK" ]] && STATE_BOT_SYMLINK_FOUND=1
+  [[ -f "$ENV_FILE" ]] && STATE_BOT_ENV_FOUND=1
+  [[ -d "$STATE_DIR" ]] && STATE_BOT_STATE_FOUND=1
+
+  if [[ "$STATE_BOT_SERVICE_FOUND" == "1" && "$STATE_BOT_DIR_FOUND" == "1" && "$STATE_BOT_APP_FOUND" == "1" ]]; then
+    STATE_BOT_INSTALLED=1
+  fi
+
+  if has_residual_files || [[ "$STATE_BOT_ENV_FOUND" == "1" || "$STATE_BOT_STATE_FOUND" == "1" ]]; then
+    STATE_BOT_RESIDUAL=1
+  fi
+  return 0
+}
+
+collect_system_state() {
+  reset_system_state
+  check_awg_installed
+  check_bot_installed
+
+  if [[ "$STATE_AWG_FOUND" == "1" && "$STATE_BOT_INSTALLED" == "1" ]]; then
+    STARTUP_STATE_CODE="awg_yes_bot_yes"
+  elif [[ "$STATE_AWG_FOUND" == "1" && "$STATE_BOT_INSTALLED" != "1" ]]; then
+    STARTUP_STATE_CODE="awg_yes_bot_no"
+  elif [[ "$STATE_AWG_FOUND" != "1" && "$STATE_BOT_INSTALLED" == "1" ]]; then
+    STARTUP_STATE_CODE="awg_no_bot_yes"
+  else
+    STARTUP_STATE_CODE="awg_no_bot_no"
+  fi
+  return 0
+}
+
+detect_install_state() {
+  collect_system_state
+}
+
+print_startup_summary() {
+  print_line
+  echo "Предварительная проверка:"
+  echo "AWG: $(status_found_text "$STATE_AWG_FOUND")"
+  echo "Бот: $(status_installed_text "$STATE_BOT_INSTALLED")"
+  echo "Ветка: ${REPO_BRANCH}"
+  echo "Service: $(status_found_text "$STATE_BOT_SERVICE_FOUND")"
+  echo "Docker: $(status_available_text "$STATE_DOCKER_DAEMON")"
+  print_line
+  echo "Docker CLI: $([[ "$STATE_DOCKER_INSTALLED" == "1" ]] && echo 'установлен' || echo 'не установлен')"
+  echo "Docker daemon: $(status_available_text "$STATE_DOCKER_DAEMON")"
+  echo "AWG контейнер: $(status_found_text "$STATE_AWG_CONTAINER_FOUND")"
+  echo "AWG интерфейс: $(status_found_text "$STATE_AWG_INTERFACE_FOUND")"
+  echo "AWG config: $(status_found_text "$STATE_AWG_CONFIG_FOUND")"
+  echo "BOT_DIR: $(status_found_text "$STATE_BOT_DIR_FOUND")"
+  echo "BOT_DIR/app.py: $(status_found_text "$STATE_BOT_APP_FOUND")"
+  echo "Symlink /usr/local/bin/awg-tgbot: $(status_found_text "$STATE_BOT_SYMLINK_FOUND")"
+  echo ".env: $(status_found_text "$STATE_BOT_ENV_FOUND")"
+  echo "Служебное состояние установки: $(status_found_text "$STATE_BOT_STATE_FOUND")"
+  if [[ "$STATE_BOT_RESIDUAL" == "1" && "$STATE_BOT_INSTALLED" != "1" ]]; then
+    echo "Остаточные файлы: найдены"
+  fi
+  print_line
+  case "$STARTUP_STATE_CODE" in
+    awg_yes_bot_yes)
+      echo "Состояние: AWG найден, бот установлен."
+      ;;
+    awg_yes_bot_no)
+      echo "Состояние: AWG найден, бот не установлен."
+      ;;
+    awg_no_bot_yes)
+      echo "Состояние: установка бота найдена, но AWG сейчас не обнаружен."
+      ;;
+    awg_no_bot_no)
+      echo "Состояние: AWG не найден и бот не установлен."
+      echo "Сначала установи и запусти AWG, затем вернись к установке бота."
+      ;;
+  esac
+  print_line
+  return 0
+}
+
 download_repo() {
   local tmp_dir src_dir
   tmp_dir="$(mktemp -d)"
@@ -993,6 +1176,14 @@ check_updates() {
 
 install_or_reinstall_flow() {
   local mode="$1" tmp_dir choice api_token admin_id server_name secret value default
+  detect_install_state
+  if [[ "$mode" == "install" && "$STATE_AWG_FOUND" != "1" ]]; then
+    print_startup_summary
+    die "AWG не обнаружен. Установка доступна только после явной подготовки и запуска AWG."
+  fi
+  if [[ "$mode" == "reinstall" && "$STATE_AWG_FOUND" != "1" ]]; then
+    warn "AWG сейчас не обнаружен. Переустановка может потребовать ручной проверки Docker/AWG."
+  fi
   print_line
   if [[ "$mode" == "install" ]]; then
     info "Установка AWG Telegram Bot"
@@ -1267,39 +1458,45 @@ show_logs() {
   return 0
 }
 
-print_not_installed_menu() {
-  print_line
-  echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
-  echo "Бот сейчас не установлен."
+print_menu_awg_yes_bot_no() {
+  echo "Доступные действия:"
   echo "1) Установить"
   echo "2) Выбор ветки"
-  echo "0) Отмена / Выход"
-  print_line
-}
-
-print_residual_menu() {
-  print_line
-  echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
-  echo "Найдены остаточные файлы прошлой установки."
-  echo "1) Установить / переустановить"
-  echo "2) Обычное удаление (сохранить БД и .env)"
-  echo "3) Полное удаление"
-  echo "4) Выбор ветки"
+  echo "3) Повторить проверку"
   echo "0) Выход"
   print_line
 }
 
-print_installed_menu() {
+print_menu_awg_yes_bot_yes() {
+  echo "Доступные действия:"
+  echo "1) Статус"
+  echo "2) Логи"
+  echo "3) Проверить обновления"
+  echo "4) Обновить"
+  echo "5) Переустановить"
+  echo "6) Удалить"
+  echo "7) Выбор ветки"
+  echo "8) Повторить проверку"
+  echo "0) Выход"
   print_line
-  echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
-  echo "Бот уже установлен."
-  echo "1) Проверить обновления"
-  echo "2) Удалить (сохранить БД и .env)"
-  echo "3) Полностью удалить"
-  echo "4) Статус"
-  echo "5) Логи"
-  echo "6) Выбор ветки"
-  echo "7) Переустановить"
+}
+
+print_menu_awg_no_bot_yes() {
+  echo "Доступные действия:"
+  echo "1) Статус"
+  echo "2) Логи"
+  echo "3) Переустановить"
+  echo "4) Удалить"
+  echo "5) Выбор ветки"
+  echo "6) Повторить проверку"
+  echo "0) Выход"
+  print_line
+}
+
+print_menu_awg_no_bot_no() {
+  echo "Доступные действия:"
+  echo "1) Выбор ветки"
+  echo "2) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -1314,6 +1511,7 @@ run_action() {
     status) show_status ;;
     logs) show_logs ;;
     choose-branch) choose_branch_menu ;;
+    preflight|detect-install-state) detect_install_state; print_startup_summary ;;
     sync-helper-policy) sync_awg_helper_policy_from_env ;;
     remove-default) remove_default ;;
     remove-full) remove_full ;;
@@ -1325,41 +1523,61 @@ run_action() {
 main_menu() {
   local choice=""
   while true; do
-    if is_installed; then
-      print_installed_menu
-      prompt_raw "Выбери действие: " choice
-      case "$choice" in
-        1) check_updates || true ;;
-        2) remove_default ;;
-        3) remove_full ;;
-        4) show_status ;;
-        5) show_logs ;;
-        6) choose_branch_menu ;;
-        7) install_or_reinstall_flow reinstall ;;
-        0) echo "Выход."; exit 0 ;;
-        *) warn "Неизвестный пункт меню." ;;
-      esac
-    elif has_residual_files; then
-      print_residual_menu
-      prompt_raw "Выбери действие: " choice
-      case "$choice" in
-        1) install_or_reinstall_flow install ;;
-        2) remove_default ;;
-        3) remove_full ;;
-        4) choose_branch_menu ;;
-        0) echo "Выход."; exit 0 ;;
-        *) warn "Неизвестный пункт меню." ;;
-      esac
-    else
-      print_not_installed_menu
-      prompt_raw "Выбери действие: " choice
-      case "$choice" in
-        1) install_or_reinstall_flow install ;;
-        2) choose_branch_menu ;;
-        0) echo "Выход."; exit 0 ;;
-        *) warn "Неизвестный пункт меню." ;;
-      esac
-    fi
+    detect_install_state
+    print_startup_summary
+    case "$STARTUP_STATE_CODE" in
+      awg_yes_bot_yes)
+        print_menu_awg_yes_bot_yes
+        prompt_raw "Выбери действие: " choice
+        case "$choice" in
+          1) show_status ;;
+          2) show_logs ;;
+          3) check_updates || true ;;
+          4) update_bot ;;
+          5) install_or_reinstall_flow reinstall ;;
+          6) remove_bot ;;
+          7) choose_branch_menu ;;
+          8) ;;
+          0) echo "Выход."; exit 0 ;;
+          *) warn "Неизвестный пункт меню." ;;
+        esac
+        ;;
+      awg_yes_bot_no)
+        print_menu_awg_yes_bot_no
+        prompt_raw "Выбери действие: " choice
+        case "$choice" in
+          1) install_or_reinstall_flow install ;;
+          2) choose_branch_menu ;;
+          3) ;;
+          0) echo "Выход."; exit 0 ;;
+          *) warn "Неизвестный пункт меню." ;;
+        esac
+        ;;
+      awg_no_bot_yes)
+        print_menu_awg_no_bot_yes
+        prompt_raw "Выбери действие: " choice
+        case "$choice" in
+          1) show_status ;;
+          2) show_logs ;;
+          3) install_or_reinstall_flow reinstall ;;
+          4) remove_bot ;;
+          5) choose_branch_menu ;;
+          6) ;;
+          0) echo "Выход."; exit 0 ;;
+          *) warn "Неизвестный пункт меню." ;;
+        esac
+        ;;
+      awg_no_bot_no|*)
+        print_menu_awg_no_bot_no
+        prompt_raw "Выбери действие: " choice
+        case "$choice" in
+          1) choose_branch_menu ;;
+          2) ;;
+          0) echo "Выход."; exit 0 ;;
+          *) warn "Неизвестный пункт меню." ;;
+        esac
+        ;;
+    esac
     pause_if_tty
     clear_if_tty
   done

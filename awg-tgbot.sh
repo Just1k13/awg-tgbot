@@ -70,6 +70,9 @@ STATE_BOT_STATE_FOUND=0
 STATE_BOT_INSTALLED=0
 STATE_BOT_RESIDUAL=0
 STARTUP_STATE_CODE="unknown"
+UPDATE_STATUS="not_applicable"
+UPDATE_REMOTE_SHA=""
+UPDATE_LOCAL_SHA=""
 
 print_line() { printf '%s\n' "------------------------------------------------------------"; }
 info() { printf '[*] %s\n' "$*" >&2; }
@@ -772,7 +775,49 @@ detect_install_state() {
   collect_system_state
 }
 
-print_startup_summary() {
+refresh_update_status_quiet() {
+  UPDATE_STATUS="not_applicable"
+  UPDATE_REMOTE_SHA=""
+  UPDATE_LOCAL_SHA=""
+
+  if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
+    return 0
+  fi
+
+  UPDATE_LOCAL_SHA="$(get_local_sha)"
+  UPDATE_REMOTE_SHA="$(fetch_remote_sha)"
+
+  if [[ -z "$UPDATE_REMOTE_SHA" ]]; then
+    UPDATE_STATUS="unknown"
+  elif [[ -n "$UPDATE_LOCAL_SHA" && "$UPDATE_REMOTE_SHA" == "$UPDATE_LOCAL_SHA" ]]; then
+    UPDATE_STATUS="current"
+  else
+    UPDATE_STATUS="available"
+  fi
+  return 0
+}
+
+startup_state_message() {
+  case "$STARTUP_STATE_CODE" in
+    awg_yes_bot_yes) printf '%s' "AWG найден, бот установлен." ;;
+    awg_yes_bot_no) printf '%s' "AWG найден, бот не установлен." ;;
+    awg_no_bot_yes) printf '%s' "Установка бота найдена, но AWG сейчас не обнаружен." ;;
+    awg_no_bot_no|*) printf '%s' "AWG не найден и бот не установлен." ;;
+  esac
+}
+
+print_update_status_line() {
+  [[ "$STATE_BOT_INSTALLED" == "1" ]] || return 0
+  case "$UPDATE_STATUS" in
+    available) echo "Обновление: доступно" ;;
+    current) echo "Обновление: версия актуальна" ;;
+    unknown) echo "Обновление: не удалось проверить" ;;
+  esac
+  return 0
+}
+
+
+print_detailed_startup_summary() {
   print_line
   echo "Предварительная проверка:"
   echo "AWG: $(status_found_text "$STATE_AWG_FOUND")"
@@ -794,22 +839,32 @@ print_startup_summary() {
   if [[ "$STATE_BOT_RESIDUAL" == "1" && "$STATE_BOT_INSTALLED" != "1" ]]; then
     echo "Остаточные файлы: найдены"
   fi
+  print_update_status_line
+  if [[ "$STATE_BOT_INSTALLED" == "1" ]]; then
+    echo "Локальная версия: ${UPDATE_LOCAL_SHA:-неизвестно}"
+    echo "Remote SHA: ${UPDATE_REMOTE_SHA:-не удалось получить}"
+  fi
   print_line
-  case "$STARTUP_STATE_CODE" in
-    awg_yes_bot_yes)
-      echo "Состояние: AWG найден, бот установлен."
-      ;;
-    awg_yes_bot_no)
-      echo "Состояние: AWG найден, бот не установлен."
-      ;;
-    awg_no_bot_yes)
-      echo "Состояние: установка бота найдена, но AWG сейчас не обнаружен."
-      ;;
-    awg_no_bot_no)
-      echo "Состояние: AWG не найден и бот не установлен."
-      echo "Сначала установи и запусти AWG, затем вернись к установке бота."
-      ;;
-  esac
+  echo "Состояние: $(startup_state_message)"
+  if [[ "$STARTUP_STATE_CODE" == "awg_no_bot_no" ]]; then
+    echo "Сначала установи и запусти AWG, затем вернись к установке бота."
+  fi
+  print_line
+  return 0
+}
+
+print_startup_summary() {
+  print_line
+  echo "AWG: $(status_found_text "$STATE_AWG_FOUND") | Бот: $(status_installed_text "$STATE_BOT_INSTALLED") | Ветка: ${REPO_BRANCH} | Docker: $(status_available_text "$STATE_DOCKER_DAEMON")"
+  print_update_status_line
+  if [[ "$STATE_BOT_RESIDUAL" == "1" && "$STATE_BOT_INSTALLED" != "1" ]]; then
+    echo "Остаточные файлы: найдены"
+  fi
+  echo "Состояние: $(startup_state_message)"
+  if [[ "$STARTUP_STATE_CODE" == "awg_no_bot_no" ]]; then
+    echo "Сначала установи и запусти AWG, затем вернись к установке бота."
+  fi
+  echo "Подробности доступны в пункте «Диагностика»."
   print_line
   return 0
 }
@@ -1309,18 +1364,30 @@ install_or_reinstall_flow() {
 }
 
 update_bot() {
-  local tmp_dir api_token admin_id server_name secret skip_check="${1:-0}"
+  local tmp_dir api_token admin_id server_name secret
   if ! is_installed; then
     warn "Бот не установлен."
     return 0
   fi
+
+  refresh_update_status_quiet
+  if [[ "$UPDATE_STATUS" == "current" ]]; then
+    print_line
+    ok "Обновления не найдены. Установлена актуальная версия."
+    print_line
+    return 0
+  fi
+
   print_line
   info "Обновление AWG Telegram Bot"
+  if [[ "$UPDATE_STATUS" == "available" ]]; then
+    info "Доступна новая версия. Начинаю обновление..."
+  elif [[ "$UPDATE_STATUS" == "unknown" ]]; then
+    warn "Не удалось заранее проверить обновления. Пытаюсь обновить по текущей ветке..."
+  fi
+
   ensure_packages || die "Не удалось обновить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
-  if [[ "$skip_check" != "1" ]]; then
-    check_updates || true
-  fi
 
   tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
   stop_service_if_exists
@@ -1615,8 +1682,9 @@ show_logs() {
 print_menu_awg_yes_bot_no() {
   echo "Доступные действия:"
   echo "1) Установить"
-  echo "2) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
-  echo "3) Повторить проверку"
+  echo "2) Диагностика"
+  echo "3) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
+  echo "4) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -1625,10 +1693,11 @@ print_menu_awg_yes_bot_yes() {
   echo "Доступные действия:"
   echo "1) Статус"
   echo "2) Логи"
-  echo "3) Проверить обновления"
-  echo "4) Обновить"
-  echo "5) Переустановить"
-  echo "6) Удалить"
+  echo "3) Обновить"
+  echo "4) Переустановить"
+  echo "5) Удалить"
+  echo
+  echo "6) Диагностика"
   echo "7) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
   echo "8) Повторить проверку"
   echo "0) Выход"
@@ -1641,16 +1710,18 @@ print_menu_awg_no_bot_yes() {
   echo "2) Логи"
   echo "3) Переустановить"
   echo "4) Удалить"
-  echo "5) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
-  echo "6) Повторить проверку"
+  echo "5) Диагностика"
+  echo "6) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
+  echo "7) Повторить проверку"
   echo "0) Выход"
   print_line
 }
 
 print_menu_awg_no_bot_no() {
   echo "Доступные действия:"
-  echo "1) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
-  echo "2) Повторить проверку"
+  echo "1) Диагностика"
+  echo "2) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
+  echo "3) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -1665,7 +1736,8 @@ run_action() {
     status) show_status ;;
     logs) show_logs ;;
     choose-branch) choose_branch_menu ;;
-    preflight|detect-install-state) detect_install_state; print_startup_summary ;;
+    diagnostics) detect_install_state; refresh_update_status_quiet; print_detailed_startup_summary ;;
+    preflight|detect-install-state) detect_install_state; refresh_update_status_quiet; print_detailed_startup_summary ;;
     sync-helper-policy) sync_awg_helper_policy_from_env ;;
     remove-default) remove_default ;;
     remove-full) remove_full ;;
@@ -1679,6 +1751,7 @@ main_menu() {
   while true; do
     should_pause=1
     detect_install_state
+    refresh_update_status_quiet
     print_startup_summary
     case "$STARTUP_STATE_CODE" in
       awg_yes_bot_yes)
@@ -1687,10 +1760,10 @@ main_menu() {
         case "$choice" in
           1) show_status ;;
           2) show_logs ;;
-          3) check_updates || true ;;
-          4) update_bot ;;
-          5) install_or_reinstall_flow reinstall ;;
-          6) remove_bot ;;
+          3) update_bot ;;
+          4) install_or_reinstall_flow reinstall ;;
+          5) remove_bot ;;
+          6) print_detailed_startup_summary ;;
           7) choose_branch_menu; should_pause=0 ;;
           8) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
@@ -1702,8 +1775,9 @@ main_menu() {
         prompt_raw "Выбери действие: " choice
         case "$choice" in
           1) install_or_reinstall_flow install ;;
-          2) choose_branch_menu; should_pause=0 ;;
-          3) should_pause=0 ;;
+          2) print_detailed_startup_summary ;;
+          3) choose_branch_menu; should_pause=0 ;;
+          4) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -1716,8 +1790,9 @@ main_menu() {
           2) show_logs ;;
           3) install_or_reinstall_flow reinstall ;;
           4) remove_bot ;;
-          5) choose_branch_menu; should_pause=0 ;;
-          6) should_pause=0 ;;
+          5) print_detailed_startup_summary ;;
+          6) choose_branch_menu; should_pause=0 ;;
+          7) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -1726,8 +1801,9 @@ main_menu() {
         print_menu_awg_no_bot_no
         prompt_raw "Выбери действие: " choice
         case "$choice" in
-          1) choose_branch_menu; should_pause=0 ;;
-          2) should_pause=0 ;;
+          1) print_detailed_startup_summary ;;
+          2) choose_branch_menu; should_pause=0 ;;
+          3) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -1740,7 +1816,7 @@ main_menu() {
   done
 }
 
-require_root
+require_rootrequire_root
 setup_logging
 setup_tty_fd
 
@@ -1751,7 +1827,7 @@ fi
 
 if ! has_tty; then
   warn "Интерактивное меню требует TTY и не может читать ответы из stdin pipe."
-  warn "Используй action-команды (например: status, check-updates, update, sync-helper-policy) без prompt-ов."
+  warn "Используй action-команды (например: status, update, diagnostics, sync-helper-policy) без prompt-ов."
   die "Для первичной установки запусти команду в интерактивной сессии с TTY (SSH/console)."
 fi
 

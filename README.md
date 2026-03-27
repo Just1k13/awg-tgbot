@@ -55,6 +55,7 @@ Telegram-бот для продажи доступа и автоматическ
 - создание и обновление `systemd`-сервиса;
 - запуск сервиса под отдельным системным пользователем `awg-bot` (least-privilege);
 - AWG операции выполняются через ограниченный root-helper с allowlist команд (без добавления бота в `docker` group);
+- helper использует policy-файл `/etc/awg-bot-helper.json` как целевой allowlist для `container/interface`;
 - хранение локального SHA установленной версии для проверки обновлений.
 - crash-safe обработка платежей со статусами `received/provisioning/applied/failed/needs_repair`;
 - recovery worker для повторной выдачи доступа после сбоев;
@@ -181,6 +182,8 @@ sudo REPO_BRANCH=beta awg-tgbot update
 
 ## Режимы работы installer
 
+> Важно по safety: без TTY интерактивное меню и любые prompt-зависимые сценарии завершаются с понятной ошибкой (safe-fail). Для non-interactive запуска используй только явные action-команды (`status`, `check-updates`, `update`, `sync-helper-policy`), которые не требуют ввода.
+
 ### Если бот не установлен
 
 ```text
@@ -211,6 +214,18 @@ sudo REPO_BRANCH=beta awg-tgbot update
 7) Переустановить
 0) Выход
 ```
+
+### Non-interactive action-команды
+
+```bash
+sudo awg-tgbot status
+sudo awg-tgbot check-updates
+sudo awg-tgbot update
+sudo awg-tgbot sync-helper-policy
+```
+
+- destructive сценарии (`remove-default`, `remove-full`) требуют явного подтверждения с реальным вводом и безопасно отказываются без TTY;
+- `remove-default` больше не подтверждается «молчаливым default».
 
 ---
 
@@ -250,6 +265,20 @@ sudo REPO_BRANCH=beta awg-tgbot update
 - `SUPPORT_USERNAME`.
 
 Этот режим полезен, если AWG работает в нестандартном контейнере, под нестандартным интерфейсом или если внешний IPv4 / порт нужно задать вручную.
+
+## Консистентность `.env` и helper policy
+
+- Runtime использует `DOCKER_CONTAINER`/`WG_INTERFACE` из `.env`.
+- Root-helper дополнительно ограничен policy-файлом `/etc/awg-bot-helper.json`.
+- Installer при установке/обновлении синхронизирует policy из `.env` и валидирует значения заранее.
+- `sudo awg-tgbot status` показывает target из `.env` и из policy, а при рассинхроне выдаёт явное предупреждение.
+
+Если ты вручную поменял `DOCKER_CONTAINER` или `WG_INTERFACE` в `.env`, обязательно синхронизируй policy:
+
+```bash
+sudo awg-tgbot sync-helper-policy
+sudo awg-tgbot status
+```
 
 ---
 

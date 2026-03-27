@@ -1,4 +1,5 @@
 import ipaddress
+import json
 import logging
 import os
 import subprocess
@@ -40,6 +41,7 @@ DEFAULT_ENV: dict[str, str] = {
     'DOCKER_TIMEOUT_SECONDS': '20',
     'AWG_HELPER_PATH': '/usr/local/libexec/awg-bot-helper',
     'AWG_HELPER_USE_SUDO': '1',
+    'AWG_HELPER_POLICY_PATH': '/etc/awg-bot-helper.json',
     'AWG_PEERS_CACHE_TTL_SECONDS': '5.0',
     'PENDING_KEY_TTL_SECONDS': '900',
     'PAYMENT_RETRY_DELAY_SECONDS': '60',
@@ -297,6 +299,22 @@ def _env_with_runtime_default(name: str, default: str) -> str:
     return default
 
 
+def _read_helper_policy(path: Path) -> tuple[str, str, str]:
+    if not path.exists():
+        return '', '', f'helper policy not found: {path}'
+    if path.is_symlink():
+        return '', '', f'helper policy must not be symlink: {path}'
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+    except Exception as e:
+        return '', '', f'helper policy parse failed: {e}'
+    if not isinstance(raw, dict):
+        return '', '', 'helper policy must be a JSON object'
+    container = str(raw.get('container', '')).strip()
+    interface = str(raw.get('interface', '')).strip()
+    return container, interface, ''
+
+
 AUTO_DETECT_ON_IMPORT = os.getenv('CONFIG_AUTODETECT_ON_IMPORT', '0').strip() == '1'
 if AUTO_DETECT_ON_IMPORT:
     DOCKER_CONTAINER_HINT = _find_awg_container()
@@ -430,6 +448,7 @@ DOCKER_RETRY_BASE_DELAY = env_float('DOCKER_RETRY_BASE_DELAY', float(DEFAULT_ENV
 DOCKER_TIMEOUT_SECONDS = env_int('DOCKER_TIMEOUT_SECONDS', int(DEFAULT_ENV['DOCKER_TIMEOUT_SECONDS']))
 AWG_HELPER_PATH = _env_with_runtime_default('AWG_HELPER_PATH', DEFAULT_ENV['AWG_HELPER_PATH'])
 AWG_HELPER_USE_SUDO = env_int('AWG_HELPER_USE_SUDO', int(DEFAULT_ENV['AWG_HELPER_USE_SUDO'])) == 1
+AWG_HELPER_POLICY_PATH = _env_with_runtime_default('AWG_HELPER_POLICY_PATH', DEFAULT_ENV['AWG_HELPER_POLICY_PATH'])
 AWG_PEERS_CACHE_TTL_SECONDS = env_float('AWG_PEERS_CACHE_TTL_SECONDS', float(DEFAULT_ENV['AWG_PEERS_CACHE_TTL_SECONDS']))
 PENDING_KEY_TTL_SECONDS = env_int('PENDING_KEY_TTL_SECONDS', int(DEFAULT_ENV['PENDING_KEY_TTL_SECONDS']))
 PAYMENT_RETRY_DELAY_SECONDS = env_int('PAYMENT_RETRY_DELAY_SECONDS', int(DEFAULT_ENV['PAYMENT_RETRY_DELAY_SECONDS']))
@@ -452,4 +471,16 @@ if required_missing:
         'Не заданы или некорректны переменные окружения: '
         + ', '.join(required_missing)
         + '. Запусти установщик awg-tgbot.sh или заполни .env вручную.'
+    )
+
+policy_container, policy_interface, policy_error = _read_helper_policy(Path(AWG_HELPER_POLICY_PATH))
+if policy_error:
+    logger.warning('AWG helper policy status: %s', policy_error)
+elif policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:
+    logger.error(
+        'AWG helper policy mismatch: env=%s/%s policy=%s/%s. Выполни sync-helper-policy в installer.',
+        DOCKER_CONTAINER,
+        WG_INTERFACE,
+        policy_container,
+        policy_interface,
     )

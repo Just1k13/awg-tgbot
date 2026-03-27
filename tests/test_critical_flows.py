@@ -1,12 +1,18 @@
 import asyncio
 import base64
+import contextlib
 import hashlib
 import importlib
+import io
+import json
 import os
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from cryptography.fernet import Fernet
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -277,6 +283,68 @@ peer: PUBKEY2
         self.assertEqual(peers[0]["ip"], "10.8.1.11")
         self.assertEqual(peers[1]["public_key"], "PUBKEY2")
         self.assertEqual(peers[1]["ip"], "10.8.1.12")
+
+
+class InstallerAndHelperHardeningTests(unittest.TestCase):
+    def test_installer_menu_safe_fails_without_tty(self):
+        if os.geteuid() != 0:
+            self.skipTest("requires root to pass installer preflight")
+        result = subprocess.run(
+            ["bash", "awg-tgbot.sh"],
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Интерактивное меню требует TTY", result.stdout)
+
+    def test_installer_remove_default_safe_fails_without_tty(self):
+        if os.geteuid() != 0:
+            self.skipTest("requires root to pass installer preflight")
+        result = subprocess.run(
+            ["bash", "awg-tgbot.sh", "remove-default"],
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Невозможно запросить ввод без TTY", result.stdout)
+
+    def test_helper_rejects_invalid_policy_json(self):
+        import awg_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text("not-json", encoding="utf-8")
+            fake_mode = stat.S_IFREG | 0o640
+            with patch.object(awg_helper, "POLICY_PATH", str(policy_path)), patch("os.lstat") as mock_lstat:
+                mock_lstat.return_value = os.stat_result((fake_mode, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+                with self.assertRaises(RuntimeError):
+                    awg_helper._load_policy()
+
+    def test_helper_denies_container_mismatch(self):
+        import awg_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"container": "allowed-c", "interface": "awg0"}), encoding="utf-8")
+            fake_mode = stat.S_IFREG | 0o640
+            stderr = io.StringIO()
+            argv = ["awg_helper.py", "genkey", "--container", "other-c"]
+            with patch.object(awg_helper, "POLICY_PATH", str(policy_path)), \
+                    patch("os.lstat") as mock_lstat, \
+                    patch.object(sys, "argv", argv), \
+                    contextlib.redirect_stderr(stderr):
+                mock_lstat.return_value = os.stat_result((fake_mode, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+                rc = awg_helper.main()
+            self.assertEqual(rc, 1)
+            self.assertIn("container denied by policy", stderr.getvalue())
 
 
 if __name__ == "__main__":

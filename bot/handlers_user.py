@@ -66,6 +66,33 @@ async def _send_buy_menu(target, user_id: int):
     )
 
 
+async def _send_configs_menu(target, user: types.User):
+    configs = await get_user_keys(user.id)
+    if not configs:
+        await target.answer(
+            (
+                "🔑 <b>Конфиги</b>\n\n"
+                "У вас пока нет активных конфигураций.\n"
+                "Сначала оформите или продлите подписку.\n\n"
+                "Если нужна помощь — откройте инструкцию ниже."
+            ),
+            parse_mode="HTML",
+            reply_markup=get_instruction_inline_kb(),
+        )
+        return
+
+    await target.answer(
+        (
+            "🔑 <b>Конфиги</b>\n\n"
+            "Выберите устройство. Я отправлю:\n"
+            "• <code>vpn://</code> — быстрый импорт в Amnezia,\n"
+            "• <code>.conf</code> — универсальный файл для ручного импорта."
+        ),
+        parse_mode="HTML",
+        reply_markup=get_configs_devices_kb(configs),
+    )
+
+
 @router.callback_query(F.data == "noop")
 async def noop_callback(cb: types.CallbackQuery):
     await cb.answer()
@@ -125,29 +152,7 @@ async def my_keys(message: types.Message):
     await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
-    configs = await get_user_keys(message.from_user.id)
-    if not configs:
-        await message.answer(
-            (
-                "🔑 <b>Конфиги</b>\n\n"
-                "У вас пока нет активных конфигураций.\n"
-                "Сначала оформите или продлите подписку.\n\n"
-                "Если нужна помощь — откройте инструкцию ниже."
-            ),
-            parse_mode="HTML",
-            reply_markup=get_instruction_inline_kb(),
-        )
-        return
-    await message.answer(
-        (
-            "🔑 <b>Конфиги</b>\n\n"
-            "Выберите устройство. Я отправлю:\n"
-            "• <code>vpn://</code> — быстрый импорт в Amnezia,\n"
-            "• <code>.conf</code> — универсальный файл для ручного импорта."
-        ),
-        parse_mode="HTML",
-        reply_markup=get_configs_devices_kb(configs),
-    )
+    await _send_configs_menu(message, message.from_user)
 
 
 @router.callback_query(F.data.startswith(CB_CONFIG_DEVICE_PREFIX))
@@ -199,8 +204,11 @@ async def show_selected_device_config(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == "open_configs")
 async def open_configs_from_profile(cb: types.CallbackQuery):
+    await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    if cb.from_user.id == ADMIN_ID:
+        maybe_set_support_username(cb.from_user.username)
     await cb.answer()
-    await my_keys(cb.message)
+    await _send_configs_menu(cb.message, cb.from_user)
 
 
 @router.message(F.text == BTN_GUIDE)

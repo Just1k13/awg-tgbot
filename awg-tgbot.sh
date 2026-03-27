@@ -1816,7 +1816,7 @@ main_menu() {
   done
 }
 
-require_rootrequire_root
+require_root
 setup_logging
 setup_tty_fd
 

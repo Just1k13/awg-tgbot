@@ -1312,6 +1312,120 @@ update_bot() {
   return 0
 }
 
+
+get_bot_db_file() {
+  local db_path db_file
+  db_path="$(get_env_value DB_PATH)"
+  [[ -n "$db_path" ]] || db_path="vpn_bot.db"
+  if [[ "$db_path" = /* ]]; then
+    db_file="$db_path"
+  else
+    db_file="$INSTALL_DIR/$db_path"
+  fi
+  printf '%s' "$db_file"
+}
+
+list_bot_managed_peer_keys() {
+  local db_file="$1"
+  [[ -f "$db_file" ]] || return 0
+  "$PYTHON_BIN" - "$db_file" <<'PY'
+import sqlite3
+import sys
+
+path = sys.argv[1]
+con = sqlite3.connect(path)
+try:
+    cur = con.cursor()
+    cols = {row[1] for row in cur.execute("PRAGMA table_info(keys)").fetchall()}
+    if not cols:
+        raise SystemExit(0)
+
+    where = [
+        "public_key IS NOT NULL",
+        "TRIM(public_key) != ''",
+        "public_key NOT LIKE 'pending:%'",
+    ]
+    if "state" in cols:
+        where.append("(state IS NULL OR state != 'deleted')")
+
+    query = "SELECT DISTINCT public_key FROM keys WHERE " + " AND ".join(where) + " ORDER BY id"
+    for (key,) in cur.execute(query).fetchall():
+        if isinstance(key, str) and key.strip():
+            print(key.strip())
+finally:
+    con.close()
+PY
+}
+
+remove_peer_from_awg_full_delete() {
+  local public_key="$1"
+  local container interface
+  if [[ -x "$AWG_HELPER_TARGET" && -f "$AWG_HELPER_POLICY" ]]; then
+    "$AWG_HELPER_TARGET" remove-peer --public-key "$public_key" >/dev/null
+    return 0
+  fi
+
+  container="$(get_env_value DOCKER_CONTAINER)"
+  interface="$(get_env_value WG_INTERFACE)"
+  [[ -n "$container" ]] || { warn "DOCKER_CONTAINER не задан; fallback-удаление peer невозможно."; return 1; }
+  [[ -n "$interface" ]] || { warn "WG_INTERFACE не задан; fallback-удаление peer невозможно."; return 1; }
+  validate_awg_target_values "$container" "$interface"
+  docker exec -i "$container" awg set "$interface" peer "$public_key" remove >/dev/null
+  return 0
+}
+
+remove_bot_managed_peers_from_awg() {
+  local db_file
+  local -a peer_keys=()
+  local total=0 removed=0 failed=0
+  local public_key=""
+
+  db_file="$(get_bot_db_file)"
+  if [[ ! -f "$db_file" ]]; then
+    info "База данных бота не найдена (${db_file}). Удалять peer по БД нечего."
+    return 0
+  fi
+
+  if [[ -f "$ENV_FILE" ]]; then
+    sync_awg_helper_policy_from_env || {
+      warn "Не удалось синхронизировать helper policy из .env перед удалением peer."
+      return 1
+    }
+  fi
+
+  ensure_docker_ready || {
+    warn "Docker недоступен. Нельзя безопасно удалить peer перед полным удалением."
+    return 1
+  }
+
+  mapfile -t peer_keys < <(list_bot_managed_peer_keys "$db_file")
+  total="${#peer_keys[@]}"
+  if (( total == 0 )); then
+    info "В текущей БД нет peer, созданных ботом. Удалять в AWG нечего."
+    return 0
+  fi
+
+  info "Удаляю из AWG peer, созданные ботом и найденные в БД: ${total}"
+  for public_key in "${peer_keys[@]}"; do
+    [[ -n "$public_key" ]] || continue
+    if remove_peer_from_awg_full_delete "$public_key"; then
+      removed=$((removed + 1))
+    else
+      failed=$((failed + 1))
+      warn "Не удалось удалить peer из AWG: ${public_key}"
+    fi
+  done
+
+  if (( failed > 0 )); then
+    warn "Удаление peer остановлено: успешно ${removed}, с ошибкой ${failed}."
+    warn "Полное удаление отменено, чтобы не потерять БД до завершения очистки AWG."
+    return 1
+  fi
+
+  ok "Из AWG удалены peer, созданные ботом: ${removed}"
+  return 0
+}
+
 remove_everything() {
   systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
   rm -f "$SERVICE_FILE"
@@ -1377,13 +1491,15 @@ remove_default() {
 remove_full() {
   print_line
   warn "Полное удаление уничтожит код, сервис, БД, .env и логи."
-  warn "Внимание: AWG peer в контейнере этим действием не удаляются автоматически."
+  warn "Перед удалением будут удалены AWG peer, созданные ботом и найденные в текущей БД."
+  warn "Если удаление хотя бы одного peer завершится ошибкой, полное удаление будет остановлено."
   if ! confirm_delete_word; then
     warn "Полное удаление отменено (неверное подтверждение)."
     return 0
   fi
+  remove_bot_managed_peers_from_awg || return 1
   remove_everything
-  ok "Выполнено полное удаление."
+  ok "Выполнено полное удаление. Peer, созданные ботом и найденные в БД, удалены из AWG."
   return 0
 }
 

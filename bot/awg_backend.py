@@ -185,7 +185,6 @@ async def get_user_missing_configs(user_id: int) -> int:
         SELECT COUNT(*)
         FROM keys
         WHERE user_id = ?
-          AND public_key NOT LIKE 'pending:%'
           AND COALESCE(provision_state, 'active') = 'active'
           AND public_key IS NOT NULL
           AND TRIM(public_key) != ''
@@ -198,10 +197,32 @@ async def get_user_missing_configs(user_id: int) -> int:
     return max(0, CONFIGS_PER_USER - current)
 
 
+async def get_user_inflight_placeholders(user_id: int) -> int:
+    row = await fetchall(
+        """
+        SELECT COUNT(*)
+        FROM keys
+        WHERE user_id = ?
+          AND COALESCE(provision_state, '') IN ('reserved', 'provisioning')
+          AND public_key LIKE 'pending:%'
+          AND ip IS NOT NULL
+          AND TRIM(ip) != ''
+        """,
+        (user_id,),
+    )
+    return int(row[0][0]) if row and row[0] else 0
+
+
 async def has_capacity_for_user(user_id: int) -> tuple[bool, int, int]:
-    needed = await get_user_missing_configs(user_id)
+    missing_active = await get_user_missing_configs(user_id)
+    if missing_active <= 0:
+        return True, 0, await count_free_ip_slots()
+
+    inflight_reserved = await get_user_inflight_placeholders(user_id)
+    needed = max(0, missing_active - inflight_reserved)
     if needed <= 0:
         return True, 0, await count_free_ip_slots()
+
     free = await count_free_ip_slots()
     return free >= needed, needed, free
 
@@ -521,7 +542,6 @@ async def issue_subscription(
                 SELECT COUNT(*)
                 FROM keys
                 WHERE user_id = ?
-                  AND public_key NOT LIKE 'pending:%'
                   AND COALESCE(provision_state, 'active') = 'active'
                   AND public_key IS NOT NULL
                   AND TRIM(public_key) != ''
@@ -693,7 +713,14 @@ async def revoke_user_access(user_id: int) -> int:
         db = await open_db()
         try:
             async with db.execute(
-                "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+                """
+                SELECT public_key
+                FROM keys
+                WHERE user_id = ?
+                  AND COALESCE(provision_state, 'active') = 'active'
+                  AND public_key IS NOT NULL
+                  AND TRIM(public_key) != ''
+                """,
                 (user_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -743,7 +770,14 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
         db = await open_db()
         try:
             async with db.execute(
-                "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+                """
+                SELECT public_key
+                FROM keys
+                WHERE user_id = ?
+                  AND COALESCE(provision_state, 'active') = 'active'
+                  AND public_key IS NOT NULL
+                  AND TRIM(public_key) != ''
+                """,
                 (user_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -814,7 +848,6 @@ async def reconcile_provisioning_state() -> dict[str, int]:
                 FROM keys
                 WHERE public_key IS NOT NULL
                   AND TRIM(public_key) != ''
-                  AND public_key NOT LIKE 'pending:%'
                   AND COALESCE(provision_state, 'active') = 'active'
                 """
             ) as cursor:

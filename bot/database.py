@@ -313,7 +313,7 @@ async def get_reserved_ips_from_db() -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
+          AND COALESCE(provision_state, 'active') IN ('active', 'reserved', 'provisioning')
         """
     )
     used: set[int] = set()
@@ -333,7 +333,7 @@ async def get_reserved_ips_from_db_conn(db: aiosqlite.Connection) -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
+          AND COALESCE(provision_state, 'active') IN ('active', 'reserved', 'provisioning')
         """
     ) as cursor:
         rows = await cursor.fetchall()
@@ -355,7 +355,6 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
         FROM keys k
         JOIN users u ON u.user_id = k.user_id
         WHERE k.user_id = ?
-          AND k.public_key NOT LIKE 'pending:%'
           AND COALESCE(k.provision_state, 'active') = 'active'
           AND k.ip IS NOT NULL
           AND TRIM(k.ip) != ''
@@ -434,18 +433,20 @@ async def save_payment(
     )
 
 
-async def claim_payment_for_provisioning(telegram_payment_charge_id: str) -> bool:
+async def claim_payment_for_provisioning(telegram_payment_charge_id: str, allow_existing_provisioning: bool = False) -> bool:
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
+        claimable_statuses = ("received", "failed_retriable", "provisioning") if allow_existing_provisioning else ("received", "failed_retriable")
+        placeholders = ", ".join("?" for _ in claimable_statuses)
         cursor = await db.execute(
-            """
+            f"""
             UPDATE payments
             SET status = 'provisioning'
             WHERE telegram_payment_charge_id = ?
-              AND status IN ('received', 'failed_retriable')
+              AND status IN ({placeholders})
             """,
-            (telegram_payment_charge_id,),
+            (telegram_payment_charge_id, *claimable_statuses),
         )
         await db.commit()
         return (cursor.rowcount or 0) == 1
@@ -596,7 +597,7 @@ async def db_health_info() -> dict[str, Any]:
                 FROM keys
                 WHERE public_key IS NOT NULL
                   AND TRIM(public_key) != ''
-                  AND public_key NOT LIKE 'pending:%'
+                  AND COALESCE(provision_state, 'active') = 'active'
                   AND ip IS NOT NULL
                   AND TRIM(ip) != ''
                 """
@@ -644,7 +645,7 @@ async def get_valid_db_public_keys() -> set[str]:
         FROM keys
         WHERE public_key IS NOT NULL
           AND TRIM(public_key) != ''
-          AND public_key NOT LIKE 'pending:%'
+          AND COALESCE(provision_state, 'active') = 'active'
           AND ip IS NOT NULL
           AND TRIM(ip) != ''
         """

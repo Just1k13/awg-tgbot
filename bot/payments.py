@@ -74,10 +74,12 @@ async def _ensure_capacity_or_notify(target, user_id: int) -> bool:
         f"Свободно сейчас: <b>{free}</b>\n\n"
         "Попробуйте позже или напишите в поддержку."
     )
-    try:
-        await target.answer(text, parse_mode="HTML", show_alert=True)
-    except TypeError:
+    if isinstance(target, types.CallbackQuery):
+        await target.answer(text, show_alert=True)
+    elif isinstance(target, types.Message):
         await target.answer(text, parse_mode="HTML")
+    else:
+        await target.answer(text)
     return False
 
 
@@ -128,7 +130,7 @@ async def recover_incomplete_payments() -> dict[str, int]:
     for item in await list_incomplete_payments():
         stats["checked"] += 1
         pid = item["payment_id"]
-        if not await claim_payment_for_provisioning(pid):
+        if not await claim_payment_for_provisioning(pid, allow_existing_provisioning=True):
             continue
         try:
             status, _ = await process_payment_by_id(item["user_id"], pid)

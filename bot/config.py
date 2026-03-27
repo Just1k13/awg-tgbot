@@ -45,6 +45,7 @@ DEFAULT_ENV: dict[str, str] = {
     'AWG_PEERS_CACHE_TTL_SECONDS': '5.0',
     'PENDING_KEY_TTL_SECONDS': '900',
     'PAYMENT_RETRY_DELAY_SECONDS': '60',
+    'PAYMENT_PROVISIONING_LEASE_SECONDS': '180',
     'AWG_JC': '6',
     'AWG_JMIN': '10',
     'AWG_JMAX': '50',
@@ -454,6 +455,7 @@ AWG_HELPER_POLICY_PATH = _env_with_runtime_default('AWG_HELPER_POLICY_PATH', DEF
 AWG_PEERS_CACHE_TTL_SECONDS = env_float('AWG_PEERS_CACHE_TTL_SECONDS', float(DEFAULT_ENV['AWG_PEERS_CACHE_TTL_SECONDS']))
 PENDING_KEY_TTL_SECONDS = env_int('PENDING_KEY_TTL_SECONDS', int(DEFAULT_ENV['PENDING_KEY_TTL_SECONDS']))
 PAYMENT_RETRY_DELAY_SECONDS = env_int('PAYMENT_RETRY_DELAY_SECONDS', int(DEFAULT_ENV['PAYMENT_RETRY_DELAY_SECONDS']))
+PAYMENT_PROVISIONING_LEASE_SECONDS = env_int('PAYMENT_PROVISIONING_LEASE_SECONDS', int(DEFAULT_ENV['PAYMENT_PROVISIONING_LEASE_SECONDS']))
 
 required_missing = []
 if not API_TOKEN:
@@ -482,10 +484,8 @@ if policy_error:
     else:
         logger.warning('AWG helper policy status: %s', policy_error)
 elif policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:
-    logger.error(
-        'AWG helper policy mismatch: env=%s/%s policy=%s/%s. Выполни sync-helper-policy в installer.',
-        DOCKER_CONTAINER,
-        WG_INTERFACE,
-        policy_container,
-        policy_interface,
+    raise RuntimeError(
+        'AWG helper policy mismatch: '
+        f'env={DOCKER_CONTAINER}/{WG_INTERFACE} policy={policy_container}/{policy_interface}. '
+        'Выполни sync-helper-policy в installer.'
     )

@@ -380,6 +380,13 @@ async def bootstrap_protected_peers() -> int:
     return removed_legacy + added
 
 
+async def _get_quarantined_public_keys() -> set[str]:
+    rows = await fetchall(
+        "SELECT public_key FROM protected_peers WHERE reason = 'orphan-quarantine' AND public_key IS NOT NULL AND TRIM(public_key) != ''"
+    )
+    return {row[0].strip() for row in rows if row and row[0]}
+
+
 async def get_orphan_awg_peers() -> list[dict[str, str | None]]:
     awg_peers = await get_awg_peers()
     if not awg_peers:
@@ -397,27 +404,96 @@ async def clean_orphan_awg_peers(force: bool = False) -> int:
         raise RuntimeError(
             "Очистка orphan peer запрещена: в БД 0 валидных ключей при наличии записей keys. Используйте принудительный режим только если уверены, что БД и AWG рассинхронизированы."
         )
-    orphans = await get_orphan_awg_peers()
+
+    if force:
+        awg_peers = await get_awg_peers()
+        quarantined = await _get_quarantined_public_keys()
+        protected = await get_protected_public_keys()
+        allowed_force = quarantined | ({peer_key for peer_key in db_keys if peer_key in quarantined})
+        protected_non_quarantine = protected - quarantined
+        orphans = [
+            peer for peer in awg_peers
+            if (
+                (peer.get("public_key") in quarantined)
+                or (
+                    peer.get("public_key") not in db_keys
+                    and peer.get("public_key") not in protected_non_quarantine
+                    and peer.get("public_key") not in IGNORE_PEERS
+                )
+            )
+        ]
+    else:
+        orphans = await get_orphan_awg_peers()
+
     removed = 0
     protected = await get_protected_public_keys()
     protected.update(IGNORE_PEERS)
+    quarantined = await _get_quarantined_public_keys()
     for peer in orphans:
         public_key = peer.get("public_key")
         if not public_key:
             continue
-        if public_key in protected:
+        if not force and public_key in protected:
             logger.info("Пропущен protected peer: %s", public_key)
             continue
-        await add_protected_peer(public_key, "orphan-quarantine")
-        logger.warning("Orphan peer помещен в quarantine: %s", public_key)
-        if force:
-            try:
-                await remove_peer_from_awg(public_key)
-                removed += 1
-                logger.info("Удалён orphan peer (force): %s", public_key)
-            except Exception as e:
-                logger.error("Не удалось удалить orphan peer %s: %s", public_key, e)
+        if not force:
+            await add_protected_peer(public_key, "orphan-quarantine")
+            logger.warning("Orphan peer помещен в quarantine: %s", public_key)
+            continue
+        try:
+            await remove_peer_from_awg(public_key)
+            removed += 1
+            logger.info("Удалён orphan peer (force): %s", public_key)
+        except Exception as e:
+            logger.error("Не удалось удалить orphan peer %s: %s", public_key, e)
     return removed
+
+
+async def _get_subscription_operation(db, operation_id: str) -> tuple[str, str, str] | None:
+    async with db.execute(
+        "SELECT previous_sub_until, new_until, status FROM subscription_operations WHERE operation_id = ?",
+        (operation_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return str(row[0]), str(row[1]), str(row[2])
+
+
+async def _upsert_subscription_operation_pending(
+    db,
+    operation_id: str,
+    user_id: int,
+    days: int,
+    previous_sub_until: str,
+    new_until: str,
+    now_iso: str,
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO subscription_operations (operation_id, user_id, days, previous_sub_until, new_until, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+        ON CONFLICT(operation_id) DO UPDATE SET
+            user_id = excluded.user_id,
+            days = excluded.days,
+            previous_sub_until = excluded.previous_sub_until,
+            new_until = excluded.new_until,
+            updated_at = excluded.updated_at
+        """,
+        (operation_id, user_id, days, previous_sub_until, new_until, now_iso, now_iso),
+    )
+
+
+async def _mark_subscription_operation_applied(operation_id: str) -> None:
+    db = await open_db()
+    try:
+        await db.execute(
+            "UPDATE subscription_operations SET status = 'applied', updated_at = ? WHERE operation_id = ?",
+            (utc_now_naive().isoformat(), operation_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
 
 
 async def issue_subscription(user_id: int, days: int, silent: bool = False, operation_id: str | None = None) -> datetime:
@@ -430,6 +506,8 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
         db = await open_db()
         previous_sub_until = "0"
         new_until: datetime
+        reused_operation = False
+        placeholder_prefix = f"pending:{operation_id}:" if operation_id else None
         try:
             await db.execute("BEGIN IMMEDIATE")
             async with db.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -443,14 +521,39 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                 except ValueError:
                     current_until = None
 
-            new_until = current_until + timedelta(days=days) if current_until and current_until > now else now + timedelta(days=days)
-            await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
+            if operation_id:
+                op_row = await _get_subscription_operation(db, operation_id)
+                if op_row:
+                    stored_previous_sub_until, stored_new_until, op_status = op_row
+                    if op_status == "applied":
+                        await db.rollback()
+                        return datetime.fromisoformat(stored_new_until)
+                    reused_operation = True
+                    previous_sub_until = stored_previous_sub_until
+                    new_until = datetime.fromisoformat(stored_new_until)
+                    await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
+                else:
+                    new_until = current_until + timedelta(days=days) if current_until and current_until > now else now + timedelta(days=days)
+                    await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
+                    await _upsert_subscription_operation_pending(
+                        db,
+                        operation_id,
+                        user_id,
+                        days,
+                        previous_sub_until,
+                        new_until.isoformat(),
+                        now.isoformat(),
+                    )
+            else:
+                new_until = current_until + timedelta(days=days) if current_until and current_until > now else now + timedelta(days=days)
+                await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
 
             async with db.execute(
                 """
                 SELECT COUNT(*)
                 FROM keys
                 WHERE user_id = ?
+                  AND state = 'active'
                   AND public_key NOT LIKE 'pending:%'
                   AND public_key IS NOT NULL
                   AND TRIM(public_key) != ''
@@ -461,14 +564,36 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
             ) as cursor:
                 valid_keys_count = (await cursor.fetchone())[0]
 
-            missing_count = max(0, CONFIGS_PER_USER - valid_keys_count)
+            if operation_id:
+                async with db.execute(
+                    """
+                    SELECT public_key
+                    FROM keys
+                    WHERE user_id = ?
+                      AND state = 'pending'
+                      AND public_key LIKE ?
+                    ORDER BY device_num
+                    """,
+                    (user_id, f"{placeholder_prefix}%"),
+                ) as cursor:
+                    placeholders = [r[0] for r in await cursor.fetchall()]
+            else:
+                placeholders = []
+
+            missing_count = max(0, CONFIGS_PER_USER - valid_keys_count - len(placeholders))
             if missing_count > 0:
                 used_ips_awg = await get_used_ips_from_awg()
                 reserved_ips_db = await get_reserved_ips_from_db_conn(db)
                 free_ips = pick_free_ips(used_ips_awg | reserved_ips_db, missing_count)
 
                 async with db.execute(
-                    "SELECT device_num FROM keys WHERE user_id = ? ORDER BY device_num",
+                    """
+                    SELECT device_num
+                    FROM keys
+                    WHERE user_id = ?
+                      AND state != 'deleted'
+                    ORDER BY device_num
+                    """,
                     (user_id,),
                 ) as cursor:
                     existing_nums = {r[0] for r in await cursor.fetchall()}
@@ -479,6 +604,11 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                         next_device_nums.append(n)
                     if len(next_device_nums) == missing_count:
                         break
+
+                if len(next_device_nums) != missing_count:
+                    raise RuntimeError(
+                        "Не хватает свободных device slots из-за незавершённых записей keys; требуется repair/cleanup состояния пользователя."
+                    )
 
                 reserved_rows: list[tuple[int, int, str, str, str, str]] = []
                 for device_num, ip in zip(next_device_nums, free_ips, strict=False):
@@ -511,7 +641,7 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                 db = await open_db()
                 try:
                     async with db.execute(
-                        "SELECT device_num, ip FROM keys WHERE public_key = ?",
+                        "SELECT device_num, ip, state FROM keys WHERE public_key = ?",
                         (placeholder_key,),
                     ) as cursor:
                         row = await cursor.fetchone()
@@ -519,7 +649,9 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                     await db.close()
                 if not row:
                     raise RuntimeError("Не найдена зарезервированная запись ключа")
-                _, ip = row
+                _, ip, state = row
+                if state != 'pending':
+                    continue
                 private_key, public_key = await generate_keypair()
                 psk_key = await generate_psk()
                 await add_peer_to_awg(public_key, ip, psk_key)
@@ -551,12 +683,31 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                 if user_id == ADMIN_ID:
                     for _, public_key, _, _, _ in generated_rows:
                         await add_protected_peer(public_key, 'admin-issued')
+
+            if operation_id:
+                await _mark_subscription_operation_applied(operation_id)
         except Exception:
             db = await open_db()
             try:
                 await db.execute("BEGIN IMMEDIATE")
-                await db.execute("DELETE FROM keys WHERE user_id = ? AND (public_key LIKE 'pending:%' OR state='pending')", (user_id,))
+                if placeholder_prefix:
+                    await db.execute(
+                        "DELETE FROM keys WHERE user_id = ? AND (public_key LIKE ? OR state='pending' AND public_key LIKE ?)",
+                        (user_id, f"{placeholder_prefix}%", f"{placeholder_prefix}%"),
+                    )
+                else:
+                    await db.execute("DELETE FROM keys WHERE user_id = ? AND (public_key LIKE 'pending:%' OR state='pending')", (user_id,))
                 await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (previous_sub_until, user_id))
+                if operation_id:
+                    await _upsert_subscription_operation_pending(
+                        db,
+                        operation_id,
+                        user_id,
+                        days,
+                        previous_sub_until,
+                        new_until.isoformat(),
+                        utc_now_naive().isoformat(),
+                    )
                 await db.commit()
             finally:
                 await db.close()
@@ -567,14 +718,27 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                     logger.error("Rollback: не удалось удалить peer %s: %s", public_key, remove_error)
             raise
 
-        await write_audit_log(user_id, "issue_subscription", f"days={days}; until={new_until.isoformat()}; silent={silent}")
+        await write_audit_log(user_id, "issue_subscription", f"days={days}; until={new_until.isoformat()}; silent={silent}; reused={int(reused_operation)}")
         return new_until
 
 
-async def revoke_user_access(user_id: int) -> int:
+async def revoke_user_access(user_id: int, only_if_expired: bool = False) -> int:
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
+        if only_if_expired:
+            async with db.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+            if not row or row[0] == "0":
+                await db.commit()
+                return 0
+            try:
+                if datetime.fromisoformat(row[0]) > utc_now_naive():
+                    await db.commit()
+                    return 0
+            except ValueError:
+                pass
+
         await db.execute(
             """
             UPDATE keys
@@ -744,8 +908,8 @@ async def cleanup_expired_subscriptions() -> int:
     cleaned = 0
     for user_id in expired_users:
         try:
-            await revoke_user_access(user_id)
-            cleaned += 1
+            removed = await revoke_user_access(user_id, only_if_expired=True)
+            cleaned += int(removed > 0)
         except Exception as e:
             logger.exception("Ошибка cleanup user_id=%s: %s", user_id, e)
     return cleaned

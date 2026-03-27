@@ -2,7 +2,7 @@ import json
 from aiogram import Bot, F, Router, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 
-from awg_backend import issue_subscription
+from awg_backend import count_free_ip_slots, get_required_new_ips_for_user, issue_subscription
 from config import PURCHASE_CLICK_COOLDOWN_SECONDS, PURCHASE_RATE_LIMIT_TTL_SECONDS, STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS, logger
 from database import claim_payment_for_provisioning, ensure_user_exists, get_payment_status, payment_already_processed, save_payment, update_payment_status, write_audit_log
 from helpers import utc_now_naive
@@ -50,11 +50,26 @@ async def _send_stars_invoice(bot: Bot, chat_id: int, payload: str, title: str, 
     )
 
 
+async def _has_capacity_for_user(user_id: int) -> tuple[bool, int, int]:
+    required_new_ips = await get_required_new_ips_for_user(user_id)
+    if required_new_ips <= 0:
+        return True, 0, await count_free_ip_slots()
+    free_slots = await count_free_ip_slots()
+    return free_slots >= required_new_ips, required_new_ips, free_slots
+
+
 @router.callback_query(F.data == CB_BUY_7)
 async def buy_7_days(cb: types.CallbackQuery, bot: Bot):
     limited, wait_seconds = is_purchase_rate_limited(cb.from_user.id)
     if limited:
         await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
+        return
+    has_capacity, required, free_slots = await _has_capacity_for_user(cb.from_user.id)
+    if not has_capacity:
+        await cb.answer(
+            f"Свободные IP закончились: нужно {required}, доступно {free_slots}. Напишите в поддержку.",
+            show_alert=True,
+        )
         return
     await cb.answer()
     await _send_stars_invoice(bot, cb.message.chat.id, "sub_7", "Свободный Интернет на 7 дней", "7 дней доступа", STARS_PRICE_7_DAYS)
@@ -66,6 +81,13 @@ async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
     if limited:
         await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
         return
+    has_capacity, required, free_slots = await _has_capacity_for_user(cb.from_user.id)
+    if not has_capacity:
+        await cb.answer(
+            f"Свободные IP закончились: нужно {required}, доступно {free_slots}. Напишите в поддержку.",
+            show_alert=True,
+        )
+        return
     await cb.answer()
     await _send_stars_invoice(bot, cb.message.chat.id, "sub_30", "Свободный Интернет на 30 дней", "30 дней доступа", STARS_PRICE_30_DAYS)
 
@@ -74,6 +96,14 @@ async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
 async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
     if q.invoice_payload not in TARIFFS:
         await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректный платеж.")
+        return
+    has_capacity, required, free_slots = await _has_capacity_for_user(q.from_user.id)
+    if not has_capacity:
+        await bot.answer_pre_checkout_query(
+            q.id,
+            ok=False,
+            error_message=f"Свободные IP закончились: нужно {required}, доступно {free_slots}.",
+        )
         return
     await bot.answer_pre_checkout_query(q.id, ok=True)
 

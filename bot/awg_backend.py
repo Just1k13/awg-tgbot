@@ -16,7 +16,7 @@ from config import (
     VPN_SUBNET_PREFIX, WG_INTERFACE, logger,
 )
 from database import (
-    add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall,
+    add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall, fetchone,
     get_protected_public_keys, get_reserved_ips_from_db, get_reserved_ips_from_db_conn, get_valid_db_public_keys,
     open_db, write_audit_log,
 )
@@ -171,6 +171,24 @@ async def count_free_ip_slots() -> int:
     reserved = await get_reserved_ips_from_db()
     total_slots = MAX_CLIENT_OCTET - FIRST_CLIENT_OCTET + 1
     return total_slots - len(used | reserved)
+
+
+async def get_required_new_ips_for_user(user_id: int) -> int:
+    row = await fetchone(
+        """
+        SELECT COUNT(*)
+        FROM keys
+        WHERE user_id = ?
+          AND public_key NOT LIKE 'pending:%'
+          AND public_key IS NOT NULL
+          AND TRIM(public_key) != ''
+          AND ip IS NOT NULL
+          AND TRIM(ip) != ''
+        """,
+        (user_id,),
+    )
+    valid_keys_count = int(row[0]) if row else 0
+    return max(0, CONFIGS_PER_USER - valid_keys_count)
 
 
 def _is_managed_client_ip(ip: str | None) -> bool:
@@ -531,7 +549,11 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
             db = await open_db()
             try:
                 await db.execute("BEGIN IMMEDIATE")
-                await db.execute("DELETE FROM keys WHERE user_id = ? AND public_key LIKE 'pending:%'", (user_id,))
+                if placeholders:
+                    await db.executemany(
+                        "DELETE FROM keys WHERE user_id = ? AND public_key = ?",
+                        [(user_id, key) for key in placeholders],
+                    )
                 await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (previous_sub_until, user_id))
                 await db.commit()
             finally:

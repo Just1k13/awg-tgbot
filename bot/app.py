@@ -109,10 +109,23 @@ dp.include_router(fallback_router)
 
 
 async def cleanup_stale_pending_keys() -> int:
-    row = await fetchone("SELECT COUNT(*) FROM keys WHERE public_key LIKE 'pending:%'")
+    row = await fetchone(
+        """
+        SELECT COUNT(*)
+        FROM keys
+        WHERE public_key LIKE 'pending:%'
+          AND datetime(created_at) <= datetime('now', '-60 minutes')
+        """
+    )
     stale_count = int(row[0]) if row else 0
     if stale_count:
-        await execute("DELETE FROM keys WHERE public_key LIKE 'pending:%'")
+        await execute(
+            """
+            DELETE FROM keys
+            WHERE public_key LIKE 'pending:%'
+              AND datetime(created_at) <= datetime('now', '-60 minutes')
+            """
+        )
     return stale_count
 
 

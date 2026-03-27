@@ -293,7 +293,6 @@ async def get_reserved_ips_from_db() -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
         """
     )
     used: set[int] = set()
@@ -313,7 +312,6 @@ async def get_reserved_ips_from_db_conn(db: aiosqlite.Connection) -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
         """
     ) as cursor:
         rows = await cursor.fetchall()

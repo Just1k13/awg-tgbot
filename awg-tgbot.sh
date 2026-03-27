@@ -1637,51 +1637,67 @@ remove_bot() {
 
 show_logs() {
   local choice=""
-  print_line
   if ! has_residual_files; then
+    print_line
     warn "Бот не установлен."
     print_line
     return 0
   fi
-  echo "1) Последние 100 строк journalctl"
-  echo "2) Смотреть journalctl -f"
-  echo "3) Последние 100 строк bot.log"
-  echo "4) Смотреть bot.log в реальном времени"
-  echo "0) Назад"
-  prompt_raw "Выбор: " choice
-  case "$choice" in
-    1)
-      if service_exists; then
-        journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
-      else
-        warn "Сервис $SERVICE_NAME не найден."
-      fi
-      ;;
-    2)
-      if service_exists; then
-        journalctl -u "$SERVICE_NAME" -f || true
-      else
-        warn "Сервис $SERVICE_NAME не найден."
-      fi
-      ;;
-    3)
-      if [[ -f "$APP_LOG_FILE" ]]; then
-        tail -n 100 "$APP_LOG_FILE" || true
-      else
-        warn "Файл логов приложения не найден: $APP_LOG_FILE"
-      fi
-      ;;
-    4)
-      if [[ -f "$APP_LOG_FILE" ]]; then
-        tail -f "$APP_LOG_FILE" || true
-      else
-        warn "Файл логов приложения не найден: $APP_LOG_FILE"
-      fi
-      ;;
-    *) ;;
-  esac
-  print_line
-  return 0
+
+  while true; do
+    print_line
+    echo "Логи:"
+    echo "1) journalctl — последние 100 строк"
+    echo "2) journalctl — live просмотр"
+    echo "3) bot.log — последние 100 строк"
+    echo "4) bot.log — live просмотр"
+    echo "5) install log — последние 100 строк"
+    echo "6) install log — live просмотр"
+    echo "0) Назад"
+    print_line
+    prompt_raw "Выбор: " choice
+    case "$choice" in
+      1)
+        print_line
+        run_log_snapshot journal
+        print_line
+        pause_if_tty
+        clear_if_tty
+        ;;
+      2)
+        watch_logs_live journal
+        ;;
+      3)
+        print_line
+        run_log_snapshot app
+        print_line
+        pause_if_tty
+        clear_if_tty
+        ;;
+      4)
+        watch_logs_live app
+        ;;
+      5)
+        print_line
+        run_log_snapshot install
+        print_line
+        pause_if_tty
+        clear_if_tty
+        ;;
+      6)
+        watch_logs_live install
+        ;;
+      0)
+        clear_if_tty
+        return 0
+        ;;
+      *)
+        warn "Неизвестный пункт меню."
+        pause_if_tty
+        clear_if_tty
+        ;;
+    esac
+  done
 }
 
 print_menu_awg_yes_bot_no() {

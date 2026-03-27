@@ -185,7 +185,6 @@ async def get_user_missing_configs(user_id: int) -> int:
         SELECT COUNT(*)
         FROM keys
         WHERE user_id = ?
-          AND public_key NOT LIKE 'pending:%'
           AND COALESCE(provision_state, 'active') = 'active'
           AND public_key IS NOT NULL
           AND TRIM(public_key) != ''
@@ -521,7 +520,6 @@ async def issue_subscription(
                 SELECT COUNT(*)
                 FROM keys
                 WHERE user_id = ?
-                  AND public_key NOT LIKE 'pending:%'
                   AND COALESCE(provision_state, 'active') = 'active'
                   AND public_key IS NOT NULL
                   AND TRIM(public_key) != ''
@@ -693,7 +691,14 @@ async def revoke_user_access(user_id: int) -> int:
         db = await open_db()
         try:
             async with db.execute(
-                "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+                """
+                SELECT public_key
+                FROM keys
+                WHERE user_id = ?
+                  AND COALESCE(provision_state, 'active') = 'active'
+                  AND public_key IS NOT NULL
+                  AND TRIM(public_key) != ''
+                """,
                 (user_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -743,7 +748,14 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
         db = await open_db()
         try:
             async with db.execute(
-                "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+                """
+                SELECT public_key
+                FROM keys
+                WHERE user_id = ?
+                  AND COALESCE(provision_state, 'active') = 'active'
+                  AND public_key IS NOT NULL
+                  AND TRIM(public_key) != ''
+                """,
                 (user_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
@@ -814,7 +826,6 @@ async def reconcile_provisioning_state() -> dict[str, int]:
                 FROM keys
                 WHERE public_key IS NOT NULL
                   AND TRIM(public_key) != ''
-                  AND public_key NOT LIKE 'pending:%'
                   AND COALESCE(provision_state, 'active') = 'active'
                 """
             ) as cursor:

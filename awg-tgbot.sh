@@ -1681,6 +1681,87 @@ remove_bot() {
   return 0
 }
 
+
+run_log_snapshot() {
+  local mode="$1"
+  case "$mode" in
+    journal)
+      if service_exists; then
+        journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+      else
+        warn "Сервис $SERVICE_NAME не найден."
+      fi
+      ;;
+    app)
+      if [[ -f "$APP_LOG_FILE" ]]; then
+        tail -n 100 "$APP_LOG_FILE" || true
+      else
+        warn "Файл логов приложения не найден: $APP_LOG_FILE"
+      fi
+      ;;
+    install)
+      if [[ -f "$INSTALL_LOG" ]]; then
+        tail -n 100 "$INSTALL_LOG" || true
+      else
+        warn "Лог установки не найден: $INSTALL_LOG"
+      fi
+      ;;
+  esac
+  return 0
+}
+
+watch_logs_live() {
+  local mode="$1" key=""
+  while true; do
+    clear_if_tty
+    print_line
+    case "$mode" in
+      journal)
+        echo "Live: systemd / journalctl"
+        echo "Обновление каждые 2 сек. Нажми q для возврата."
+        print_line
+        if service_exists; then
+          journalctl -u "$SERVICE_NAME" -n 40 --no-pager || true
+        else
+          warn "Сервис $SERVICE_NAME не найден."
+        fi
+        ;;
+      app)
+        echo "Live: bot.log"
+        echo "Обновление каждые 2 сек. Нажми q для возврата."
+        print_line
+        if [[ -f "$APP_LOG_FILE" ]]; then
+          tail -n 40 "$APP_LOG_FILE" || true
+        else
+          warn "Файл логов приложения не найден: $APP_LOG_FILE"
+        fi
+        ;;
+      install)
+        echo "Live: install log"
+        echo "Обновление каждые 2 сек. Нажми q для возврата."
+        print_line
+        if [[ -f "$INSTALL_LOG" ]]; then
+          tail -n 40 "$INSTALL_LOG" || true
+        else
+          warn "Лог установки не найден: $INSTALL_LOG"
+        fi
+        ;;
+    esac
+    print_line
+    if has_tty; then
+      if read -r -u 3 -t 2 -n 1 key 2>/dev/null; then
+        echo >&3
+        case "$key" in
+          q|Q|й|Й) clear_if_tty; return 0 ;;
+          *) ;;
+        esac
+      fi
+    else
+      sleep 2
+    fi
+  done
+}
+
 show_logs() {
   local choice=""
   if ! has_residual_files; then

@@ -298,6 +298,27 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Интерактивное меню требует TTY", result.stdout)
+        self.assertIn("stdin pipe", result.stdout)
+
+
+    def test_status_action_works_without_tty(self):
+        if os.geteuid() != 0:
+            self.skipTest("requires root to pass installer preflight")
+        result = subprocess.run(
+            ["bash", "awg-tgbot.sh", "status"],
+            cwd=str(ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("Проект:", result.stdout)
+
+    def test_installer_tty_check_uses_tty_fd3(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn('has_tty() { [[ -t 3 ]]; }', script)
 
     def test_installer_remove_default_safe_fails_without_tty(self):
         if os.geteuid() != 0:

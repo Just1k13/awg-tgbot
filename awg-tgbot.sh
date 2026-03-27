@@ -78,12 +78,12 @@ setup_logging() {
 }
 
 setup_tty_fd() {
-  if [[ -e "$TTY_DEVICE" ]] && ([[ -t 0 ]] || [[ -t 1 ]]); then
-    exec 3<>"$TTY_DEVICE" 2>/dev/null || true
+  if [[ -c "$TTY_DEVICE" ]]; then
+    { exec 3<>"$TTY_DEVICE"; } 2>/dev/null || true
   fi
 }
 
-has_tty() { [[ -e /proc/$$/fd/3 ]]; }
+has_tty() { [[ -t 3 ]]; }
 
 pause_if_tty() {
   if has_tty; then
@@ -1375,7 +1375,9 @@ if [[ $# -gt 0 ]]; then
 fi
 
 if ! has_tty; then
-  die "Интерактивное меню требует TTY. Используй action-команды (например: status, update, sync-helper-policy)."
+  warn "Интерактивное меню требует TTY и не может читать ответы из stdin pipe."
+  warn "Используй action-команды (например: status, check-updates, update, sync-helper-policy) без prompt-ов."
+  die "Для первичной установки запусти команду в интерактивной сессии с TTY (SSH/console)."
 fi
 
 main_menu

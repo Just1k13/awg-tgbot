@@ -208,6 +208,9 @@ async def open_configs_from_profile(cb: types.CallbackQuery):
     if cb.from_user.id == ADMIN_ID:
         maybe_set_support_username(cb.from_user.username)
     await cb.answer()
+    if not cb.message:
+        await cb.answer("Сообщение недоступно", show_alert=True)
+        return
     await _send_configs_menu(cb.message, cb.from_user)
 
 
@@ -258,13 +261,17 @@ async def buy(message: types.Message):
 async def show_buy_menu_callback(cb: types.CallbackQuery):
     await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
     await cb.answer()
+    if not cb.message:
+        await cb.answer("Сообщение недоступно", show_alert=True)
+        return
     await _send_buy_menu(cb.message, cb.from_user.id)
 
 
 @router.callback_query(F.data == CB_SHOW_INSTRUCTION)
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
-    await cb.message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+    if cb.message:
+        await cb.message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message()

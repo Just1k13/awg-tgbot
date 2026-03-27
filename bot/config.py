@@ -306,6 +306,8 @@ def _read_helper_policy(path: Path) -> tuple[str, str, str]:
         return '', '', f'helper policy must not be symlink: {path}'
     try:
         raw = json.loads(path.read_text(encoding='utf-8'))
+    except PermissionError as e:
+        return '', '', f'helper policy unreadable by runtime user: {e}'
     except Exception as e:
         return '', '', f'helper policy parse failed: {e}'
     if not isinstance(raw, dict):
@@ -475,7 +477,10 @@ if required_missing:
 
 policy_container, policy_interface, policy_error = _read_helper_policy(Path(AWG_HELPER_POLICY_PATH))
 if policy_error:
-    logger.warning('AWG helper policy status: %s', policy_error)
+    if policy_error.startswith('helper policy unreadable by runtime user:'):
+        logger.info('AWG helper policy status: %s', policy_error)
+    else:
+        logger.warning('AWG helper policy status: %s', policy_error)
 elif policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:
     logger.error(
         'AWG helper policy mismatch: env=%s/%s policy=%s/%s. Выполни sync-helper-policy в installer.',

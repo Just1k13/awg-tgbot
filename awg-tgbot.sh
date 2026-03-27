@@ -114,7 +114,7 @@ supports_color() {
 color_red() {
   local value="$1"
   if supports_color; then
-    printf '[1;31m%s[0m' "$value"
+    printf '\033[1;31m%s\033[0m' "$value"
   else
     printf '%s' "$value"
   fi
@@ -398,8 +398,7 @@ cleanup_transient_install_state() {
 
   if [[ -d "$INSTALL_DIR" ]]; then
     local entries=""
-    entries="$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -printf '%f
-' 2>/dev/null || true)"
+    entries="$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null || true)"
     if [[ -z "$entries" ]]; then
       rmdir "$INSTALL_DIR" 2>/dev/null || true
     fi
@@ -1165,8 +1164,7 @@ ensure_bot_not_in_docker_group() {
   if ! getent group docker >/dev/null 2>&1; then
     return 0
   fi
-  if id -nG "$BOT_USER" 2>/dev/null | tr ' ' '
-' | grep -qx docker; then
+  if id -nG "$BOT_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
     gpasswd -d "$BOT_USER" docker >/dev/null 2>&1 || true
   fi
   return 0
@@ -1293,8 +1291,7 @@ show_status() {
   echo "Локальная версия: ${local_sha}"
   echo "Логи приложения: ${APP_LOG_FILE}"
   echo "Лог установки: ${INSTALL_LOG}"
-  if id -u "$BOT_USER" >/dev/null 2>&1 && id -nG "$BOT_USER" 2>/dev/null | tr ' ' '
-' | grep -qx docker; then
+  if id -u "$BOT_USER" >/dev/null 2>&1 && id -nG "$BOT_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
     docker_membership="в группе docker (небезопасно)"
   else
     docker_membership="не в группе docker"
@@ -1457,7 +1454,8 @@ relaunch_installer_menu() {
 
 update_bot() {
   local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret
-  if ! is_installed; then
+  detect_install_state
+  if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
     warn "Бот не установлен."
     return 0
   fi

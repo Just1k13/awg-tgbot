@@ -18,6 +18,7 @@ ENV_FILE="${INSTALL_DIR}/.env"
 VENV_DIR="${INSTALL_DIR}/.venv"
 SERVICE_NAME="vpn-bot.service"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+BOT_USER="awg-bot"
 VERSION_FILE="${STATE_DIR}/release_sha"
 INSTALL_LOG="/var/log/awg-tgbot-install.log"
 APP_LOG_DIR="/var/log/awg-tgbot"
@@ -689,6 +690,18 @@ ensure_venv_and_requirements() {
   return 0
 }
 
+ensure_bot_user() {
+  if ! id -u "$BOT_USER" >/dev/null 2>&1; then
+    useradd --system --home "$INSTALL_DIR" --shell /usr/sbin/nologin "$BOT_USER" || return 1
+  fi
+  usermod -aG docker "$BOT_USER" 2>/dev/null || true
+  mkdir -p "$APP_LOG_DIR"
+  touch "$APP_LOG_FILE"
+  chown -R "$BOT_USER:$BOT_USER" "$INSTALL_DIR" "$APP_LOG_DIR"
+  chmod 750 "$INSTALL_DIR" || true
+  return 0
+}
+
 write_service() {
   mkdir -p "$APP_LOG_DIR"
   touch "$APP_LOG_FILE"
@@ -706,7 +719,12 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=${VENV_DIR}/bin/python -u ${BOT_DIR}/app.py
 Restart=always
 RestartSec=3
-User=root
+User=${BOT_USER}
+Group=${BOT_USER}
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
 StandardOutput=append:${APP_LOG_FILE}
 StandardError=append:${APP_LOG_FILE}
 
@@ -853,6 +871,7 @@ install_or_reinstall_flow() {
   fi
 
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
+  ensure_bot_user || die "Не удалось подготовить service пользователя."
   write_service || die "Не удалось создать systemd сервис."
   persist_repo_branch
   persist_remote_sha
@@ -893,6 +912,7 @@ update_bot() {
   detect_awg_environment
   write_detected_awg_env
   ensure_venv_and_requirements || die "Не удалось обновить Python зависимости."
+  ensure_bot_user || die "Не удалось подготовить service пользователя."
   write_service || die "Не удалось обновить systemd сервис."
   persist_repo_branch
   persist_remote_sha

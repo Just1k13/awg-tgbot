@@ -104,6 +104,19 @@ setup_tty_fd() {
 
 has_tty() { [[ -t 3 ]]; }
 
+supports_color() {
+  has_tty && [[ "${TERM:-}" != "dumb" ]]
+}
+
+color_red() {
+  local value="$1"
+  if supports_color; then
+    printf '[1;31m%s[0m' "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
 pause_if_tty() {
   if has_tty; then
     echo
@@ -811,10 +824,10 @@ print_update_status_line() {
   case "$UPDATE_STATUS" in
     available)
       echo
-      echo "[!] ДОСТУПНО ОБНОВЛЕНИЕ"
+      printf '%s\n' "$(color_red '[!] ДОСТУПНО ОБНОВЛЕНИЕ')"
       echo "    Локальная версия: ${UPDATE_LOCAL_SHA:0:12}"
       echo "    Новая версия:    ${UPDATE_REMOTE_SHA:0:12}"
-      echo "    Открой пункт меню: 3) Обновить"
+      printf '    %s\n' "$(color_red 'Открой пункт меню: 3) Обновить')"
       ;;
     current) echo "Обновление: версия актуальна" ;;
     unknown) echo "Обновление: не удалось проверить" ;;
@@ -1368,8 +1381,21 @@ install_or_reinstall_flow() {
   return 0
 }
 
+relaunch_installer_menu() {
+  local target=""
+  if [[ -x "$SELF_SYMLINK" ]]; then
+    target="$SELF_SYMLINK"
+  elif [[ -x "$INSTALL_DIR/awg-tgbot.sh" ]]; then
+    target="$INSTALL_DIR/awg-tgbot.sh"
+  else
+    return 0
+  fi
+  clear_if_tty
+  exec "$target"
+}
+
 update_bot() {
-  local tmp_dir api_token admin_id server_name secret
+  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret
   if ! is_installed; then
     warn "Бот не установлен."
     return 0
@@ -1418,6 +1444,12 @@ update_bot() {
   persist_remote_sha
   start_service || die "Не удалось перезапустить сервис."
   ok "Обновление завершено."
+
+  if [[ "$mode" == "menu" ]] && has_tty; then
+    info "Перезапускаю awg-tgbot, чтобы загрузить обновлённое меню..."
+    relaunch_installer_menu
+  fi
+
   show_status
   return 0
 }
@@ -1752,7 +1784,7 @@ run_action() {
   case "$action" in
     install) install_or_reinstall_flow install ;;
     reinstall) install_or_reinstall_flow reinstall ;;
-    update) update_bot ;;
+    update) update_bot direct ;;
     check-updates) check_updates ;;
     status) show_status ;;
     logs) show_logs ;;
@@ -1781,7 +1813,7 @@ main_menu() {
         case "$choice" in
           1) show_status ;;
           2) show_logs ;;
-          3) update_bot ;;
+          3) update_bot menu ;;
           4) install_or_reinstall_flow reinstall ;;
           5) remove_bot ;;
           6) print_detailed_startup_summary ;;

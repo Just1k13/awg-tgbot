@@ -11,8 +11,8 @@ from ui_constants import (
 
 def get_main_menu(user_id: int, admin_id: int) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_CONFIGS)],
-        [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_GUIDE)],
+        [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_BUY)],
+        [KeyboardButton(text=BTN_CONFIGS), KeyboardButton(text=BTN_GUIDE)],
         [KeyboardButton(text=BTN_SUPPORT)],
     ]
     if user_id == admin_id:
@@ -39,6 +39,7 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="🔄 Продлить подписку", callback_data=CB_SHOW_BUY_MENU)])
     else:
         rows.append([InlineKeyboardButton(text="💳 Купить подписку", callback_data=CB_SHOW_BUY_MENU)])
+    rows.append([InlineKeyboardButton(text="📱 Мои устройства", callback_data="open_configs")])
     rows.append([InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

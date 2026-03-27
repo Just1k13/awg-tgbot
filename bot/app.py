@@ -17,17 +17,20 @@ from config import (
     CLEANUP_INTERVAL_SECONDS,
     DB_PATH,
     DOCKER_CONTAINER,
+    PENDING_KEY_TTL_SECONDS,
     WG_INTERFACE,
     logger,
     maybe_set_support_username,
 )
-from database import close_shared_db, db_health_info, ensure_db_ready, execute, fetchone
+from database import cleanup_stale_pending_keys, close_shared_db, db_health_info, ensure_db_ready
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
 from payments import router as payments_router
+from payments import payment_recovery_worker
 
 dp = Dispatcher()
 bg_worker_task: asyncio.Task | None = None
+payment_recovery_task: asyncio.Task | None = None
 
 fallback_router = Router()
 
@@ -108,16 +111,8 @@ dp.include_router(user_router)
 dp.include_router(fallback_router)
 
 
-async def cleanup_stale_pending_keys() -> int:
-    row = await fetchone("SELECT COUNT(*) FROM keys WHERE public_key LIKE 'pending:%'")
-    stale_count = int(row[0]) if row else 0
-    if stale_count:
-        await execute("DELETE FROM keys WHERE public_key LIKE 'pending:%'")
-    return stale_count
-
-
 async def main():
-    global bg_worker_task
+    global bg_worker_task, payment_recovery_task
 
     bot = Bot(token=API_TOKEN)
     logger.info("Запуск бота")
@@ -134,7 +129,7 @@ async def main():
     await ensure_db_ready()
 
     try:
-        cleaned_pending = await cleanup_stale_pending_keys()
+        cleaned_pending = await cleanup_stale_pending_keys(PENDING_KEY_TTL_SECONDS)
         if cleaned_pending:
             logger.warning("Удалено stale pending-ключей при старте: %s", cleaned_pending)
     except Exception as e:
@@ -179,12 +174,25 @@ async def main():
     except Exception as e:
         logger.exception("Ошибка стартовой очистки: %s", e)
 
+    async def _payments_worker() -> None:
+        while True:
+            try:
+                repaired = await payment_recovery_worker()
+                if repaired:
+                    logger.info("Payment recovery: успешно обработано %s зависших платежей", repaired)
+            except Exception as e:
+                logger.exception("Payment recovery worker error: %s", e)
+            await asyncio.sleep(15)
+
     bg_worker_task = asyncio.create_task(expired_subscriptions_worker(CLEANUP_INTERVAL_SECONDS))
+    payment_recovery_task = asyncio.create_task(_payments_worker())
     try:
         await dp.start_polling(bot)
     finally:
         if bg_worker_task:
             bg_worker_task.cancel()
+        if payment_recovery_task:
+            payment_recovery_task.cancel()
         await close_shared_db()
         await bot.session.close()
 

@@ -6,7 +6,7 @@ REPO_NAME="awg-tgbot"
 INSTALL_DIR="/opt/amnezia/bot"
 STATE_DIR="${INSTALL_DIR}/.state"
 REPO_BRANCH_FILE="${STATE_DIR}/repo_branch"
-REPO_BRANCH="${REPO_BRANCH:-$(tr -d '\r\n' < "$REPO_BRANCH_FILE" 2>/dev/null || true)}"
+REPO_BRANCH="${REPO_BRANCH:-$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
@@ -24,6 +24,8 @@ INSTALL_LOG="/var/log/awg-tgbot-install.log"
 APP_LOG_DIR="/var/log/awg-tgbot"
 APP_LOG_FILE="${APP_LOG_DIR}/bot.log"
 PYTHON_BIN="/usr/bin/python3"
+AWG_HELPER_TARGET="/usr/local/libexec/awg-bot-helper"
+AWG_HELPER_SUDOERS="/etc/sudoers.d/awg-bot-helper"
 TTY_DEVICE="/dev/tty"
 SELF_SYMLINK="/usr/local/bin/awg-tgbot"
 
@@ -75,8 +77,8 @@ setup_logging() {
 }
 
 setup_tty_fd() {
-  if [[ -r "$TTY_DEVICE" ]]; then
-    exec 3<>"$TTY_DEVICE"
+  if [[ -e "$TTY_DEVICE" ]] && ([[ -t 0 ]] || [[ -t 1 ]]); then
+    exec 3<>"$TTY_DEVICE" 2>/dev/null || true
   fi
 }
 
@@ -144,6 +146,12 @@ confirm() {
   done
 }
 
+confirm_delete_word() {
+  local typed=""
+  prompt_raw "Для полного удаления введите DELETE: " typed
+  [[ "$typed" == "DELETE" ]]
+}
+
 require_command() { command -v "$1" >/dev/null 2>&1; }
 service_exists() { [[ -f "$SERVICE_FILE" ]]; }
 is_installed() { [[ -f "$SERVICE_FILE" && -d "$BOT_DIR" && -f "$BOT_DIR/app.py" ]]; }
@@ -177,6 +185,40 @@ set_env_value() {
 persist_repo_branch() {
   mkdir -p "$STATE_DIR"
   printf '%s\n' "$REPO_BRANCH" > "$REPO_BRANCH_FILE"
+  return 0
+}
+
+set_repo_branch() {
+  local next_branch="$1"
+  [[ -n "$next_branch" ]] || return 1
+  REPO_BRANCH="$next_branch"
+  RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
+  TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
+  COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
+  persist_repo_branch
+  return 0
+}
+
+choose_branch_menu() {
+  local choice custom_branch current
+  current="${REPO_BRANCH}"
+  print_line
+  echo "Текущая ветка: ${current}"
+  echo "1) main"
+  echo "2) beta"
+  echo "3) Ввести вручную"
+  echo "0) Назад"
+  prompt_raw "Выбор: " choice
+  case "$choice" in
+    1) set_repo_branch "main" ;;
+    2) set_repo_branch "beta" ;;
+    3)
+      prompt_with_default "Введите имя ветки" "$current" custom_branch
+      set_repo_branch "$custom_branch"
+      ;;
+    *) return 0 ;;
+  esac
+  ok "Выбрана ветка: ${REPO_BRANCH}"
   return 0
 }
 
@@ -217,7 +259,7 @@ ensure_packages() {
   export DEBIAN_FRONTEND=noninteractive
   apt_get_safe update -y
   apt_get_safe install -y --no-install-recommends \
-    ca-certificates curl tar gzip openssl python3 python3-venv python3-pip iproute2 psmisc
+    ca-certificates curl tar gzip openssl sudo python3 python3-venv python3-pip iproute2 psmisc
   if ! require_command docker; then
     warn "Docker не найден. Устанавливаю docker.io..."
     apt_get_safe install -y --no-install-recommends docker.io
@@ -227,6 +269,15 @@ ensure_packages() {
     sleep 2
   fi
   return 0
+}
+
+ensure_python_compatible() {
+  "$PYTHON_BIN" - <<'PY'
+import sys
+if sys.version_info < (3, 10):
+    raise SystemExit(1)
+print(f"python={sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+PY
 }
 
 docker_is_accessible() { require_command docker && docker ps >/dev/null 2>&1; }
@@ -673,7 +724,7 @@ configure_manual_install() {
   default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
   prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
   set_env_value STARS_PRICE_30_DAYS "$value"
-  default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
+  default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://m-1-14-3w5hsuiikq-ez.a.run.app/ru/downloads")"
   prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
   set_env_value DOWNLOAD_URL "$value"
   default="$(get_env_value SUPPORT_USERNAME)"
@@ -684,6 +735,7 @@ configure_manual_install() {
 
 ensure_venv_and_requirements() {
   info "Настраиваю Python окружение..."
+  ensure_python_compatible || die "Требуется Python >= 3.10."
   [[ -d "$VENV_DIR" ]] || "$PYTHON_BIN" -m venv "$VENV_DIR" || return 1
   "$VENV_DIR/bin/pip" install --upgrade pip wheel || return 1
   "$VENV_DIR/bin/pip" install -r "$BOT_DIR/requirements.txt" || return 1
@@ -694,11 +746,21 @@ ensure_bot_user() {
   if ! id -u "$BOT_USER" >/dev/null 2>&1; then
     useradd --system --home "$INSTALL_DIR" --shell /usr/sbin/nologin "$BOT_USER" || return 1
   fi
-  usermod -aG docker "$BOT_USER" 2>/dev/null || true
   mkdir -p "$APP_LOG_DIR"
   touch "$APP_LOG_FILE"
   chown -R "$BOT_USER:$BOT_USER" "$INSTALL_DIR" "$APP_LOG_DIR"
   chmod 750 "$INSTALL_DIR" || true
+  return 0
+}
+
+install_awg_helper() {
+  [[ -f "$BOT_DIR/awg_helper.py" ]] || return 1
+  install -d -m 755 /usr/local/libexec
+  install -o root -g root -m 750 "$BOT_DIR/awg_helper.py" "$AWG_HELPER_TARGET"
+  cat > "$AWG_HELPER_SUDOERS" <<SUDOERS
+${BOT_USER} ALL=(root) NOPASSWD: ${AWG_HELPER_TARGET} *
+SUDOERS
+  chmod 440 "$AWG_HELPER_SUDOERS"
   return 0
 }
 
@@ -721,7 +783,8 @@ Restart=always
 RestartSec=3
 User=${BOT_USER}
 Group=${BOT_USER}
-NoNewPrivileges=true
+# sudo к root helper требует возможности повышения привилегий.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
@@ -761,26 +824,45 @@ stop_service_if_exists() {
 }
 
 show_status() {
+  local active_state enabled_state local_sha branch_info env_state
   print_line
+  branch_info="$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)"
+  [[ -n "$branch_info" ]] || branch_info="$REPO_BRANCH"
+  active_state="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
+  enabled_state="$(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true)"
+  [[ -n "$active_state" ]] || active_state="not-found"
+  [[ -n "$enabled_state" ]] || enabled_state="not-found"
+  local_sha="$(get_local_sha | cut -c1-12)"
+  [[ -n "$local_sha" ]] || local_sha="неизвестно"
+  env_state="нет"
+  [[ -f "$ENV_FILE" ]] && env_state="есть"
+
+  echo "Проект: ${REPO_OWNER}/${REPO_NAME}"
+  echo "Установлен: $([[ -d "$INSTALL_DIR" ]] && echo 'да' || echo 'нет')"
+  echo "Код: ${INSTALL_DIR}"
+  echo "ENV: ${ENV_FILE} (${env_state})"
+  echo "Сервис: ${SERVICE_NAME}"
+  echo "Статус сервиса: ${active_state}"
+  echo "Автозапуск: ${enabled_state}"
+  echo "Ветка: ${branch_info}"
+  echo "Локальная версия: ${local_sha}"
+  echo "Логи приложения: ${APP_LOG_FILE}"
+  echo "Лог установки: ${INSTALL_LOG}"
   if is_installed; then
-    ok "Бот установлен."
-    echo "Репозиторий: ${REPO_URL}"
-    echo "Папка: ${INSTALL_DIR}"
-    echo "Сервис: ${SERVICE_NAME}"
-    echo "Ветка: ${REPO_BRANCH}"
-    echo "Версия: $(get_local_sha | cut -c1-12)"
-    echo "Статус: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
-    echo "Автозапуск: $(systemctl is-enabled "$SERVICE_NAME" 2>/dev/null || true)"
-    systemctl --no-pager --full status "$SERVICE_NAME" || true
-  else
-    warn "Бот пока не установлен."
+    echo
+    echo "Health summary:"
+    if [[ "$active_state" == "active" ]]; then
+      ok "Сервис запущен."
+    else
+      warn "Сервис не активен."
+    fi
   fi
   print_line
   return 0
 }
 
 check_updates() {
-  local remote_sha local_sha
+  local remote_sha local_sha has_updates=0
   remote_sha="$(fetch_remote_sha)"
   local_sha="$(get_local_sha)"
   print_line
@@ -788,9 +870,15 @@ check_updates() {
   echo "Remote: ${remote_sha:-не удалось получить}"
   echo "Local : ${local_sha:-нет локальной версии}"
   if [[ -n "$remote_sha" && -n "$local_sha" && "$remote_sha" == "$local_sha" ]]; then
-    ok "Установлена актуальная версия."
+    ok "Обновления не найдены. Установлена актуальная версия."
   else
-    warn "Есть новая версия или локальная версия ещё не зафиксирована."
+    has_updates=1
+    warn "Найдены обновления или локальная версия не зафиксирована."
+    if has_tty && is_installed; then
+      if confirm "Обновить сейчас?" "Y"; then
+        update_bot 1
+      fi
+    fi
   fi
   print_line
   return 0
@@ -862,7 +950,7 @@ install_or_reinstall_flow() {
     default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
     prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
     set_env_value STARS_PRICE_30_DAYS "$value"
-    default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://amnezia.org")"
+    default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://m-1-14-3w5hsuiikq-ez.a.run.app/ru/downloads")"
     prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
     set_env_value DOWNLOAD_URL "$value"
     default="$(get_env_value SUPPORT_USERNAME)"
@@ -872,6 +960,7 @@ install_or_reinstall_flow() {
 
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
   ensure_bot_user || die "Не удалось подготовить service пользователя."
+  install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось создать systemd сервис."
   persist_repo_branch
   persist_remote_sha
@@ -884,7 +973,7 @@ install_or_reinstall_flow() {
 }
 
 update_bot() {
-  local tmp_dir api_token admin_id server_name secret
+  local tmp_dir api_token admin_id server_name secret skip_check="${1:-0}"
   if ! is_installed; then
     warn "Бот не установлен."
     return 0
@@ -893,7 +982,9 @@ update_bot() {
   info "Обновление AWG Telegram Bot"
   ensure_packages || die "Не удалось обновить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
-  check_updates
+  if [[ "$skip_check" != "1" ]]; then
+    check_updates || true
+  fi
 
   tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
   stop_service_if_exists
@@ -913,6 +1004,7 @@ update_bot() {
   write_detected_awg_env
   ensure_venv_and_requirements || die "Не удалось обновить Python зависимости."
   ensure_bot_user || die "Не удалось подготовить service пользователя."
+  install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось обновить systemd сервис."
   persist_repo_branch
   persist_remote_sha
@@ -928,6 +1020,7 @@ remove_everything() {
   systemctl daemon-reload || true
   systemctl reset-failed || true
   rm -f "$SELF_SYMLINK"
+  rm -f "$AWG_HELPER_SUDOERS" "$AWG_HELPER_TARGET"
   rm -rf "$INSTALL_DIR" "$APP_LOG_DIR"
   rm -f "$INSTALL_LOG"
   return 0
@@ -973,6 +1066,29 @@ remove_keep_db_and_env() {
   return 0
 }
 
+remove_default() {
+  if ! confirm "Удалить приложение и сервис, оставив БД и .env?" "Y"; then
+    warn "Удаление отменено."
+    return 0
+  fi
+  remove_keep_db_and_env
+  ok "Удалено приложение и сервис. Сохранены: БД и .env."
+  return 0
+}
+
+remove_full() {
+  print_line
+  warn "Полное удаление уничтожит код, сервис, БД, .env и логи."
+  warn "Внимание: AWG peer в контейнере этим действием не удаляются автоматически."
+  if ! confirm_delete_word; then
+    warn "Полное удаление отменено (неверное подтверждение)."
+    return 0
+  fi
+  remove_everything
+  ok "Выполнено полное удаление."
+  return 0
+}
+
 remove_bot() {
   local choice=""
   print_line
@@ -980,27 +1096,13 @@ remove_bot() {
     warn "Бот уже удалён."
     return 0
   fi
-  echo "1) Удалить всё"
-  echo "2) Удалить всё, кроме БД и .env (нужно для расшифровки данных)"
+  echo "1) Обычное удаление (сохранить БД и .env)"
+  echo "2) Полное удаление (удалить всё)"
   echo "0) Отмена"
   prompt_raw "Выбор: " choice
   case "$choice" in
-    1)
-      if ! confirm "Точно удалить все файлы, БД и логи?" "N"; then
-        warn "Удаление отменено."
-        return 0
-      fi
-      remove_everything
-      ok "Удалено всё."
-      ;;
-    2)
-      if ! confirm "Точно удалить всё, кроме БД и .env?" "N"; then
-        warn "Удаление отменено."
-        return 0
-      fi
-      remove_keep_db_and_env
-      ok "Удалено всё, кроме БД и .env."
-      ;;
+    1) remove_default ;;
+    2) remove_full ;;
     *)
       warn "Удаление отменено."
       ;;
@@ -1024,10 +1126,34 @@ show_logs() {
   echo "0) Назад"
   prompt_raw "Выбор: " choice
   case "$choice" in
-    1) journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true ;;
-    2) journalctl -u "$SERVICE_NAME" -f || true ;;
-    3) tail -n 100 "$APP_LOG_FILE" || true ;;
-    4) tail -f "$APP_LOG_FILE" || true ;;
+    1)
+      if service_exists; then
+        journalctl -u "$SERVICE_NAME" -n 100 --no-pager || true
+      else
+        warn "Сервис $SERVICE_NAME не найден."
+      fi
+      ;;
+    2)
+      if service_exists; then
+        journalctl -u "$SERVICE_NAME" -f || true
+      else
+        warn "Сервис $SERVICE_NAME не найден."
+      fi
+      ;;
+    3)
+      if [[ -f "$APP_LOG_FILE" ]]; then
+        tail -n 100 "$APP_LOG_FILE" || true
+      else
+        warn "Файл логов приложения не найден: $APP_LOG_FILE"
+      fi
+      ;;
+    4)
+      if [[ -f "$APP_LOG_FILE" ]]; then
+        tail -f "$APP_LOG_FILE" || true
+      else
+        warn "Файл логов приложения не найден: $APP_LOG_FILE"
+      fi
+      ;;
     *) ;;
   esac
   print_line
@@ -1039,7 +1165,8 @@ print_not_installed_menu() {
   echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
   echo "Бот сейчас не установлен."
   echo "1) Установить"
-  echo "2) Отмена / Выход"
+  echo "2) Выбор ветки"
+  echo "0) Отмена / Выход"
   print_line
 }
 
@@ -1047,9 +1174,10 @@ print_residual_menu() {
   print_line
   echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
   echo "Найдены остаточные файлы прошлой установки."
-  echo "1) Продолжить установку / переустановку поверх остатков"
-  echo "2) Удалить всё"
-  echo "3) Удалить всё, кроме БД и .env"
+  echo "1) Установить / переустановить"
+  echo "2) Обычное удаление (сохранить БД и .env)"
+  echo "3) Полное удаление"
+  echo "4) Выбор ветки"
   echo "0) Выход"
   print_line
 }
@@ -1058,12 +1186,13 @@ print_installed_menu() {
   print_line
   echo "AWG Telegram Bot — ${REPO_OWNER}/${REPO_NAME}:${REPO_BRANCH}"
   echo "Бот уже установлен."
-  echo "1) Переустановить"
-  echo "2) Обновить"
-  echo "3) Удалить"
-  echo "4) Проверить обновления"
-  echo "5) Статус"
-  echo "6) Логи"
+  echo "1) Проверить обновления"
+  echo "2) Удалить (сохранить БД и .env)"
+  echo "3) Полностью удалить"
+  echo "4) Статус"
+  echo "5) Логи"
+  echo "6) Выбор ветки"
+  echo "7) Переустановить"
   echo "0) Выход"
   print_line
 }
@@ -1077,6 +1206,9 @@ run_action() {
     check-updates) check_updates ;;
     status) show_status ;;
     logs) show_logs ;;
+    choose-branch) choose_branch_menu ;;
+    remove-default) remove_default ;;
+    remove-full) remove_full ;;
     remove|uninstall) remove_bot ;;
     *) return 0 ;;
   esac
@@ -1089,12 +1221,13 @@ main_menu() {
       print_installed_menu
       prompt_raw "Выбери действие: " choice
       case "$choice" in
-        1) install_or_reinstall_flow reinstall ;;
-        2) update_bot ;;
-        3) remove_bot ;;
-        4) check_updates ;;
-        5) show_status ;;
-        6) show_logs ;;
+        1) check_updates || true ;;
+        2) remove_default ;;
+        3) remove_full ;;
+        4) show_status ;;
+        5) show_logs ;;
+        6) choose_branch_menu ;;
+        7) install_or_reinstall_flow reinstall ;;
         0) echo "Выход."; exit 0 ;;
         *) warn "Неизвестный пункт меню." ;;
       esac
@@ -1103,8 +1236,9 @@ main_menu() {
       prompt_raw "Выбери действие: " choice
       case "$choice" in
         1) install_or_reinstall_flow install ;;
-        2) remove_everything; ok "Удалено всё." ;;
-        3) remove_keep_db_and_env; ok "Удалено всё, кроме БД и .env." ;;
+        2) remove_default ;;
+        3) remove_full ;;
+        4) choose_branch_menu ;;
         0) echo "Выход."; exit 0 ;;
         *) warn "Неизвестный пункт меню." ;;
       esac
@@ -1113,7 +1247,8 @@ main_menu() {
       prompt_raw "Выбери действие: " choice
       case "$choice" in
         1) install_or_reinstall_flow install ;;
-        2|0) echo "Выход."; exit 0 ;;
+        2) choose_branch_menu ;;
+        0) echo "Выход."; exit 0 ;;
         *) warn "Неизвестный пункт меню." ;;
       esac
     fi

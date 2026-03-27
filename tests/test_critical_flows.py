@@ -1,9 +1,13 @@
 import asyncio
+import base64
+import hashlib
+import importlib
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from cryptography.fernet import Fernet
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bot"))
@@ -132,6 +136,147 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(removed, 0)
         self.assertEqual(protected_calls, [("orphan-1", "orphan-quarantine")])
+
+    async def test_delete_user_everywhere_retry_from_delete_pending(self):
+        import awg_backend, database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (77, '0', '2026-01-01T00:00:00')")
+            await db.execute(
+                "INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state) VALUES (77, 1, 'pub-retry', '', '10.8.1.77', '2026-01-01T00:00:00', 'delete_pending')"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        state = {"attempt": 0}
+
+        async def flaky_remove(pub):
+            state["attempt"] += 1
+            if state["attempt"] == 1:
+                raise RuntimeError("temporary failure")
+
+        async def peers_with_key():
+            return [{"public_key": "pub-retry", "ip": "10.8.1.77"}]
+
+        original_remove = awg_backend.remove_peer_from_awg
+        original_peers = awg_backend.get_awg_peers
+        awg_backend.remove_peer_from_awg = flaky_remove
+        awg_backend.get_awg_peers = peers_with_key
+        try:
+            with self.assertRaises(RuntimeError):
+                await awg_backend.delete_user_everywhere(77)
+            row = await database.fetchone("SELECT COUNT(*) FROM users WHERE user_id = 77")
+            self.assertEqual(row[0], 1)
+
+            awg_backend.get_awg_peers = lambda: asyncio.sleep(0, result=[])  # type: ignore[assignment]
+            removed, _ = await awg_backend.delete_user_everywhere(77)
+            self.assertEqual(removed, 1)
+            row = await database.fetchone("SELECT COUNT(*) FROM users WHERE user_id = 77")
+            self.assertEqual(row[0], 0)
+        finally:
+            awg_backend.remove_peer_from_awg = original_remove
+            awg_backend.get_awg_peers = original_peers
+
+    async def test_save_payment_is_atomic_with_job(self):
+        import database
+
+        real_open_db = database.open_db
+
+        class FailingConn:
+            def __init__(self, inner):
+                self._inner = inner
+
+            async def execute(self, sql, params=()):
+                if "INSERT INTO provisioning_jobs" in sql:
+                    raise RuntimeError("inject failure")
+                return await self._inner.execute(sql, params)
+
+            async def commit(self):
+                return await self._inner.commit()
+
+            async def rollback(self):
+                return await self._inner.rollback()
+
+            async def close(self):
+                return await self._inner.close()
+
+        async def failing_open_db():
+            return FailingConn(await real_open_db())
+
+        database.open_db = failing_open_db  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                await database.save_payment(
+                    telegram_payment_charge_id="tg_atomic",
+                    provider_payment_charge_id="prov_atomic",
+                    user_id=123,
+                    payload="sub_7",
+                    amount=1,
+                    currency="XTR",
+                    payment_method="stars",
+                    status="received",
+                    raw_payload_json="{}",
+                )
+        finally:
+            database.open_db = real_open_db  # type: ignore[assignment]
+        row = await database.fetchone("SELECT COUNT(*) FROM payments WHERE telegram_payment_charge_id='tg_atomic'")
+        self.assertEqual(row[0], 0)
+
+    async def test_decrypt_backward_compatibility_v1(self):
+        import security_utils
+
+        secret = os.environ["ENCRYPTION_SECRET"]
+        legacy_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+        legacy_token = Fernet(legacy_key).encrypt(b"legacy-value").decode("utf-8")
+        encrypted = f"enc:v1:{legacy_token}"
+        self.assertEqual(security_utils.decrypt_text(encrypted), "legacy-value")
+        new_value = security_utils.encrypt_text("new-value")
+        self.assertTrue(new_value.startswith("enc:v2:"))
+        self.assertEqual(security_utils.decrypt_text(new_value), "new-value")
+
+    async def test_config_import_without_autodetect_side_effects(self):
+        import subprocess
+
+        os.environ["CONFIG_AUTODETECT_ON_IMPORT"] = "0"
+        for key, value in {
+            "API_TOKEN": "123:test",
+            "ADMIN_ID": "1",
+            "SERVER_PUBLIC_KEY": "A" * 44,
+            "SERVER_IP": "1.1.1.1:51820",
+            "ENCRYPTION_SECRET": "test-secret",
+        }.items():
+            os.environ[key] = value
+
+        original_run = subprocess.run
+
+        def guarded_run(*args, **kwargs):
+            raise AssertionError("subprocess.run should not be called during config import")
+
+        subprocess.run = guarded_run  # type: ignore[assignment]
+        try:
+            if "config" in sys.modules:
+                del sys.modules["config"]
+            importlib.import_module("config")
+        finally:
+            subprocess.run = original_run  # type: ignore[assignment]
+
+    async def test_parse_awg_show_output(self):
+        import awg_backend
+
+        sample = """
+interface: awg0
+  peer: PUBKEY1
+    allowed ips: 10.8.1.11/32, fd00::/128
+peer: PUBKEY2
+  allowed ips: 10.8.1.12/32
+"""
+        peers = awg_backend.parse_awg_show_output(sample)
+        self.assertEqual(peers[0]["public_key"], "PUBKEY1")
+        self.assertEqual(peers[0]["ip"], "10.8.1.11")
+        self.assertEqual(peers[1]["public_key"], "PUBKEY2")
+        self.assertEqual(peers[1]["ip"], "10.8.1.12")
 
 
 if __name__ == "__main__":

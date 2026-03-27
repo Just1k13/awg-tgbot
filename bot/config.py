@@ -11,7 +11,7 @@ load_dotenv(ENV_FILE)
 
 DEFAULT_ENV: dict[str, str] = {
     'SERVER_NAME': 'My VPN',
-    'DOWNLOAD_URL': 'https://amnezia.org',
+    'DOWNLOAD_URL': 'https://m-1-14-3w5hsuiikq-ez.a.run.app/ru/downloads',
     'PUBLIC_HOST': '',
     'SUPPORT_USERNAME': '',
     'AWG_I1': '<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>',
@@ -38,6 +38,8 @@ DEFAULT_ENV: dict[str, str] = {
     'DOCKER_RETRIES': '3',
     'DOCKER_RETRY_BASE_DELAY': '0.5',
     'DOCKER_TIMEOUT_SECONDS': '20',
+    'AWG_HELPER_PATH': '/usr/local/libexec/awg-bot-helper',
+    'AWG_HELPER_USE_SUDO': '1',
     'AWG_PEERS_CACHE_TTL_SECONDS': '5.0',
     'PENDING_KEY_TTL_SECONDS': '900',
     'PAYMENT_RETRY_DELAY_SECONDS': '60',
@@ -103,10 +105,7 @@ def maybe_set_support_username(username: str | None) -> str:
     if not username:
         return get_support_username()
     normalized = username if username.startswith('@') else f'@{username}'
-    current = globals().get('SUPPORT_USERNAME', '').strip()
-    if current == normalized:
-        return normalized
-    save_env_value('SUPPORT_USERNAME', normalized)
+    globals()['SUPPORT_USERNAME'] = normalized
     return normalized
 
 
@@ -298,11 +297,18 @@ def _env_with_runtime_default(name: str, default: str) -> str:
     return default
 
 
-DOCKER_CONTAINER_HINT = _find_awg_container()
-WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE'])
-_detected_awg = _detect_awg_from_container(DOCKER_CONTAINER_HINT, WG_INTERFACE_HINT)
+AUTO_DETECT_ON_IMPORT = os.getenv('CONFIG_AUTODETECT_ON_IMPORT', '0').strip() == '1'
+if AUTO_DETECT_ON_IMPORT:
+    DOCKER_CONTAINER_HINT = _find_awg_container()
+    WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE'])
+    _detected_awg = _detect_awg_from_container(DOCKER_CONTAINER_HINT, WG_INTERFACE_HINT)
+    PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', _detect_public_host())
+else:
+    DOCKER_CONTAINER_HINT = _env_with_runtime_default('DOCKER_CONTAINER', DEFAULT_ENV['DOCKER_CONTAINER'])
+    WG_INTERFACE_HINT = _env_with_runtime_default('WG_INTERFACE', DEFAULT_ENV['WG_INTERFACE'])
+    _detected_awg = {}
+    PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', DEFAULT_ENV['PUBLIC_HOST'])
 _raw_public_host = os.getenv('PUBLIC_HOST', '').strip()
-PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', _detect_public_host())
 PUBLIC_HOST_HINT = _resolve_public_ipv4(PUBLIC_HOST_HINT)
 _public_host_error = ''
 if _raw_public_host and not PUBLIC_HOST_HINT:
@@ -331,7 +337,7 @@ if _raw_server_ip:
 if not SERVER_IP_HINT and PUBLIC_HOST_HINT and DETECTED_HOST_PORT_HINT:
     SERVER_IP_HINT = f'{PUBLIC_HOST_HINT}:{DETECTED_HOST_PORT_HINT}'
 
-if _detected_awg:
+if AUTO_DETECT_ON_IMPORT and _detected_awg:
     summary_parts = []
     if _detected_awg.get('WG_INTERFACE'):
         summary_parts.append(f'container={DOCKER_CONTAINER_HINT}')
@@ -422,6 +428,8 @@ ADMIN_COMMAND_COOLDOWN_SECONDS = env_int('ADMIN_COMMAND_COOLDOWN_SECONDS', int(D
 DOCKER_RETRIES = env_int('DOCKER_RETRIES', int(DEFAULT_ENV['DOCKER_RETRIES']))
 DOCKER_RETRY_BASE_DELAY = env_float('DOCKER_RETRY_BASE_DELAY', float(DEFAULT_ENV['DOCKER_RETRY_BASE_DELAY']))
 DOCKER_TIMEOUT_SECONDS = env_int('DOCKER_TIMEOUT_SECONDS', int(DEFAULT_ENV['DOCKER_TIMEOUT_SECONDS']))
+AWG_HELPER_PATH = _env_with_runtime_default('AWG_HELPER_PATH', DEFAULT_ENV['AWG_HELPER_PATH'])
+AWG_HELPER_USE_SUDO = env_int('AWG_HELPER_USE_SUDO', int(DEFAULT_ENV['AWG_HELPER_USE_SUDO'])) == 1
 AWG_PEERS_CACHE_TTL_SECONDS = env_float('AWG_PEERS_CACHE_TTL_SECONDS', float(DEFAULT_ENV['AWG_PEERS_CACHE_TTL_SECONDS']))
 PENDING_KEY_TTL_SECONDS = env_int('PENDING_KEY_TTL_SECONDS', int(DEFAULT_ENV['PENDING_KEY_TTL_SECONDS']))
 PAYMENT_RETRY_DELAY_SECONDS = env_int('PAYMENT_RETRY_DELAY_SECONDS', int(DEFAULT_ENV['PAYMENT_RETRY_DELAY_SECONDS']))

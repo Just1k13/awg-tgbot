@@ -10,6 +10,8 @@ from awg_backend import (
     cleanup_expired_subscriptions,
     expired_subscriptions_worker,
     get_orphan_awg_peers,
+    reconcile_provisioning_state,
+    validate_awg_settings,
 )
 from config import (
     ADMIN_ID,
@@ -21,10 +23,10 @@ from config import (
     logger,
     maybe_set_support_username,
 )
-from database import close_shared_db, db_health_info, ensure_db_ready, execute, fetchone
+from database import close_shared_db, db_health_info, ensure_db_ready
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
-from payments import router as payments_router
+from payments import recover_incomplete_payments, router as payments_router
 
 dp = Dispatcher()
 bg_worker_task: asyncio.Task | None = None
@@ -108,14 +110,6 @@ dp.include_router(user_router)
 dp.include_router(fallback_router)
 
 
-async def cleanup_stale_pending_keys() -> int:
-    row = await fetchone("SELECT COUNT(*) FROM keys WHERE public_key LIKE 'pending:%'")
-    stale_count = int(row[0]) if row else 0
-    if stale_count:
-        await execute("DELETE FROM keys WHERE public_key LIKE 'pending:%'")
-    return stale_count
-
-
 async def main():
     global bg_worker_task
 
@@ -132,13 +126,7 @@ async def main():
         raise RuntimeError("Неверный API_TOKEN") from e
 
     await ensure_db_ready()
-
-    try:
-        cleaned_pending = await cleanup_stale_pending_keys()
-        if cleaned_pending:
-            logger.warning("Удалено stale pending-ключей при старте: %s", cleaned_pending)
-    except Exception as e:
-        logger.exception("Ошибка очистки stale pending-ключей: %s", e)
+    validate_awg_settings()
 
     try:
         await check_awg_container()
@@ -158,6 +146,18 @@ async def main():
         await bootstrap_protected_peers()
     except Exception as e:
         logger.exception('Ошибка bootstrap protected peers: %s', e)
+
+    try:
+        reconcile_stats = await reconcile_provisioning_state()
+        logger.info("Reconcile provisioning: %s", reconcile_stats)
+    except Exception as e:
+        logger.exception("Ошибка reconcile provisioning: %s", e)
+
+    try:
+        pay_stats = await recover_incomplete_payments()
+        logger.info("Recovery payments: %s", pay_stats)
+    except Exception as e:
+        logger.exception("Ошибка recovery payments: %s", e)
 
     try:
         db_info = await db_health_info()

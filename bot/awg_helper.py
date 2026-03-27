@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 SAFE_PUBKEY_RE = re.compile(r"^[A-Za-z0-9+/=]{40,64}$")
+HELPER_POLICY_PATH = Path("/etc/awg-bot-helper.json")
 
 
 def _safe_name(value: str, field: str) -> str:
@@ -48,26 +51,30 @@ def _docker_exec(container: str, cmd: list[str], stdin_text: str | None = None) 
     return _run(["docker", "exec", "-i", container, *cmd], stdin_text=stdin_text)
 
 
+def _load_policy(path: Path | None = None) -> tuple[str, str]:
+    if path is None:
+        path = HELPER_POLICY_PATH
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("invalid helper policy")
+    container = _safe_name(str(data.get("container", "")).strip(), "container")
+    interface = _safe_name(str(data.get("interface", "")).strip(), "interface")
+    return container, interface
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Restricted AWG helper")
     sub = parser.add_subparsers(dest="op", required=True)
 
     for op_name in ("check-awg", "show", "genkey", "pubkey", "genpsk"):
         p = sub.add_parser(op_name)
-        p.add_argument("--container", required=True)
-        if op_name in ("check-awg", "show"):
-            p.add_argument("--interface", required=True)
 
     p_add = sub.add_parser("add-peer")
-    p_add.add_argument("--container", required=True)
-    p_add.add_argument("--interface", required=True)
     p_add.add_argument("--public-key", required=True)
     p_add.add_argument("--ip", required=True)
     p_add.add_argument("--psk")
 
     p_del = sub.add_parser("remove-peer")
-    p_del.add_argument("--container", required=True)
-    p_del.add_argument("--interface", required=True)
     p_del.add_argument("--public-key", required=True)
     return parser
 
@@ -75,9 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        container = _safe_name(args.container, "container")
-        if args.op in ("check-awg", "show", "add-peer", "remove-peer"):
-            interface = _safe_name(args.interface, "interface")
+        container, interface = _load_policy()
 
         if args.op == "check-awg":
             out = _docker_exec(container, ["awg", "show", interface])

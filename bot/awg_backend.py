@@ -95,23 +95,23 @@ def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
 
 
 async def check_awg_container() -> None:
-    result = await run_docker(["check-awg", "--container", DOCKER_CONTAINER, "--interface", WG_INTERFACE])
+    result = await run_docker(["check-awg"])
     if "interface:" not in result:
         raise RuntimeError(f"Не удалось проверить интерфейс {WG_INTERFACE}")
 
 
 async def generate_keypair() -> tuple[str, str]:
-    private_key = (await run_docker(["genkey", "--container", DOCKER_CONTAINER])).strip()
+    private_key = (await run_docker(["genkey"])).strip()
     if not private_key:
         raise RuntimeError("awg genkey вернул пустой private key")
-    public_key = (await run_docker(["pubkey", "--container", DOCKER_CONTAINER], input_data=private_key)).strip()
+    public_key = (await run_docker(["pubkey"], input_data=private_key)).strip()
     if not public_key or not is_valid_awg_public_key(public_key):
         raise RuntimeError("awg pubkey вернул некорректный public key")
     return private_key, public_key
 
 
 async def generate_psk() -> str:
-    psk = (await run_docker(["genpsk", "--container", DOCKER_CONTAINER])).strip()
+    psk = (await run_docker(["genpsk"])).strip()
     if not psk:
         raise RuntimeError("wg genpsk вернул пустой PSK")
     return psk
@@ -122,8 +122,6 @@ async def add_peer_to_awg(public_key: str, ip: str, psk_key: str) -> None:
         raise RuntimeError("Некорректный public key перед awg set")
     await run_docker([
         "add-peer",
-        "--container", DOCKER_CONTAINER,
-        "--interface", WG_INTERFACE,
         "--public-key", public_key,
         "--ip", ip,
     ], input_data=psk_key)
@@ -135,8 +133,6 @@ async def remove_peer_from_awg(public_key: str) -> None:
         raise RuntimeError("Некорректный public key для удаления peer")
     await run_docker([
         "remove-peer",
-        "--container", DOCKER_CONTAINER,
-        "--interface", WG_INTERFACE,
         "--public-key", public_key,
     ])
     _invalidate_peers_cache()
@@ -149,7 +145,7 @@ async def get_awg_peers() -> list[dict[str, str | None]]:
     if cached is not None and isinstance(expires_at, (int, float)) and now_ts < expires_at:
         return list(cached)
 
-    output = await run_docker(["show", "--container", DOCKER_CONTAINER, "--interface", WG_INTERFACE])
+    output = await run_docker(["show"])
     peers = parse_awg_show_output(output)
     _peers_cache["data"] = list(peers)
     _peers_cache["expires_at"] = now_ts + AWG_PEERS_CACHE_TTL_SECONDS
@@ -578,29 +574,70 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
 async def revoke_user_access(user_id: int) -> int:
     db = await open_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """
+            UPDATE keys
+            SET state='revoke_pending',
+                state_updated_at=?,
+                delete_reason='revoke_expired_or_admin'
+            WHERE user_id = ?
+              AND public_key NOT LIKE 'pending:%'
+              AND state != 'deleted'
+            """,
+            (utc_now_naive().isoformat(), user_id),
+        )
         async with db.execute(
-            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state IN ('active','delete_pending','revoke_pending')",
             (user_id,),
         ) as cursor:
             rows = await cursor.fetchall()
+        await db.commit()
     finally:
         await db.close()
 
     public_keys = [row[0] for row in rows]
     removed_keys: list[str] = []
+    failed_remove: list[str] = []
     for public_key in public_keys:
         try:
             await remove_peer_from_awg(public_key)
             removed_keys.append(public_key)
         except Exception as e:
-            logger.error("Ошибка удаления peer %s для user %s: %s", public_key, user_id, e)
+            current_keys = {(peer.get("public_key") or "").strip() for peer in await get_awg_peers()}
+            if public_key and public_key not in current_keys:
+                removed_keys.append(public_key)
+                logger.info("Peer %s уже отсутствует в AWG при revoke, считаем удаленным", public_key)
+            else:
+                logger.error("Ошибка удаления peer %s для user %s: %s", public_key, user_id, e)
+                failed_remove.append(public_key)
+
+    if failed_remove:
+        await write_audit_log(
+            user_id,
+            "revoke_user_access_pending",
+            f"failed_peers={len(failed_remove)}; total_found={len(public_keys)}",
+        )
+        raise RuntimeError(f"Не удалось удалить {len(failed_remove)} peer в AWG. Пользователь оставлен в состоянии revoke_pending.")
 
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
         if removed_keys:
-            await db.executemany("DELETE FROM keys WHERE public_key = ?", [(key,) for key in removed_keys])
-        await db.execute("DELETE FROM keys WHERE user_id = ? AND (public_key LIKE 'pending:%' OR state='pending' OR state='delete_pending')", (user_id,))
+            await db.executemany(
+                "UPDATE keys SET state='deleted', state_updated_at=? WHERE public_key = ?",
+                [(utc_now_naive().isoformat(), key) for key in removed_keys],
+            )
+        async with db.execute(
+            "SELECT COUNT(*) FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state='revoke_pending'",
+            (user_id,),
+        ) as cursor:
+            still_pending = (await cursor.fetchone())[0]
+        if still_pending > 0:
+            await db.commit()
+            await write_audit_log(user_id, "revoke_user_access_retry_needed", f"pending_keys={still_pending}")
+            raise RuntimeError("Не все peer удалены при revoke, требуется повторный запуск.")
+        await db.execute("DELETE FROM keys WHERE user_id = ?", (user_id,))
         await db.execute("UPDATE users SET sub_until = '0' WHERE user_id = ?", (user_id,))
         await db.commit()
     finally:

@@ -54,7 +54,9 @@ Telegram-бот для продажи доступа и автоматическ
 - автоопределение контейнера AWG, интерфейса, `SERVER_PUBLIC_KEY`, внешнего `SERVER_IP` и AWG-параметров;
 - создание и обновление `systemd`-сервиса;
 - запуск сервиса под отдельным системным пользователем `awg-bot` (least-privilege);
-- AWG операции выполняются через ограниченный root-helper с allowlist команд (без добавления бота в `docker` group);
+- AWG операции выполняются через ограниченный root-helper с allowlist команд;
+- helper использует фиксированный root-owned policy (`/etc/awg-bot-helper.json`) и не принимает произвольный container от бота;
+- install/update/reinstall выполняют security migration: принудительно и идемпотентно удаляют `awg-bot` из `docker` group;
 - хранение локального SHA установленной версии для проверки обновлений.
 - crash-safe обработка платежей со статусами `received/provisioning/applied/failed/needs_repair`;
 - recovery worker для повторной выдачи доступа после сбоев;
@@ -260,6 +262,9 @@ sudo REPO_BRANCH=beta awg-tgbot update
 - env: `/opt/amnezia/bot/.env`
 - virtualenv: `/opt/amnezia/bot/.venv`
 - service: `vpn-bot.service`
+- helper binary: `/usr/local/libexec/awg-bot-helper`
+- helper policy: `/etc/awg-bot-helper.json`
+- helper sudoers: `/etc/sudoers.d/awg-bot-helper`
 - install log: `/var/log/awg-tgbot-install.log`
 - app log: `/var/log/awg-tgbot/bot.log`
 - выбранная ветка: `/opt/amnezia/bot/.state/repo_branch`
@@ -330,6 +335,7 @@ sudo awg-tgbot update
 
 ```bash
 sudo awg-tgbot status
+id awg-bot
 systemctl status vpn-bot.service --no-pager -l
 journalctl -u vpn-bot.service -n 50 --no-pager
 grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/bot/.env
@@ -341,6 +347,8 @@ grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/b
 - в логах есть строки про успешный запуск polling;
 - в `.env` заполнены `SERVER_NAME`, `SERVER_IP`, `SERVER_PUBLIC_KEY`;
 - в статусе installer показывается правильная текущая ветка.
+- `id awg-bot` не содержит группу `docker`;
+- в статусе installer есть `AWG helper: есть`, `Helper policy: есть`.
 
 ---
 
@@ -423,9 +431,11 @@ grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/b
 ## Безопасность
 
 - клиентские приватные ключи и PSK хранятся в БД в зашифрованном виде;
+- новые записи шифруются в формате `enc:v2` (PBKDF2), `enc:v1` остаётся читаемым для обратной совместимости;
 - `ENCRYPTION_SECRET` критичен для последующей расшифровки уже сохранённых данных;
 - безопасный режим удаления **"Удалить всё, кроме БД и .env"** нужен именно для сохранения возможности расшифровывать существующие записи;
 - `/backup` отправляет **редактированную** копию БД без чувствительных значений.
+- revoke/delete операции сделали fail-safe: если peer не удалён из AWG, БД не сообщает ложный финальный успех и оставляет retryable state (`revoke_pending` / `delete_pending`).
 
 > Потеря `ENCRYPTION_SECRET` означает потерю возможности расшифровывать уже сохранённые клиентские данные.
 
@@ -471,6 +481,7 @@ grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/b
 
 Для полного удаления требуется явное подтверждение вводом слова `DELETE`.
 ⚠️ При любом режиме удаления peer внутри AWG-контейнера автоматически не удаляются.
+⚠️ Удаление также не меняет вручную созданные внешние права, не относящиеся к installer (например, если администратор сам добавил `awg-bot` в другие группы).
 
 ---
 

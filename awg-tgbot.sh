@@ -26,6 +26,7 @@ APP_LOG_FILE="${APP_LOG_DIR}/bot.log"
 PYTHON_BIN="/usr/bin/python3"
 AWG_HELPER_TARGET="/usr/local/libexec/awg-bot-helper"
 AWG_HELPER_SUDOERS="/etc/sudoers.d/awg-bot-helper"
+AWG_HELPER_POLICY="/etc/awg-bot-helper.json"
 TTY_DEVICE="/dev/tty"
 SELF_SYMLINK="/usr/local/bin/awg-tgbot"
 
@@ -753,10 +754,62 @@ ensure_bot_user() {
   return 0
 }
 
+migrate_off_docker_group() {
+  local groups before after
+  if ! getent group docker >/dev/null 2>&1; then
+    info "Группа docker отсутствует: миграция off-docker-group не требуется."
+    return 0
+  fi
+  if ! id -u "$BOT_USER" >/dev/null 2>&1; then
+    info "Пользователь ${BOT_USER} пока не создан: миграция off-docker-group будет выполнена после создания пользователя."
+    return 0
+  fi
+
+  groups=" $(id -nG "$BOT_USER" 2>/dev/null || true) "
+  if [[ "$groups" != *" docker "* ]]; then
+    info "Миграция off-docker-group: ${BOT_USER} уже не состоит в docker group."
+    return 0
+  fi
+
+  before="$(id -nG "$BOT_USER" 2>/dev/null || true)"
+  if gpasswd -d "$BOT_USER" docker >/dev/null 2>&1; then
+    after="$(id -nG "$BOT_USER" 2>/dev/null || true)"
+    ok "Миграция off-docker-group: пользователь ${BOT_USER} удалён из docker group."
+    info "Группы до: ${before}"
+    info "Группы после: ${after}"
+    return 0
+  fi
+
+  warn "Не удалось удалить ${BOT_USER} из docker group автоматически. Удали вручную: gpasswd -d ${BOT_USER} docker"
+  return 1
+}
+
+write_helper_policy() {
+  local container interface
+  container="$(get_env_value DOCKER_CONTAINER)"
+  interface="$(get_env_value WG_INTERFACE)"
+  [[ -n "$container" ]] || container="$DETECTED_CONTAINER"
+  [[ -n "$interface" ]] || interface="$DETECTED_INTERFACE"
+  [[ -n "$container" ]] || die "DOCKER_CONTAINER не задан: невозможно сформировать policy helper."
+  [[ -n "$interface" ]] || die "WG_INTERFACE не задан: невозможно сформировать policy helper."
+
+  cat > "$AWG_HELPER_POLICY" <<POLICY
+{
+  "container": "${container}",
+  "interface": "${interface}"
+}
+POLICY
+  chown root:root "$AWG_HELPER_POLICY"
+  chmod 640 "$AWG_HELPER_POLICY"
+  ok "Обновлена policy helper: container=${container}, interface=${interface}"
+  return 0
+}
+
 install_awg_helper() {
   [[ -f "$BOT_DIR/awg_helper.py" ]] || return 1
   install -d -m 755 /usr/local/libexec
   install -o root -g root -m 750 "$BOT_DIR/awg_helper.py" "$AWG_HELPER_TARGET"
+  write_helper_policy
   cat > "$AWG_HELPER_SUDOERS" <<SUDOERS
 ${BOT_USER} ALL=(root) NOPASSWD: ${AWG_HELPER_TARGET} *
 SUDOERS
@@ -783,11 +836,18 @@ Restart=always
 RestartSec=3
 User=${BOT_USER}
 Group=${BOT_USER}
-# sudo к root helper требует возможности повышения привилегий.
+# sudo к root helper требует возможности повышения привилегий; при NoNewPrivileges=true sudo станет неработоспособным.
 NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
 StandardOutput=append:${APP_LOG_FILE}
 StandardError=append:${APP_LOG_FILE}
 
@@ -824,7 +884,7 @@ stop_service_if_exists() {
 }
 
 show_status() {
-  local active_state enabled_state local_sha branch_info env_state
+  local active_state enabled_state local_sha branch_info env_state docker_group_state helper_state policy_state
   print_line
   branch_info="$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)"
   [[ -n "$branch_info" ]] || branch_info="$REPO_BRANCH"
@@ -836,6 +896,14 @@ show_status() {
   [[ -n "$local_sha" ]] || local_sha="неизвестно"
   env_state="нет"
   [[ -f "$ENV_FILE" ]] && env_state="есть"
+  docker_group_state="нет"
+  if id -u "$BOT_USER" >/dev/null 2>&1 && [[ " $(id -nG "$BOT_USER" 2>/dev/null || true) " == *" docker "* ]]; then
+    docker_group_state="ДА (требуется миграция)"
+  fi
+  helper_state="нет"
+  [[ -x "$AWG_HELPER_TARGET" ]] && helper_state="есть"
+  policy_state="нет"
+  [[ -f "$AWG_HELPER_POLICY" ]] && policy_state="есть"
 
   echo "Проект: ${REPO_OWNER}/${REPO_NAME}"
   echo "Установлен: $([[ -d "$INSTALL_DIR" ]] && echo 'да' || echo 'нет')"
@@ -848,6 +916,9 @@ show_status() {
   echo "Локальная версия: ${local_sha}"
   echo "Логи приложения: ${APP_LOG_FILE}"
   echo "Лог установки: ${INSTALL_LOG}"
+  echo "AWG helper: ${helper_state} (${AWG_HELPER_TARGET})"
+  echo "Helper policy: ${policy_state} (${AWG_HELPER_POLICY})"
+  echo "${BOT_USER} в docker group: ${docker_group_state}"
   if is_installed; then
     echo
     echo "Health summary:"
@@ -960,6 +1031,7 @@ install_or_reinstall_flow() {
 
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
   ensure_bot_user || die "Не удалось подготовить service пользователя."
+  migrate_off_docker_group || die "Security migration off docker group завершилась с ошибкой."
   install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось создать systemd сервис."
   persist_repo_branch
@@ -1004,6 +1076,7 @@ update_bot() {
   write_detected_awg_env
   ensure_venv_and_requirements || die "Не удалось обновить Python зависимости."
   ensure_bot_user || die "Не удалось подготовить service пользователя."
+  migrate_off_docker_group || die "Security migration off docker group завершилась с ошибкой."
   install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось обновить systemd сервис."
   persist_repo_branch
@@ -1020,7 +1093,7 @@ remove_everything() {
   systemctl daemon-reload || true
   systemctl reset-failed || true
   rm -f "$SELF_SYMLINK"
-  rm -f "$AWG_HELPER_SUDOERS" "$AWG_HELPER_TARGET"
+  rm -f "$AWG_HELPER_SUDOERS" "$AWG_HELPER_TARGET" "$AWG_HELPER_POLICY"
   rm -rf "$INSTALL_DIR" "$APP_LOG_DIR"
   rm -f "$INSTALL_LOG"
   return 0

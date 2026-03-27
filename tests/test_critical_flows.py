@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -179,6 +180,48 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
             awg_backend.remove_peer_from_awg = original_remove
             awg_backend.get_awg_peers = original_peers
 
+    async def test_revoke_user_access_partial_failure_is_retryable(self):
+        import awg_backend, database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (88, '2026-12-31T00:00:00', '2026-01-01T00:00:00')")
+            await db.execute(
+                "INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state) VALUES (88, 1, 'pub-revoke', '', '10.8.1.88', '2026-01-01T00:00:00', 'active')"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        async def fail_remove(_):
+            raise RuntimeError("temporary failure")
+
+        async def peers_with_key():
+            return [{"public_key": "pub-revoke", "ip": "10.8.1.88"}]
+
+        original_remove = awg_backend.remove_peer_from_awg
+        original_peers = awg_backend.get_awg_peers
+        awg_backend.remove_peer_from_awg = fail_remove
+        awg_backend.get_awg_peers = peers_with_key
+        try:
+            with self.assertRaises(RuntimeError):
+                await awg_backend.revoke_user_access(88)
+            sub_until = await database.get_user_subscription(88)
+            self.assertEqual(sub_until, "2026-12-31T00:00:00")
+            row = await database.fetchone("SELECT state FROM keys WHERE user_id = 88")
+            self.assertEqual(row[0], "revoke_pending")
+
+            awg_backend.get_awg_peers = lambda: asyncio.sleep(0, result=[])  # type: ignore[assignment]
+            removed = await awg_backend.revoke_user_access(88)
+            self.assertEqual(removed, 1)
+            sub_until = await database.get_user_subscription(88)
+            self.assertEqual(sub_until, "0")
+            row = await database.fetchone("SELECT COUNT(*) FROM keys WHERE user_id = 88")
+            self.assertEqual(row[0], 0)
+        finally:
+            awg_backend.remove_peer_from_awg = original_remove
+            awg_backend.get_awg_peers = original_peers
+
     async def test_save_payment_is_atomic_with_job(self):
         import database
 
@@ -277,6 +320,56 @@ peer: PUBKEY2
         self.assertEqual(peers[0]["ip"], "10.8.1.11")
         self.assertEqual(peers[1]["public_key"], "PUBKEY2")
         self.assertEqual(peers[1]["ip"], "10.8.1.12")
+
+
+class HelperPolicyTests(unittest.TestCase):
+    def test_helper_uses_root_policy_and_ignores_external_container(self):
+        import awg_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"container": "allowed-awg", "interface": "awg0"}), encoding="utf-8")
+
+            calls: list[list[str]] = []
+
+            def fake_run(args, stdin_text=None):
+                calls.append(args)
+                return "ok"
+
+            original_policy = awg_helper.HELPER_POLICY_PATH
+            original_run = awg_helper._run
+            awg_helper.HELPER_POLICY_PATH = policy_path
+            awg_helper._run = fake_run
+            argv_backup = sys.argv
+            sys.argv = ["awg_helper.py", "show"]
+            try:
+                rc = awg_helper.main()
+            finally:
+                sys.argv = argv_backup
+                awg_helper._run = original_run
+                awg_helper.HELPER_POLICY_PATH = original_policy
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(calls[0][:4], ["docker", "exec", "-i", "allowed-awg"])
+
+    def test_helper_rejects_invalid_policy_values(self):
+        import awg_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"container": "bad name", "interface": "awg0"}), encoding="utf-8")
+
+            original_policy = awg_helper.HELPER_POLICY_PATH
+            awg_helper.HELPER_POLICY_PATH = policy_path
+            argv_backup = sys.argv
+            sys.argv = ["awg_helper.py", "show"]
+            try:
+                rc = awg_helper.main()
+            finally:
+                sys.argv = argv_backup
+                awg_helper.HELPER_POLICY_PATH = original_policy
+
+            self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

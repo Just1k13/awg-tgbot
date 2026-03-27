@@ -78,15 +78,12 @@ async def start(message: types.Message):
         maybe_set_support_username(message.from_user.username)
     await message.answer(
         (
-            "🌐 <b>Свободный Интернет</b>\n\n"
-            "Здесь можно:\n"
-            "• оформить или продлить подписку\n"
-            "• получить ключ доступа\n"
-            "• скачать <b>.conf</b>\n"
-            "• посмотреть срок действия\n"
-            "• открыть инструкцию\n"
-            "• написать в поддержку\n\n"
-            "Выберите действие в меню ниже."
+            "🌐 <b>Добро пожаловать в VPN-бот</b>\n\n"
+            "Здесь всё по шагам:\n"
+            "1) оформите подписку,\n"
+            "2) откройте <b>Мои устройства</b>,\n"
+            "3) получите <code>vpn://</code> или <code>.conf</code>.\n\n"
+            "Ниже — основное меню."
         ),
         parse_mode="HTML",
         reply_markup=get_main_menu(message.from_user.id, ADMIN_ID),
@@ -110,9 +107,10 @@ async def profile(message: types.Message):
             f"🆔 <b>ID:</b> <code>{message.from_user.id}</code>\n"
             f"👤 <b>Имя:</b> {first_name}\n"
             f"✈️ <b>Telegram:</b> {escape_html(tg_username)}\n"
-            f"📌 <b>Статус:</b> {status_text}\n"
+            f"📌 <b>Подписка:</b> {status_text}\n"
             f"📅 <b>Действует до:</b> {until_text}\n"
-            f"⏳ <b>Осталось:</b> {remaining}"
+            f"⏳ <b>Осталось:</b> {remaining}\n\n"
+            "⬇️ Ниже — быстрые действия."
         ),
         parse_mode="HTML",
         reply_markup=get_profile_inline_kb(is_active),
@@ -128,9 +126,9 @@ async def my_keys(message: types.Message):
     if not configs:
         await message.answer(
             (
-                "🔑 <b>Конфиги</b>\n\n"
+                "📱 <b>Мои устройства</b>\n\n"
                 "У вас пока нет активных конфигураций.\n"
-                "Сначала оформите доступ.\n\n"
+                "Сначала оформите или продлите подписку.\n\n"
                 "Если нужна помощь — откройте инструкцию ниже."
             ),
             parse_mode="HTML",
@@ -139,8 +137,10 @@ async def my_keys(message: types.Message):
         return
     await message.answer(
         (
-            "🔑 <b>Ваши конфиги</b>\n\n"
-            "Сначала выберите устройство. После выбора бот отправит <b>ключ доступа</b> и файл <b>.conf</b> для этого устройства."
+            "📱 <b>Мои устройства</b>\n\n"
+            "Выберите устройство. Я отправлю:\n"
+            "• <code>vpn://</code> — быстрый импорт в Amnezia,\n"
+            "• <code>.conf</code> — универсальный файл для ручного импорта."
         ),
         parse_mode="HTML",
         reply_markup=get_configs_devices_kb(configs),
@@ -169,7 +169,8 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     _, device_num, cfg, vpn_key = selected
     if vpn_key and vpn_key.strip():
         await cb.message.answer(
-            f"🔐 <b>Ключ доступа для устройства {device_num}</b>\n\n<code>{escape_html(vpn_key)}</code>",
+            f"🔐 <b>vpn:// для устройства {device_num}</b>\n\n<code>{escape_html(vpn_key)}</code>\n\n"
+            "Подходит для быстрого импорта в Amnezia.",
             parse_mode="HTML",
         )
     if cfg and cfg.strip():
@@ -188,9 +189,15 @@ async def show_selected_device_config(cb: types.CallbackQuery):
         )
         return
     await cb.message.answer(
-        "Если не знаете, что делать дальше, откройте инструкцию:",
+        "Готово ✅ Если нужна помощь с импортом — откройте инструкцию:",
         reply_markup=get_instruction_inline_kb(),
     )
+
+
+@router.callback_query(F.data == "open_configs")
+async def open_configs_from_profile(cb: types.CallbackQuery):
+    await cb.answer()
+    await my_keys(cb.message)
 
 
 @router.message(F.text == BTN_GUIDE)

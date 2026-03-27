@@ -12,7 +12,7 @@ from config import (
     AWG_JC, AWG_JMAX, AWG_JMIN, AWG_PEERS_CACHE_TTL_SECONDS, AWG_PROTOCOL_VERSION, AWG_S1, AWG_S2, AWG_S3,
     AWG_S4, AWG_TRANSPORT_PROTO, CLIENT_ALLOWED_IPS, CLIENT_MTU, CONFIGS_PER_USER, DOCKER_CONTAINER,
     DOCKER_RETRIES, DOCKER_RETRY_BASE_DELAY, DOCKER_TIMEOUT_SECONDS, FIRST_CLIENT_OCTET, IGNORE_PEERS, MAX_CLIENT_OCTET,
-    PERSISTENT_KEEPALIVE, PRIMARY_DNS, SECONDARY_DNS, SERVER_IP, SERVER_NAME, SERVER_PUBLIC_KEY,
+    PENDING_KEY_TTL_SECONDS, PERSISTENT_KEEPALIVE, PRIMARY_DNS, SECONDARY_DNS, SERVER_IP, SERVER_NAME, SERVER_PUBLIC_KEY,
     VPN_SUBNET_PREFIX, WG_INTERFACE, logger,
 )
 from database import (
@@ -394,16 +394,19 @@ async def clean_orphan_awg_peers(force: bool = False) -> int:
         if public_key in protected:
             logger.info("Пропущен protected peer: %s", public_key)
             continue
-        try:
-            await remove_peer_from_awg(public_key)
-            removed += 1
-            logger.info("Удалён orphan peer: %s", public_key)
-        except Exception as e:
-            logger.error("Не удалось удалить orphan peer %s: %s", public_key, e)
+        await add_protected_peer(public_key, "orphan-quarantine")
+        logger.warning("Orphan peer помещен в quarantine: %s", public_key)
+        if force:
+            try:
+                await remove_peer_from_awg(public_key)
+                removed += 1
+                logger.info("Удалён orphan peer (force): %s", public_key)
+            except Exception as e:
+                logger.error("Не удалось удалить orphan peer %s: %s", public_key, e)
     return removed
 
 
-async def issue_subscription(user_id: int, days: int, silent: bool = False) -> datetime:
+async def issue_subscription(user_id: int, days: int, silent: bool = False, operation_id: str | None = None) -> datetime:
     async with subscription_lock:
         now = utc_now_naive()
         created_peers: list[str] = []
@@ -465,7 +468,8 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
 
                 reserved_rows: list[tuple[int, int, str, str, str, str]] = []
                 for device_num, ip in zip(next_device_nums, free_ips, strict=False):
-                    placeholder_key = f"pending:{uuid.uuid4()}"
+                    suffix = operation_id or str(uuid.uuid4())
+                    placeholder_key = f"pending:{suffix}:{uuid.uuid4()}"
                     placeholders.append(placeholder_key)
                     reserved_rows.append((user_id, device_num, placeholder_key, "", ip, now.isoformat()))
 
@@ -475,6 +479,10 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     reserved_rows,
+                )
+                await db.executemany(
+                    "UPDATE keys SET state='pending', state_updated_at=? WHERE public_key = ?",
+                    [(now.isoformat(), placeholder_key) for placeholder_key in placeholders],
                 )
             await db.commit()
         except Exception:
@@ -531,7 +539,7 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
             db = await open_db()
             try:
                 await db.execute("BEGIN IMMEDIATE")
-                await db.execute("DELETE FROM keys WHERE user_id = ? AND public_key LIKE 'pending:%'", (user_id,))
+                await db.execute("DELETE FROM keys WHERE user_id = ? AND (public_key LIKE 'pending:%' OR state='pending')", (user_id,))
                 await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (previous_sub_until, user_id))
                 await db.commit()
             finally:
@@ -572,7 +580,7 @@ async def revoke_user_access(user_id: int) -> int:
         await db.execute("BEGIN IMMEDIATE")
         if removed_keys:
             await db.executemany("DELETE FROM keys WHERE public_key = ?", [(key,) for key in removed_keys])
-        await db.execute("DELETE FROM keys WHERE user_id = ? AND public_key LIKE 'pending:%'", (user_id,))
+        await db.execute("DELETE FROM keys WHERE user_id = ? AND (public_key LIKE 'pending:%' OR state='pending' OR state='delete_pending')", (user_id,))
         await db.execute("UPDATE users SET sub_until = '0' WHERE user_id = ?", (user_id,))
         await db.commit()
     finally:
@@ -586,7 +594,7 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
     db = await open_db()
     try:
         async with db.execute(
-            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state != 'delete_pending'",
             (user_id,),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -595,18 +603,37 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
 
     public_keys = [row[0] for row in rows]
     removed_keys: list[str] = []
+    failed_remove: list[str] = []
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            "UPDATE keys SET state='delete_pending', state_updated_at=?, delete_reason='user_delete' WHERE user_id = ?",
+            (utc_now_naive().isoformat(), user_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
     for public_key in public_keys:
         try:
             await remove_peer_from_awg(public_key)
             removed_keys.append(public_key)
         except Exception as e:
             logger.error("Не удалось удалить peer %s: %s", public_key, e)
+            failed_remove.append(public_key)
+
+    if failed_remove:
+        await write_audit_log(
+            user_id,
+            "delete_user_everywhere_pending",
+            f"failed_peers={len(failed_remove)}",
+        )
+        raise RuntimeError(f"Не удалось удалить {len(failed_remove)} peer в AWG. Пользователь оставлен в состоянии delete_pending.")
 
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
-        if removed_keys:
-            await db.executemany("DELETE FROM keys WHERE public_key = ?", [(key,) for key in removed_keys])
         cur_keys = await db.execute("DELETE FROM keys WHERE user_id = ?", (user_id,))
         cur_users = await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
         await db.commit()

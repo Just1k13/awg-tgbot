@@ -145,11 +145,13 @@ async def admin_clean_orphans(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
         return
     orphans = await get_orphan_awg_peers()
-    await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans"})
+    await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans", "orphans": len(orphans)})
     await cb.message.answer(
         (
-            "⚠️ <b>Подтвердите очистку orphan peer</b>\n\n"
-            f"Будет удалено peer: <b>{len(orphans)}</b>"
+            "⚠️ <b>Проверка orphan peer</b>\n\n"
+            f"Найдено: <b>{len(orphans)}</b>\n"
+            "Первый этап: peer будут помещены в quarantine (без удаления).\n"
+            "Force-удаление выполняйте только после повторной проверки."
         ),
         parse_mode="HTML",
         reply_markup=get_admin_confirm_kb("clean_orphans"),
@@ -168,9 +170,11 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
         return
     try:
         removed = await clean_orphan_awg_peers(force=False)
-        await write_audit_log(ADMIN_ID, "clean_orphans", f"removed={removed}")
+        await write_audit_log(ADMIN_ID, "clean_orphans_quarantine", f"removed={removed}")
         await cb.message.answer(
-            f"🧹 <b>Очистка orphan peer завершена</b>\n\nУдалено peer: <b>{removed}</b>",
+            "🧹 <b>Orphan-проверка завершена</b>\n\n"
+            "Peer помечены как quarantine protected.\n"
+            f"Физически удалено (force only): <b>{removed}</b>",
             parse_mode="HTML",
         )
         await cb.answer("Очистка завершена")
@@ -344,7 +348,7 @@ async def confirm_delete_user(cb: types.CallbackQuery):
         await cb.answer("Готово")
     except Exception as e:
         logger.exception("Ошибка confirm_delete_user: %s", e)
-        await cb.answer("❌ Не удалось удалить пользователя", show_alert=True)
+        await cb.answer(f"❌ Не удалось удалить пользователя: {str(e)[:120]}", show_alert=True)
 
 
 @router.callback_query(F.data == "cancel_delete_user")

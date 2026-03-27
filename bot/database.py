@@ -1,5 +1,7 @@
 
+import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +101,9 @@ async def init_db() -> None:
         await ensure_column(db, "keys", "psk_key", "TEXT")
         await ensure_column(db, "keys", "vpn_key", "TEXT")
         await ensure_column(db, "keys", "client_private_key", "TEXT")
+        await ensure_column(db, "keys", "state", "TEXT NOT NULL DEFAULT 'active'")
+        await ensure_column(db, "keys", "state_updated_at", "TEXT")
+        await ensure_column(db, "keys", "delete_reason", "TEXT")
 
         await db.execute(
             """
@@ -118,6 +123,9 @@ async def init_db() -> None:
         await ensure_column(db, "payments", "provisioned_until", "TEXT")
         await ensure_column(db, "payments", "error_message", "TEXT")
         await ensure_column(db, "payments", "raw_payload_json", "TEXT")
+        await ensure_column(db, "payments", "updated_at", "TEXT")
+        await ensure_column(db, "payments", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        await ensure_column(db, "payments", "last_attempt_at", "TEXT")
 
         await db.execute(
             """
@@ -162,12 +170,42 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS provisioning_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_id TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'received',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                lock_token TEXT,
+                last_error TEXT,
+                next_retry_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS callback_guards (
+                guard_key TEXT PRIMARY KEY,
+                action_scope TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub_until ON users(sub_until)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_user_id ON keys(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_ip ON keys(ip)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created_at ON payments(user_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_retry ON provisioning_jobs(status, next_retry_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_state ON keys(state)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guards_expires ON callback_guards(expires_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
 
         await db.commit()
@@ -293,7 +331,7 @@ async def get_reserved_ips_from_db() -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
+          AND state != 'delete_pending'
         """
     )
     used: set[int] = set()
@@ -313,7 +351,7 @@ async def get_reserved_ips_from_db_conn(db: aiosqlite.Connection) -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
+          AND state != 'delete_pending'
         """
     ) as cursor:
         rows = await cursor.fetchall()
@@ -336,6 +374,7 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
         JOIN users u ON u.user_id = k.user_id
         WHERE k.user_id = ?
           AND k.public_key NOT LIKE 'pending:%'
+          AND k.state = 'active'
           AND k.ip IS NOT NULL
           AND TRIM(k.ip) != ''
           AND u.sub_until != '0'
@@ -348,8 +387,12 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
 
     result: list[tuple[int, int, str, str]] = []
     for key_id, device_num, ip, client_private_key, public_key, psk_key in rows:
-        private_key = decrypt_text(client_private_key)
-        psk = decrypt_text(psk_key)
+        try:
+            private_key = decrypt_text(client_private_key)
+            psk = decrypt_text(psk_key)
+        except Exception as e:
+            logger.error("Пропуск key_id=%s из-за ошибки расшифровки: %s", key_id, e)
+            continue
         if not private_key or not public_key or not psk or not ip:
             continue
         config = build_client_config(private_key, ip, psk)
@@ -382,6 +425,7 @@ async def save_payment(
     status: str = "received",
     raw_payload_json: str | None = None,
 ) -> None:
+    now_iso = utc_now_naive().isoformat()
     await execute(
         """
         INSERT INTO payments (
@@ -394,9 +438,13 @@ async def save_payment(
             payment_method,
             status,
             raw_payload_json,
-            created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(telegram_payment_charge_id) DO NOTHING
+            created_at,
+            updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(telegram_payment_charge_id) DO UPDATE SET
+            provider_payment_charge_id = COALESCE(excluded.provider_payment_charge_id, provider_payment_charge_id),
+            raw_payload_json = COALESCE(excluded.raw_payload_json, raw_payload_json),
+            updated_at = excluded.updated_at
         """,
         (
             telegram_payment_charge_id,
@@ -408,8 +456,17 @@ async def save_payment(
             payment_method,
             status,
             raw_payload_json,
-            utc_now_naive().isoformat(),
+            now_iso,
+            now_iso,
         ),
+    )
+    await execute(
+        """
+        INSERT INTO provisioning_jobs (payment_id, user_id, payload, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(payment_id) DO NOTHING
+        """,
+        (telegram_payment_charge_id, user_id, payload, status, now_iso, now_iso),
     )
 
 
@@ -420,11 +477,14 @@ async def claim_payment_for_provisioning(telegram_payment_charge_id: str) -> boo
         cursor = await db.execute(
             """
             UPDATE payments
-            SET status = 'provisioning'
+            SET status = 'provisioning',
+                updated_at = ?,
+                attempt_count = attempt_count + 1,
+                last_attempt_at = ?
             WHERE telegram_payment_charge_id = ?
-              AND status = 'received'
+              AND status IN ('received', 'needs_repair', 'failed')
             """,
-            (telegram_payment_charge_id,),
+            (utc_now_naive().isoformat(), utc_now_naive().isoformat(), telegram_payment_charge_id),
         )
         await db.commit()
         return (cursor.rowcount or 0) == 1
@@ -438,17 +498,128 @@ async def update_payment_status(
     provisioned_until: str | None = None,
     error_message: str | None = None,
 ) -> None:
+    now_iso = utc_now_naive().isoformat()
     await execute(
         """
         UPDATE payments
         SET status = ?,
             provisioned_until = COALESCE(?, provisioned_until),
             error_message = ?,
-            provider_payment_charge_id = provider_payment_charge_id
+            provider_payment_charge_id = provider_payment_charge_id,
+            updated_at = ?
         WHERE telegram_payment_charge_id = ?
         """,
-        (status, provisioned_until, error_message, telegram_payment_charge_id),
+        (status, provisioned_until, error_message, now_iso, telegram_payment_charge_id),
     )
+    await execute(
+        """
+        UPDATE provisioning_jobs
+        SET status = ?,
+            last_error = ?,
+            updated_at = ?,
+            next_retry_at = CASE WHEN ? IN ('failed', 'needs_repair') THEN ? ELSE NULL END
+        WHERE payment_id = ?
+        """,
+        (status, error_message, now_iso, status, now_iso, telegram_payment_charge_id),
+    )
+
+
+async def lock_provisioning_job(payment_id: str, lock_token: str) -> bool:
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            """
+            UPDATE provisioning_jobs
+            SET lock_token = ?, status = 'provisioning', attempt_count = attempt_count + 1, updated_at = ?
+            WHERE payment_id = ?
+              AND status IN ('received', 'failed', 'needs_repair')
+              AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            """,
+            (lock_token, utc_now_naive().isoformat(), payment_id, utc_now_naive().isoformat()),
+        )
+        await db.commit()
+        return (cursor.rowcount or 0) == 1
+    finally:
+        await db.close()
+
+
+async def release_provisioning_job(payment_id: str, lock_token: str, status: str, error_message: str | None = None) -> None:
+    await execute(
+        """
+        UPDATE provisioning_jobs
+        SET lock_token = NULL,
+            status = ?,
+            last_error = ?,
+            updated_at = ?,
+            next_retry_at = CASE WHEN ? IN ('failed', 'needs_repair') THEN ? ELSE NULL END
+        WHERE payment_id = ? AND lock_token = ?
+        """,
+        (status, error_message, utc_now_naive().isoformat(), status, utc_now_naive().isoformat(), payment_id, lock_token),
+    )
+
+
+async def get_repairable_payments(limit: int = 20) -> list[tuple[str, int, str]]:
+    return await fetchall(
+        """
+        SELECT payment_id, user_id, payload
+        FROM provisioning_jobs
+        WHERE status IN ('failed', 'needs_repair', 'received')
+          AND (next_retry_at IS NULL OR next_retry_at <= ?)
+        ORDER BY updated_at ASC
+        LIMIT ?
+        """,
+        (utc_now_naive().isoformat(), limit),
+    )
+
+
+async def cleanup_stale_pending_keys(max_age_seconds: int) -> int:
+    cutoff = utc_now_naive().timestamp() - max_age_seconds
+    rows = await fetchall(
+        "SELECT id, created_at FROM keys WHERE public_key LIKE 'pending:%' OR state='pending'",
+    )
+    stale_ids: list[int] = []
+    for key_id, created_at in rows:
+        try:
+            if datetime.fromisoformat(created_at).timestamp() <= cutoff:  # type: ignore[name-defined]
+                stale_ids.append(int(key_id))
+        except Exception:
+            stale_ids.append(int(key_id))
+    if not stale_ids:
+        return 0
+    await execute(
+        f"DELETE FROM keys WHERE id IN ({','.join(['?'] * len(stale_ids))})",
+        tuple(stale_ids),
+    )
+    return len(stale_ids)
+
+
+def _guard_digest(scope: str, actor_id: int, payload: str) -> str:
+    raw = f"{scope}:{actor_id}:{payload}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+async def persistent_guard_hit(scope: str, actor_id: int, payload: str, ttl_seconds: int) -> bool:
+    key = _guard_digest(scope, actor_id, payload)
+    now = utc_now_naive()
+    expires = now.timestamp() + ttl_seconds
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute("DELETE FROM callback_guards WHERE expires_at <= ?", (now.isoformat(),))
+        async with db.execute("SELECT guard_key FROM callback_guards WHERE guard_key = ?", (key,)) as cursor:
+            row = await cursor.fetchone()
+        if row:
+            await db.commit()
+            return True
+        await db.execute(
+            "INSERT INTO callback_guards (guard_key, action_scope, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (key, scope, now.isoformat(), datetime.fromtimestamp(expires).isoformat()),  # type: ignore[name-defined]
+        )
+        await db.commit()
+        return False
+    finally:
+        await db.close()
 
 
 async def write_audit_log(user_id: int, action: str, details: str = "") -> None:

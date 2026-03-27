@@ -524,10 +524,12 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                                 config = '',
                                 vpn_key = '',
                                 client_private_key = ?,
-                                psk_key = ?
+                                psk_key = ?,
+                                state = 'active',
+                                state_updated_at = ?
                             WHERE public_key = ? AND ip = ?
                             """,
-                            (public_key, private_key_enc, psk_key_enc, placeholder_key, ip),
+                            (public_key, private_key_enc, psk_key_enc, utc_now_naive().isoformat(), placeholder_key, ip),
                         )
                     await db.commit()
                 finally:

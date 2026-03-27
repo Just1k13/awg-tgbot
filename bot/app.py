@@ -2,7 +2,7 @@ import asyncio
 from time import monotonic
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router, types
-from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.exceptions import TelegramAPIError, TelegramUnauthorizedError
 
 from awg_backend import (
     bootstrap_protected_peers,
@@ -125,6 +125,10 @@ async def main():
         logger.error("Telegram API вернул Unauthorized. Проверь API_TOKEN в .env и перевыпусти токен в BotFather при необходимости.")
         await bot.session.close()
         raise RuntimeError("Неверный API_TOKEN") from e
+    except TelegramAPIError as e:
+        logger.error("Не удалось выполнить стартовую проверку Telegram API: %s", e)
+        await bot.session.close()
+        raise RuntimeError("Нет доступа к Telegram API (сеть/фаервол/прокси).") from e
 
     await ensure_db_ready()
 

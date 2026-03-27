@@ -394,7 +394,16 @@ grep -E '^(SERVER_NAME|SERVER_IP|SERVER_PUBLIC_KEY|PUBLIC_HOST)=' /opt/amnezia/b
 - `DOCKER_TIMEOUT_SECONDS`
 - `AWG_PEERS_CACHE_TTL_SECONDS`
 - `CLEANUP_INTERVAL_SECONDS`
+- `PENDING_KEY_TTL_SECONDS`
+- `PAYMENT_RETRY_DELAY_SECONDS`
 - `IGNORE_PEERS`
+
+### Ротация секретов шифрования
+
+- `ENCRYPTION_OLD_SECRETS` — список старых секретов через запятую (для чтения старых зашифрованных записей);
+- `ENCRYPTION_SECRET_FALLBACK` — fallback-секрет для аварийного старта (используется только если пуст `ENCRYPTION_SECRET`).
+
+Пример шаблонов: `bot/.env.example` (используется installer) и корневой `.env.example` (для локальной разработки).
 
 ---
 
@@ -533,8 +542,10 @@ cp bot/.env.example bot/.env
 
 - нет встроенного развёртывания самого AWG — ожидается уже готовый сервер;
 - нет штатного devcontainer / `.devcontainer` конфигуратора;
-- нет тестов и CI внутри репозитория;
-- сервис запускается от `root`, потому что проект тесно интегрирован с Docker и системным окружением сервера.
+- есть только базовые тесты (`tests/test_critical_flows.py`), полноценного покрытия нет;
+- CI не настроен;
+- нужен доступ к Docker и уже работающему AWG-контейнеру;
+- production-запуск выполняется от отдельного системного пользователя `awg-bot` (не `root`), но установка/обновление требуют root.
 
 ---
 
@@ -544,6 +555,7 @@ cp bot/.env.example bot/.env
 - для этого проекта endpoint должен быть только по внешнему IPv4; домены и hostname как endpoint не используются;
 - `SERVER_NAME` не участвует в сборке endpoint и нужен только как отображаемое имя VPN;
 - если бот отвечает `Unauthorized`, перевыпусти токен в BotFather и обнови `.env`;
+- если на старте ошибка доступа к Telegram API, проверь исходящий доступ к `api.telegram.org:443` (фаервол/маршрутизация/DNS);
 - `ENCRYPTION_SECRET` должен быть сохранён и защищён;
 - при переносе БД на новый сервер без старого `ENCRYPTION_SECRET` расшифровка секретов не сработает;
 - installer ждёт освобождения `apt/dpkg lock`, если пакетный менеджер занят.

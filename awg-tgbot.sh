@@ -809,7 +809,13 @@ startup_state_message() {
 print_update_status_line() {
   [[ "$STATE_BOT_INSTALLED" == "1" ]] || return 0
   case "$UPDATE_STATUS" in
-    available) echo "Обновление: доступно" ;;
+    available)
+      echo
+      echo "[!] ДОСТУПНО ОБНОВЛЕНИЕ"
+      echo "    Локальная версия: ${UPDATE_LOCAL_SHA:0:12}"
+      echo "    Новая версия:    ${UPDATE_REMOTE_SHA:0:12}"
+      echo "    Открой пункт меню: 3) Обновить"
+      ;;
     current) echo "Обновление: версия актуальна" ;;
     unknown) echo "Обновление: не удалось проверить" ;;
   esac
@@ -860,7 +866,6 @@ print_startup_summary() {
   if [[ "$STATE_BOT_RESIDUAL" == "1" && "$STATE_BOT_INSTALLED" != "1" ]]; then
     echo "Остаточные файлы: найдены"
   fi
-  echo "Состояние: $(startup_state_message)"
   if [[ "$STARTUP_STATE_CODE" == "awg_no_bot_no" ]]; then
     echo "Сначала установи и запусти AWG, затем вернись к установке бота."
   fi

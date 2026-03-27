@@ -73,6 +73,9 @@ STARTUP_STATE_CODE="unknown"
 UPDATE_STATUS="not_applicable"
 UPDATE_REMOTE_SHA=""
 UPDATE_LOCAL_SHA=""
+UPDATE_CHECK_TS=0
+UPDATE_CACHE_TTL=15
+UPDATE_CACHE_BRANCH=""
 
 print_line() { printf '%s\n' "------------------------------------------------------------"; }
 info() { printf '[*] %s\n' "$*" >&2; }
@@ -84,7 +87,7 @@ trap 'printf "[!] Ошибка на строке %s. Подробности: %s\
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     echo "Запусти скрипт от root: sudo bash awg-tgbot.sh"
-    echo "Или одной командой: curl -fsSL ${RAW_BASE_URL}/awg-tgbot.sh | sudo bash"
+    echo "Или одной командой: curl -fsSL ${RAW_BASE_URL}/awg-tgbot.sh | sudo REPO_BRANCH=${REPO_BRANCH} bash -s --"
     exit 1
   fi
 }
@@ -280,6 +283,9 @@ set_repo_branch() {
   RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
   TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
   COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
+  UPDATE_CHECK_TS=0
+  UPDATE_CACHE_BRANCH=""
+  UPDATE_REMOTE_SHA=""
   return 0
 }
 
@@ -827,16 +833,34 @@ detect_install_state() {
 }
 
 refresh_update_status_quiet() {
+  local now_ts=0
   UPDATE_STATUS="not_applicable"
-  UPDATE_REMOTE_SHA=""
-  UPDATE_LOCAL_SHA=""
+  UPDATE_LOCAL_SHA="$(get_local_sha)"
 
   if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
+    UPDATE_REMOTE_SHA=""
+    UPDATE_CHECK_TS=0
+    UPDATE_CACHE_BRANCH=""
     return 0
   fi
 
-  UPDATE_LOCAL_SHA="$(get_local_sha)"
+  now_ts="${EPOCHSECONDS:-0}"
+  if [[ "$UPDATE_CHECK_TS" -gt 0 && "$UPDATE_CACHE_BRANCH" == "$REPO_BRANCH" && "$now_ts" -gt 0 ]]; then
+    if (( now_ts - UPDATE_CHECK_TS < UPDATE_CACHE_TTL )); then
+      if [[ -z "$UPDATE_REMOTE_SHA" ]]; then
+        UPDATE_STATUS="unknown"
+      elif [[ -n "$UPDATE_LOCAL_SHA" && "$UPDATE_REMOTE_SHA" == "$UPDATE_LOCAL_SHA" ]]; then
+        UPDATE_STATUS="current"
+      else
+        UPDATE_STATUS="available"
+      fi
+      return 0
+    fi
+  fi
+
   UPDATE_REMOTE_SHA="$(fetch_remote_sha)"
+  UPDATE_CACHE_BRANCH="$REPO_BRANCH"
+  UPDATE_CHECK_TS="$now_ts"
 
   if [[ -z "$UPDATE_REMOTE_SHA" ]]; then
     UPDATE_STATUS="unknown"
@@ -1301,24 +1325,23 @@ show_status() {
 }
 
 check_updates() {
-  local remote_sha local_sha has_updates=0
-  remote_sha="$(fetch_remote_sha)"
-  local_sha="$(get_local_sha)"
+  detect_install_state
+  refresh_update_status_quiet
   print_line
   echo "Ветка : ${REPO_BRANCH}"
-  echo "Remote: ${remote_sha:-не удалось получить}"
-  echo "Local : ${local_sha:-нет локальной версии}"
-  if [[ -n "$remote_sha" && -n "$local_sha" && "$remote_sha" == "$local_sha" ]]; then
-    ok "Обновления не найдены. Установлена актуальная версия."
-  else
-    has_updates=1
-    warn "Найдены обновления или локальная версия не зафиксирована."
-    if has_tty && is_installed; then
-      if confirm "Обновить сейчас?" "Y"; then
-        update_bot 1
-      fi
-    fi
-  fi
+  echo "Remote: ${UPDATE_REMOTE_SHA:-не удалось получить}"
+  echo "Local : ${UPDATE_LOCAL_SHA:-нет локальной версии}"
+  case "$UPDATE_STATUS" in
+    current)
+      ok "Обновления не найдены. Установлена актуальная версия."
+      ;;
+    available)
+      warn "Доступно обновление. Используй пункт меню «Обновить» или команду: sudo awg-tgbot update"
+      ;;
+    unknown|*)
+      warn "Не удалось проверить обновления."
+      ;;
+  esac
   print_line
   return 0
 }
@@ -1842,6 +1865,8 @@ watch_logs_live() {
 show_logs_doctor() {
   local active="unknown" enabled="unknown"
   local journal_hits="" bot_hits=""
+  detect_install_state
+  refresh_update_status_quiet
   clear_if_tty
   screen_line
   screen_echo "Что не так?"

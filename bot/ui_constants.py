@@ -10,6 +10,8 @@ CB_BUY_30 = "buy_30"
 CB_SHOW_INSTRUCTION = "show_instruction"
 CB_SHOW_BUY_MENU = "show_buy_menu"
 CB_CONFIG_DEVICE_PREFIX = "config_device_"
+CB_CONFIG_CONF_PREFIX = "config_conf_"
+CB_OPEN_CONFIGS = "open_configs"
 
 CB_ADMIN_LIST = "admin_list"
 CB_ADMIN_STATS = "admin_stats"

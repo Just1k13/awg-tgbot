@@ -28,7 +28,9 @@ from ui_constants import (
     BTN_GUIDE,
     BTN_PROFILE,
     BTN_SUPPORT,
+    CB_CONFIG_CONF_PREFIX,
     CB_CONFIG_DEVICE_PREFIX,
+    CB_OPEN_CONFIGS,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
 )
@@ -85,13 +87,18 @@ async def _send_configs_menu(target, user: types.User):
     await target.answer(
         (
             "🔑 <b>Конфиги</b>\n\n"
-            "Выберите устройство. Я отправлю:\n"
-            "• <code>vpn://</code> — быстрый импорт в Amnezia,\n"
-            "• <code>.conf</code> — универсальный файл для ручного импорта."
+            "Выберите устройство. Я сначала отправлю:\n"
+            "• <code>vpn://</code> — быстрый импорт в Amnezia.\n\n"
+            "Файл <code>.conf</code> можно запросить отдельно для опытных пользователей."
         ),
         parse_mode="HTML",
         reply_markup=get_configs_devices_kb(configs),
     )
+
+
+async def _find_user_config_by_key_id(user_id: int, key_id: int):
+    configs = await get_user_keys(user_id)
+    return next((item for item in configs if item[0] == key_id), None)
 
 
 @router.callback_query(F.data == "noop")
@@ -166,22 +173,48 @@ async def show_selected_device_config(cb: types.CallbackQuery):
         await cb.answer("Некорректный выбор устройства", show_alert=True)
         return
 
-    configs = await get_user_keys(cb.from_user.id)
-    selected = next((item for item in configs if item[0] == key_id), None)
+    selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
     if not selected:
         await cb.message.answer(
-            "Не удалось найти конфиг для выбранного устройства. Попробуйте открыть раздел «Конфиги» ещё раз.",
+            "Не удалось найти ключ для выбранного устройства. Попробуйте открыть раздел «Конфиги» ещё раз.",
             reply_markup=get_instruction_inline_kb(),
         )
         return
 
-    _, device_num, cfg, vpn_key = selected
+    _, device_num, _cfg, vpn_key = selected
     if vpn_key and vpn_key.strip():
         await cb.message.answer(
             f"🔐 <b>vpn:// для устройства {device_num}</b>\n\n<code>{escape_html(vpn_key)}</code>\n\n"
             "Подходит для быстрого импорта в Amnezia.",
             parse_mode="HTML",
+            reply_markup=get_config_result_kb(key_id),
         )
+    else:
+        await cb.message.answer(
+            "Для выбранного устройства не удалось собрать ключ импорта. Напишите в поддержку или попросите администратора перевыдать доступ.",
+            reply_markup=get_instruction_inline_kb(),
+        )
+
+
+@router.callback_query(F.data.startswith(CB_CONFIG_CONF_PREFIX))
+async def send_selected_device_conf(cb: types.CallbackQuery):
+    await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    await cb.answer()
+    try:
+        key_id = int(cb.data.removeprefix(CB_CONFIG_CONF_PREFIX))
+    except ValueError:
+        await cb.answer("Некорректный запрос .conf", show_alert=True)
+        return
+
+    selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
+    if not selected:
+        await cb.message.answer(
+            "Не удалось найти .conf для выбранного устройства. Откройте раздел «Конфиги» ещё раз.",
+            reply_markup=get_instruction_inline_kb(),
+        )
+        return
+
+    _, device_num, cfg, _vpn_key = selected
     if cfg and cfg.strip():
         await cb.message.answer_document(
             types.BufferedInputFile(
@@ -191,19 +224,18 @@ async def show_selected_device_config(cb: types.CallbackQuery):
             caption=f"📄 Конфиг для устройства {device_num}",
             parse_mode="HTML",
         )
+        await cb.message.answer(
+            "Файл отправлен ✅ Можно вернуться к списку устройств:",
+            reply_markup=get_config_result_kb(key_id),
+        )
     else:
         await cb.message.answer(
             "Для выбранного устройства не удалось собрать .conf. Напишите в поддержку или попросите администратора перевыдать доступ.",
             reply_markup=get_instruction_inline_kb(),
         )
-        return
-    await cb.message.answer(
-        "Готово ✅ Можно вернуться к списку устройств или открыть инструкцию:",
-        reply_markup=get_config_result_kb(),
-    )
 
 
-@router.callback_query(F.data == "open_configs")
+@router.callback_query(F.data == CB_OPEN_CONFIGS)
 async def open_configs_from_profile(cb: types.CallbackQuery):
     await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
     if cb.from_user.id == ADMIN_ID:

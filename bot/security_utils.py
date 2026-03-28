@@ -80,6 +80,7 @@ def decrypt_text(value: str | None) -> str:
             return _decrypt_v1(token)
         token = value.removeprefix("enc:")
         return _decrypt_v1(token)
-    except Exception:
-        logger.error("Не удалось расшифровать значение: invalid token (value=%s...)", value[:24])
+    except Exception as e:
+        err_type = type(e).__name__
+        logger.error("Не удалось расшифровать значение: invalid token (error_type=%s)", err_type)
         raise RuntimeError("Ошибка расшифровки конфигурации. Требуется проверка ENCRYPTION_SECRET/ENCRYPTION_OLD_SECRETS.")

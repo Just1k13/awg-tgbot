@@ -58,7 +58,7 @@ async def notify_user_subscription_granted(bot: Bot, user_id: int, days: int, ne
                 "🎁 <b>Вам выдан доступ</b>\n\n"
                 f"⏳ <b>Срок:</b> +{days} дн.\n"
                 f"📅 <b>Действует до:</b> {new_until.strftime('%d.%m.%Y %H:%M')}\n\n"
-                "🔑 Конфиги доступны в разделе <b>Конфиги</b>."
+                "🔑 Подключение доступно в разделе <b>Подключение</b>."
             ),
             parse_mode="HTML",
         )
@@ -89,7 +89,7 @@ async def build_stats_text() -> str:
         f"🔑 Всего ключей в БД: <b>{total_keys}</b>\n"
         f"🆕 Новых за 24ч: <b>{new_24h}</b>\n"
         f"🧩 Свободных IP: <b>{free_slots}</b>\n"
-        f"👻 Orphan peer: <b>{len(orphans)}</b>"
+        f"👻 Потерянных peer: <b>{len(orphans)}</b>"
     )
 
 
@@ -190,15 +190,15 @@ async def admin_sync_awg(cb: types.CallbackQuery):
         orphans = await get_orphan_awg_peers()
         details = []
         for peer in orphans[:20]:
-            details.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'no ip'}")
-        extra = "\n".join(details) if details else "Нет orphan peer."
+            details.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'IP не указан'}")
+        extra = "\n".join(details) if details else "Потерянных peer не найдено."
         text = (
             "🔄 <b>Проверка синхронизации AWG ↔ БД</b>\n\n"
             f"🗄 БД существует: <b>{'да' if db_info['exists'] else 'нет'}</b>\n"
             f"📋 Таблица keys: <b>{'да' if db_info['keys_table_exists'] else 'нет'}</b>\n"
             f"🧱 Нужные колонки: <b>{'да' if db_info['has_required_columns'] else 'нет'}</b>\n"
             f"✅ Валидных ключей в БД: <b>{db_info['valid_keys_count']}</b>\n"
-            f"👻 Orphan peer в AWG: <b>{len(orphans)}</b>\n\n"
+            f"👻 Потерянных peer в AWG: <b>{len(orphans)}</b>\n\n"
             f"{extra}"
         )
         await cb.message.answer(text, parse_mode="HTML")
@@ -217,9 +217,9 @@ async def admin_clean_orphans(cb: types.CallbackQuery):
     await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans", "orphans": len(orphans)})
     await cb.message.answer(
         (
-            "⚠️ <b>Проверка orphan peer</b>\n\n"
-            f"Найдено: <b>{len(orphans)}</b>\n"
-            "Первый этап: peer будут помещены в quarantine (без удаления).\n"
+            "⚠️ <b>Проверка потерянных peer</b>\n\n"
+            f"Найдено потерянных peer: <b>{len(orphans)}</b>\n"
+            "Первый этап: peer будут помещены в карантин (без удаления).\n"
             "Force-удаление выполняйте только после повторной проверки."
         ),
         parse_mode="HTML",
@@ -241,8 +241,8 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
         removed = await clean_orphan_awg_peers(force=False)
         await write_audit_log(ADMIN_ID, "clean_orphans_quarantine", f"removed={removed}")
         await cb.message.answer(
-            "🧹 <b>Orphan-проверка завершена</b>\n\n"
-            "Peer помечены как quarantine protected.\n"
+            "🧹 <b>Проверка потерянных peer завершена</b>\n\n"
+            "Peer помечены как защищённые (карантин).\n"
             f"Физически удалено (force only): <b>{removed}</b>",
             parse_mode="HTML",
         )
@@ -255,7 +255,7 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
 @router.callback_query(F.data == "cancel_clean_orphans")
 async def cancel_clean_orphans(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans")
-    await cb.message.answer("❌ Очистка orphan peer отменена")
+    await cb.message.answer("❌ Очистка потерянных peer отменена")
     await cb.answer("Отменено")
 
 
@@ -582,17 +582,17 @@ async def orphans_cmd(message: types.Message):
     try:
         orphans = await get_orphan_awg_peers()
         if not orphans:
-            await message.answer("✅ Orphan peer не найдено.")
+            await message.answer("✅ Потерянные peer не найдены.")
             return
-        lines = [f"👻 <b>Orphan peer ({len(orphans)})</b>\n"]
+        lines = [f"👻 <b>Потерянные peer ({len(orphans)})</b>\n"]
         for peer in orphans[:50]:
-            lines.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'no ip'}")
+            lines.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'IP не указан'}")
         if len(orphans) > 50:
             lines.append(f"\n... и ещё {len(orphans) - 50}")
         await message.answer("\n".join(lines), parse_mode="HTML")
     except Exception as e:
         logger.exception("Ошибка /orphans: %s", e)
-        await message.answer("❌ Не удалось получить orphan peer.")
+        await message.answer("❌ Не удалось получить список потерянных peer.")
 
 
 @router.message(Command("audit"), IsAdmin())
@@ -633,7 +633,7 @@ async def sync_awg_cmd(message: types.Message):
                 f"📋 Таблица keys: <b>{'да' if db_info['keys_table_exists'] else 'нет'}</b>\n"
                 f"🧱 Нужные колонки: <b>{'да' if db_info['has_required_columns'] else 'нет'}</b>\n"
                 f"✅ Валидных ключей в БД: <b>{db_info['valid_keys_count']}</b>\n"
-                f"👻 Orphan peer в AWG: <b>{len(orphans)}</b>"
+                f"👻 Потерянных peer в AWG: <b>{len(orphans)}</b>"
             ),
             parse_mode="HTML",
         )
@@ -653,9 +653,9 @@ async def clean_orphans_cmd(message: types.Message):
         )
         await message.answer(
             (
-                "⚠️ <b>Подтвердите orphan cleanup (quarantine)</b>\n\n"
-                f"Найдено orphan peer: <b>{len(orphans)}</b>\n"
-                "На этом шаге peer только помечаются как quarantine и не удаляются физически.\n"
+                "⚠️ <b>Подтвердите очистку потерянных peer (карантин)</b>\n\n"
+                f"Найдено потерянных peer: <b>{len(orphans)}</b>\n"
+                "На этом шаге peer только помечаются как карантин и не удаляются физически.\n"
                 "Для физического удаления используйте отдельную команду <code>/clean_orphans_force</code> после проверки."
             ),
             parse_mode="HTML",
@@ -663,7 +663,7 @@ async def clean_orphans_cmd(message: types.Message):
         )
     except Exception as e:
         logger.exception("Ошибка /clean_orphans: %s", e)
-        await message.answer("❌ Не удалось подготовить очистку orphan peer.")
+        await message.answer("❌ Не удалось подготовить очистку потерянных peer.")
 
 
 @router.message(Command("clean_orphans_force"), IsAdmin())
@@ -674,13 +674,13 @@ async def clean_orphans_force_cmd(message: types.Message):
         await message.answer(
             (
                 "🧨 <b>Force-cleanup завершён</b>\n\n"
-                f"Физически удалено orphan peer: <b>{removed}</b>"
+                f"Физически удалено потерянных peer: <b>{removed}</b>"
             ),
             parse_mode="HTML",
         )
     except Exception as e:
         logger.exception("Ошибка /clean_orphans_force: %s", e)
-        await message.answer("❌ Не удалось выполнить принудительную очистку orphan peer.")
+        await message.answer("❌ Не удалось выполнить принудительную очистку потерянных peer.")
 
 
 @router.message(Command("backup"), IsAdmin())
@@ -754,7 +754,7 @@ async def health_cmd(message: types.Message):
     helper_failures = await get_metric("awg_helper_failures")
     await message.answer(
         (
-            "🩺 <b>Health report</b>\n\n"
+            "🩺 <b>Отчёт о состоянии</b>\n\n"
             f"jobs.received=<b>{stats['received']}</b>\n"
             f"jobs.provisioning=<b>{stats['provisioning']}</b>\n"
             f"jobs.needs_repair=<b>{stats['needs_repair']}</b>\n"

@@ -32,6 +32,7 @@ from database import (
     write_audit_log,
 )
 from helpers import utc_now_naive
+from keyboards import get_post_payment_kb
 from ui_constants import CB_BUY_30, CB_BUY_7
 
 router = Router()
@@ -169,12 +170,18 @@ async def success_pay(message: types.Message):
             await message.answer(
                 (
                     "🎉 <b>Оплата подтверждена</b>\n\n"
-                    "Подписка активирована. Откройте раздел <b>🔑 Конфиги</b>, чтобы получить доступ."
+                    "Подписка активирована ✅\n"
+                    "Следующий шаг — получите подключение и импортируйте его в Amnezia."
                 ),
                 parse_mode="HTML",
+                reply_markup=get_post_payment_kb(),
             )
         else:
-            await message.answer("⏳ Платёж принят. Выдача доступа выполняется в фоне, это обычно занимает до минуты.")
+            await message.answer(
+                "⏳ Платёж принят. Выдача доступа выполняется в фоне, это обычно занимает до минуты."
+                "\n\nКогда всё будет готово, нажмите «🔑 Получить подключение».",
+                reply_markup=get_post_payment_kb(),
+            )
     except Exception as e:
         logger.exception("Ошибка обработки оплаты: %s", e)
         retry_at = (utc_now_naive() + timedelta(seconds=PAYMENT_RETRY_DELAY_SECONDS)).isoformat()
@@ -235,7 +242,7 @@ async def _notify_admin_stuck(bot: Bot | None, payment_id: str, user_id: int, re
         await bot.send_message(
             ADMIN_ID,
             (
-                "⚠️ <b>Payment stuck_manual</b>\n\n"
+                "⚠️ <b>Платёж требует ручной проверки</b>\n\n"
                 f"payment_id=<code>{payment_id}</code>\n"
                 f"user_id=<code>{user_id}</code>\n"
                 f"reason={reason[:200]}"

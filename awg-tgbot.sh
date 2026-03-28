@@ -880,6 +880,31 @@ startup_state_message() {
   esac
 }
 
+print_recommended_actions() {
+  echo "Что делать дальше:"
+  case "$STARTUP_STATE_CODE" in
+    awg_yes_bot_yes)
+      echo "• Открой «Статус», чтобы проверить сервис и ветку."
+      echo "• Если доступно обновление — запусти «Обновить»."
+      echo "• Если есть проблемы — открой «Логи» → «Что не так?»."
+      ;;
+    awg_yes_bot_no)
+      echo "• AWG найден: можно запускать установку бота."
+      echo "• Выбери «Автоматическую установку», если AWG стандартный."
+      echo "• Выбери «Ручную установку», если нужно явно задать параметры."
+      ;;
+    awg_no_bot_yes)
+      echo "• Проверь Docker и доступность контейнера AWG."
+      echo "• Открой «Диагностика» и сверяй AWG-контейнер/интерфейс."
+      echo "• После исправления запусти «Переустановить»."
+      ;;
+    awg_no_bot_no|*)
+      echo "• Сначала установи и запусти AmneziaWG/AWG."
+      echo "• Затем снова запусти preflight и установку бота."
+      ;;
+  esac
+}
+
 print_update_status_line() {
   [[ "$STATE_BOT_INSTALLED" == "1" ]] || return 0
   case "$UPDATE_STATUS" in
@@ -929,6 +954,8 @@ print_detailed_startup_summary() {
   if [[ "$STARTUP_STATE_CODE" == "awg_no_bot_no" ]]; then
     echo "Сначала установи и запусти AWG, затем вернись к установке бота."
   fi
+  print_line
+  print_recommended_actions
   print_line
   return 0
 }
@@ -1363,12 +1390,16 @@ install_or_reinstall_flow() {
   if [[ "$mode" == "install" ]]; then
     info "Установка AWG Telegram Bot"
     echo "1) Автоматическая установка"
+    echo "   Подходит для типового сценария: скрипт сам подставит найденные значения AWG."
     echo "2) Ручная установка"
+    echo "   Подходит, если нужно явно проверить и ввести параметры AWG вручную."
     echo "0) Отмена"
   else
     info "Переустановка AWG Telegram Bot"
     echo "1) Автоматическая переустановка"
+    echo "   Быстрый вариант: использовать автоопределение и обновить сервис."
     echo "2) Ручная переустановка"
+    echo "   Расширенный вариант: вручную проверить параметры перед запуском."
     echo "0) Отмена"
   fi
   prompt_raw "Выбор: " choice
@@ -1916,6 +1947,21 @@ show_logs_doctor() {
     fi
   else
     screen_warn "Файл не найден: $APP_LOG_FILE"
+  fi
+
+  screen_line
+  screen_echo "Рекомендуемые действия:"
+  if [[ "$STATE_DOCKER_DAEMON" != "1" ]]; then
+    screen_echo "• Запусти Docker daemon и повтори диагностику."
+  fi
+  if [[ "$STATE_AWG_FOUND" != "1" ]]; then
+    screen_echo "• Проверь контейнер AWG и имя интерфейса в .env (DOCKER_CONTAINER / WG_INTERFACE)."
+  fi
+  if service_exists && [[ "$active" != "active" ]]; then
+    screen_echo "• Открой «Лог сервиса» и посмотри последние ошибки перед перезапуском."
+  fi
+  if [[ "$STATE_DOCKER_DAEMON" == "1" && "$STATE_AWG_FOUND" == "1" ]] && { ! service_exists || [[ "$active" == "active" ]]; }; then
+    screen_echo "• Критичных проблем не найдено. Если есть жалобы, открой «Лог бота» и «Лог сервиса»."
   fi
 
   screen_line

@@ -29,7 +29,7 @@ def get_buy_inline_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=f"7 дней — {STARS_PRICE_7_DAYS}⭐", callback_data=CB_BUY_7)],
         [InlineKeyboardButton(text=f"30 дней — {STARS_PRICE_30_DAYS}⭐", callback_data=CB_BUY_30)],
-        [InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION)],
+        [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -37,17 +37,17 @@ def get_buy_inline_kb() -> InlineKeyboardMarkup:
 def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
     rows = []
     if subscription_active:
-        rows.append([InlineKeyboardButton(text="🔄 Продлить подписку", callback_data=CB_SHOW_BUY_MENU)])
+        rows.append([InlineKeyboardButton(text="🔄 Продлить доступ", callback_data=CB_SHOW_BUY_MENU)])
     else:
-        rows.append([InlineKeyboardButton(text="💳 Купить подписку", callback_data=CB_SHOW_BUY_MENU)])
-    rows.append([InlineKeyboardButton(text="🔑 Конфиги", callback_data=CB_OPEN_CONFIGS)])
-    rows.append([InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION)])
+        rows.append([InlineKeyboardButton(text="💳 Оплатить доступ", callback_data=CB_SHOW_BUY_MENU)])
+    rows.append([InlineKeyboardButton(text="🔑 Подключение", callback_data=CB_OPEN_CONFIGS)])
+    rows.append([InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_instruction_inline_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📖 Открыть инструкцию", callback_data=CB_SHOW_INSTRUCTION)]]
+        inline_keyboard=[[InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)]]
     )
 
 
@@ -56,7 +56,7 @@ def get_configs_devices_kb(configs: list[tuple[int, int, str, str]]) -> InlineKe
         [InlineKeyboardButton(text=f"📱 Устройство {device_num}", callback_data=f"{CB_CONFIG_DEVICE_PREFIX}{key_id}")]
         for key_id, device_num, _, _ in configs
     ]
-    rows.append([InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION)])
+    rows.append([InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -65,7 +65,16 @@ def get_config_result_kb(key_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📄 Выдать .conf файл (для опытных)", callback_data=f"{CB_CONFIG_CONF_PREFIX}{key_id}")],
             [InlineKeyboardButton(text="⬅️ Назад к устройствам", callback_data=CB_OPEN_CONFIGS)],
-            [InlineKeyboardButton(text="📖 Инструкция", callback_data=CB_SHOW_INSTRUCTION)],
+            [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)],
+        ]
+    )
+
+
+def get_post_payment_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔑 Получить подключение", callback_data=CB_OPEN_CONFIGS)],
+            [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)],
         ]
     )
 
@@ -76,7 +85,7 @@ def get_admin_inline_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_LIST)],
             [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
             [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC)],
-            [InlineKeyboardButton(text="🧹 Очистить orphan peer", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
+            [InlineKeyboardButton(text="🧹 Очистить потерянные peer", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
         ]
     )

@@ -8,10 +8,6 @@ def utc_now_naive() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def price_suffix(rub: str) -> str:
-    return f"{rub}₽" if rub else ""
-
-
 def subscription_is_active(dt_str: str | None) -> bool:
     if not dt_str or dt_str == "0":
         return False

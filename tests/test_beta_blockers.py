@@ -261,7 +261,6 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_issue_subscription_operation_id_is_idempotent(self):
         import awg_backend
-        import database
 
         state = {"idx": 0}
 

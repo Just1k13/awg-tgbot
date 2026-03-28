@@ -411,7 +411,6 @@ async def clean_orphan_awg_peers(force: bool = False) -> int:
         awg_peers = await get_awg_peers()
         quarantined = await _get_quarantined_public_keys()
         protected = await get_protected_public_keys()
-        allowed_force = quarantined | ({peer_key for peer_key in db_keys if peer_key in quarantined})
         protected_non_quarantine = protected - quarantined
         orphans = [
             peer for peer in awg_peers

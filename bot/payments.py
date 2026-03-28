@@ -1,10 +1,32 @@
 import json
+import uuid
+from datetime import timedelta
+
 from aiogram import Bot, F, Router, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 
 from awg_backend import issue_subscription
-from config import PURCHASE_CLICK_COOLDOWN_SECONDS, PURCHASE_RATE_LIMIT_TTL_SECONDS, STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS, logger
-from database import claim_payment_for_provisioning, ensure_user_exists, get_payment_status, payment_already_processed, save_payment, update_payment_status, write_audit_log
+from config import (
+    PAYMENT_PROVISIONING_LEASE_SECONDS,
+    PAYMENT_RETRY_DELAY_SECONDS,
+    PURCHASE_CLICK_COOLDOWN_SECONDS,
+    PURCHASE_RATE_LIMIT_TTL_SECONDS,
+    STARS_PRICE_7_DAYS,
+    STARS_PRICE_30_DAYS,
+    logger,
+)
+from database import (
+    claim_payment_and_job_for_provisioning,
+    ensure_user_exists,
+    finalize_payment_and_job,
+    get_payment_status,
+    get_repairable_payments,
+    payment_already_processed,
+    persistent_guard_hit,
+    save_payment,
+    update_payment_status,
+    write_audit_log,
+)
 from helpers import utc_now_naive
 from ui_constants import CB_BUY_30, CB_BUY_7
 
@@ -38,6 +60,13 @@ def is_purchase_rate_limited(user_id: int) -> tuple[bool, int]:
     return False, 0
 
 
+async def is_purchase_rate_limited_persistent(user_id: int, action: str) -> tuple[bool, int]:
+    hit = await persistent_guard_hit("purchase", user_id, action, PURCHASE_CLICK_COOLDOWN_SECONDS)
+    if hit:
+        return True, PURCHASE_CLICK_COOLDOWN_SECONDS
+    return False, 0
+
+
 async def _send_stars_invoice(bot: Bot, chat_id: int, payload: str, title: str, label: str, amount: int):
     await bot.send_invoice(
         chat_id=chat_id,
@@ -52,8 +81,11 @@ async def _send_stars_invoice(bot: Bot, chat_id: int, payload: str, title: str, 
 
 @router.callback_query(F.data == CB_BUY_7)
 async def buy_7_days(cb: types.CallbackQuery, bot: Bot):
-    limited, wait_seconds = is_purchase_rate_limited(cb.from_user.id)
+    mem_limited, mem_wait = is_purchase_rate_limited(cb.from_user.id)
+    persistent_limited, persistent_wait = await is_purchase_rate_limited_persistent(cb.from_user.id, CB_BUY_7)
+    limited = persistent_limited or mem_limited
     if limited:
+        wait_seconds = max(mem_wait, persistent_wait, 1)
         await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
         return
     await cb.answer()
@@ -62,8 +94,11 @@ async def buy_7_days(cb: types.CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == CB_BUY_30)
 async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
-    limited, wait_seconds = is_purchase_rate_limited(cb.from_user.id)
+    mem_limited, mem_wait = is_purchase_rate_limited(cb.from_user.id)
+    persistent_limited, persistent_wait = await is_purchase_rate_limited_persistent(cb.from_user.id, CB_BUY_30)
+    limited = persistent_limited or mem_limited
     if limited:
+        wait_seconds = max(mem_wait, persistent_wait, 1)
         await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
         return
     await cb.answer()
@@ -120,33 +155,81 @@ async def success_pay(message: types.Message):
             status="received",
             raw_payload_json=json.dumps(raw_payload, ensure_ascii=False),
         )
-        claimed = await claim_payment_for_provisioning(payment.telegram_payment_charge_id)
-        if not claimed:
-            current_status = await get_payment_status(payment.telegram_payment_charge_id)
-            if current_status == "applied":
-                await message.answer("✅ Этот платёж уже был обработан.")
-            else:
-                await message.answer("⏳ Платёж уже обрабатывается. Подождите немного и проверьте профиль или конфиги.")
-            return
-        await write_audit_log(
-            message.from_user.id,
-            "payment_successful_payment",
-            json.dumps({**raw_payload, "method": tariff["method"]}, ensure_ascii=False),
+        applied = await process_payment_provisioning(
+            payment_id=payment.telegram_payment_charge_id,
+            user_id=message.from_user.id,
+            payload=payment.invoice_payload,
+            days=tariff["days"],
         )
-        new_until = await issue_subscription(message.from_user.id, tariff["days"])
-        await update_payment_status(payment.telegram_payment_charge_id, "applied", provisioned_until=new_until.isoformat())
-        await message.answer(
-            (
-                "🎉 <b>Подписка активирована / продлена</b>\n\n"
-                f"📅 <b>Действует до:</b> {new_until.strftime('%d.%m.%Y %H:%M')}\n"
-                "🔑 В разделе <b>Конфиги</b> доступны ключ доступа и <b>.conf</b>"
-            ),
-            parse_mode="HTML",
-        )
+        if applied:
+            await message.answer(
+                (
+                    "🎉 <b>Оплата подтверждена</b>\n\n"
+                    "Подписка активирована. Откройте раздел <b>🔑 Конфиги</b>, чтобы получить доступ."
+                ),
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer("⏳ Платёж принят. Выдача доступа выполняется в фоне, это обычно занимает до минуты.")
     except Exception as e:
         logger.exception("Ошибка обработки оплаты: %s", e)
-        await update_payment_status(payment.telegram_payment_charge_id, "failed", error_message=str(e)[:500])
+        retry_at = (utc_now_naive() + timedelta(seconds=PAYMENT_RETRY_DELAY_SECONDS)).isoformat()
+        await update_payment_status(
+            payment.telegram_payment_charge_id,
+            "needs_repair",
+            error_message=str(e)[:500],
+            next_retry_at=retry_at,
+        )
         await write_audit_log(message.from_user.id, "payment_provision_failed", str(e)[:500])
         await message.answer(
             "❌ Платёж получен, но возникла ошибка при активации доступа. Администратор увидит это в журнале и сможет повторно выдать доступ."
         )
+
+
+async def process_payment_provisioning(payment_id: str, user_id: int, payload: str, days: int) -> bool:
+    lock_token = str(uuid.uuid4())
+    lease_expires_at = (utc_now_naive() + timedelta(seconds=PAYMENT_PROVISIONING_LEASE_SECONDS)).isoformat()
+    claimed = await claim_payment_and_job_for_provisioning(payment_id, lock_token, lease_expires_at)
+    if not claimed:
+        current_status = await get_payment_status(payment_id)
+        return current_status == "applied"
+
+    try:
+        await write_audit_log(user_id, "payment_provisioning_started", f"payment_id={payment_id}; payload={payload}")
+        new_until = await issue_subscription(user_id, days, operation_id=payment_id)
+        finalized = await finalize_payment_and_job(
+            payment_id=payment_id,
+            lock_token=lock_token,
+            status="applied",
+            provisioned_until=new_until.isoformat(),
+        )
+        if not finalized:
+            raise RuntimeError("payment finalization lock lost")
+        return True
+    except Exception as e:
+        retry_at = (utc_now_naive() + timedelta(seconds=PAYMENT_RETRY_DELAY_SECONDS)).isoformat()
+        await finalize_payment_and_job(
+            payment_id=payment_id,
+            lock_token=lock_token,
+            status="needs_repair",
+            error_message=str(e)[:500],
+            next_retry_at=retry_at,
+        )
+        await write_audit_log(user_id, "payment_provisioning_failed", f"payment_id={payment_id}; retry_at={retry_at}; error={str(e)[:300]}")
+        raise
+
+
+async def payment_recovery_worker() -> int:
+    repaired = 0
+    jobs = await get_repairable_payments(limit=25)
+    for payment_id, user_id, payload in jobs:
+        tariff = TARIFFS.get(payload)
+        if not tariff:
+            await update_payment_status(payment_id, "failed", error_message="unknown payload in recovery")
+            continue
+        try:
+            done = await process_payment_provisioning(payment_id, user_id, payload, tariff["days"])
+            repaired += int(done)
+        except Exception as e:
+            logger.warning("Recovery failed for payment=%s: %s", payment_id, e)
+    return repaired

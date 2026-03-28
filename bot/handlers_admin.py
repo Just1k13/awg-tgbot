@@ -25,6 +25,7 @@ from ui_constants import (
 
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
+ADMIN_USERS_PAGE_SIZE = 10
 
 
 def _cleanup_admin_rate_limit(now) -> None:
@@ -90,6 +91,72 @@ async def build_stats_text() -> str:
     )
 
 
+def _users_page_kb(rows: list[tuple[int, str]], page: int, total_pages: int) -> types.InlineKeyboardMarkup:
+    keyboard: list[list[types.InlineKeyboardButton]] = []
+    for uid, label in rows:
+        keyboard.append([
+            types.InlineKeyboardButton(text=f"👤 {label}", callback_data=f"admin_manage_user_{uid}_{page}"),
+        ])
+
+    nav_row: list[types.InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_page_{page - 1}"))
+    nav_row.append(types.InlineKeyboardButton(text=f"📄 {page + 1}/{max(total_pages, 1)}", callback_data="noop"))
+    if page + 1 < total_pages:
+        nav_row.append(types.InlineKeyboardButton(text="➡️ Далее", callback_data=f"admin_users_page_{page + 1}"))
+    keyboard.append(nav_row)
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def _user_manage_kb(uid: int, page: int) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(text="+1 день", callback_data=f"admin_add_days_{uid}_1_{page}"),
+                types.InlineKeyboardButton(text="+7 дней", callback_data=f"admin_add_days_{uid}_7_{page}"),
+                types.InlineKeyboardButton(text="+30 дней", callback_data=f"admin_add_days_{uid}_30_{page}"),
+            ],
+            [
+                types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"admin_revoke_{uid}_{page}"),
+                types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_delete_{uid}_{page}"),
+            ],
+            [types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"admin_users_page_{page}")],
+        ]
+    )
+
+
+async def _render_users_page(target_message: types.Message, page: int) -> None:
+    total_users = (await fetchone("SELECT COUNT(*) FROM users"))[0]
+    if total_users == 0:
+        await target_message.answer("Список пользователей пуст.")
+        return
+    total_pages = max(1, (total_users + ADMIN_USERS_PAGE_SIZE - 1) // ADMIN_USERS_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    offset = page * ADMIN_USERS_PAGE_SIZE
+    rows = await fetchall(
+        """
+        SELECT user_id, sub_until
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        (ADMIN_USERS_PAGE_SIZE, offset),
+    )
+    labels: list[tuple[int, str]] = []
+    lines = [f"👥 <b>Пользователи</b> (страница {page + 1}/{total_pages})\n"]
+    for uid, sub_until in rows:
+        status_text, until_text = get_status_text(sub_until)
+        tg_username, _ = await get_user_meta(uid)
+        short_name = format_tg_username(tg_username)
+        labels.append((uid, f"{uid} — {short_name}"))
+        lines.append(f"• <code>{uid}</code> — {short_name} — {status_text} — {until_text}")
+    await target_message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=_users_page_kb(labels, page, total_pages),
+    )
+
+
 @router.message(F.text == BTN_ADMIN, IsAdmin())
 async def admin_panel(message: types.Message):
     stats_text = await build_stats_text()
@@ -145,11 +212,13 @@ async def admin_clean_orphans(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
         return
     orphans = await get_orphan_awg_peers()
-    await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans"})
+    await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans", "orphans": len(orphans)})
     await cb.message.answer(
         (
-            "⚠️ <b>Подтвердите очистку orphan peer</b>\n\n"
-            f"Будет удалено peer: <b>{len(orphans)}</b>"
+            "⚠️ <b>Проверка orphan peer</b>\n\n"
+            f"Найдено: <b>{len(orphans)}</b>\n"
+            "Первый этап: peer будут помещены в quarantine (без удаления).\n"
+            "Force-удаление выполняйте только после повторной проверки."
         ),
         parse_mode="HTML",
         reply_markup=get_admin_confirm_kb("clean_orphans"),
@@ -168,9 +237,11 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
         return
     try:
         removed = await clean_orphan_awg_peers(force=False)
-        await write_audit_log(ADMIN_ID, "clean_orphans", f"removed={removed}")
+        await write_audit_log(ADMIN_ID, "clean_orphans_quarantine", f"removed={removed}")
         await cb.message.answer(
-            f"🧹 <b>Очистка orphan peer завершена</b>\n\nУдалено peer: <b>{removed}</b>",
+            "🧹 <b>Orphan-проверка завершена</b>\n\n"
+            "Peer помечены как quarantine protected.\n"
+            f"Физически удалено (force only): <b>{removed}</b>",
             parse_mode="HTML",
         )
         await cb.answer("Очистка завершена")
@@ -191,53 +262,77 @@ async def admin_list_all(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    users = await fetchall("SELECT user_id, sub_until FROM users ORDER BY created_at DESC LIMIT 30")
-    if not users:
-        await cb.message.answer("Список пользователей пуст.")
-        await cb.answer()
-        return
-    for uid, sub_until in users:
-        status_text, until_text = get_status_text(sub_until)
-        tg_username, first_name = await get_user_meta(uid)
-        kb = types.InlineKeyboardMarkup(
-            inline_keyboard=[[
-                types.InlineKeyboardButton(text="+30 дней", callback_data=f"add_30_{uid}"),
-                types.InlineKeyboardButton(text="Отключить", callback_data=f"revoke_{uid}"),
-                types.InlineKeyboardButton(text="Удалить", callback_data=f"del_{uid}"),
-            ]]
-        )
-        await cb.message.answer(
-            (
-                f"👤 <b>Пользователь</b>\n"
-                f"🆔 <code>{uid}</code>\n"
-                f"👤 Имя: {escape_html(first_name)}\n"
-                f"✈️ Telegram: {format_tg_username(tg_username)}\n"
-                f"📌 {status_text}\n"
-                f"📅 До: <b>{until_text}</b>"
-            ),
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
+    await _render_users_page(cb.message, 0)
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("add_30_"))
-async def admin_add_btn(cb: types.CallbackQuery):
+@router.callback_query(F.data.startswith("admin_users_page_"))
+async def admin_users_page(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
     try:
-        uid = int(cb.data.split("_")[2])
-        if admin_command_limited("admin_add_30", cb.from_user.id):
-            await cb.answer("Слишком часто", show_alert=True)
+        page = int(cb.data.removeprefix("admin_users_page_"))
+        await _render_users_page(cb.message, page)
+        await cb.answer("Открыто")
+    except Exception as e:
+        logger.exception("Ошибка admin_users_page: %s", e)
+        await cb.answer("❌ Не удалось открыть страницу", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_manage_user_"))
+async def admin_manage_user(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        _, _, _, uid_raw, page_raw = cb.data.split("_", 4)
+        uid = int(uid_raw)
+        page = int(page_raw)
+        row = await fetchone("SELECT sub_until FROM users WHERE user_id = ?", (uid,))
+        if not row:
+            await cb.answer("Пользователь не найден", show_alert=True)
             return
-        new_until = await issue_subscription(uid, 30)
-        notified = await notify_user_subscription_granted(cb.bot, uid, 30, new_until)
-        await write_audit_log(ADMIN_ID, "admin_add_30", f"target={uid}; until={new_until.isoformat()}; notified={int(notified)}")
-        await cb.answer(f"✅ +30 дней пользователю {uid}")
+        sub_until = row[0]
+        status_text, until_text = get_status_text(sub_until)
+        tg_username, first_name = await get_user_meta(uid)
         await cb.message.answer(
             (
-                f"✅ <b>Пользователю выдано +30 дней</b>\n\n"
+                "🛠 <b>Управление пользователем</b>\n\n"
+                f"🆔 <code>{uid}</code>\n"
+                f"👤 Имя: {escape_html(first_name)}\n"
+                f"✈️ Telegram: {format_tg_username(tg_username)}\n"
+                f"📌 Статус: {status_text}\n"
+                f"📅 До: <b>{until_text}</b>"
+            ),
+            parse_mode="HTML",
+            reply_markup=_user_manage_kb(uid, page),
+        )
+        await cb.answer("Открыто")
+    except Exception as e:
+        logger.exception("Ошибка admin_manage_user: %s", e)
+        await cb.answer("❌ Не удалось открыть карточку пользователя", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_add_days_"))
+async def admin_add_days_btn(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    try:
+        _, _, _, uid_raw, days_raw, _page_raw = cb.data.split("_", 5)
+        uid = int(uid_raw)
+        days = int(days_raw)
+        if admin_command_limited(f"admin_add_{days}", cb.from_user.id):
+            await cb.answer("Слишком часто", show_alert=True)
+            return
+        new_until = await issue_subscription(uid, days)
+        notified = await notify_user_subscription_granted(cb.bot, uid, days, new_until)
+        await write_audit_log(ADMIN_ID, f"admin_add_{days}", f"target={uid}; until={new_until.isoformat()}; notified={int(notified)}")
+        await cb.answer(f"✅ +{days} дней пользователю {uid}")
+        await cb.message.answer(
+            (
+                f"✅ <b>Пользователю выдано +{days} дней</b>\n\n"
                 f"🆔 <code>{uid}</code>\n"
                 f"📅 До: <b>{new_until.strftime('%d.%m.%Y %H:%M')}</b>"
             ),
@@ -246,17 +341,19 @@ async def admin_add_btn(cb: types.CallbackQuery):
         if not notified:
             await cb.message.answer("⚠️ Доступ выдан, но уведомление пользователю отправить не удалось.")
     except Exception as e:
-        logger.exception("Ошибка add_30: %s", e)
+        logger.exception("Ошибка admin_add_days_btn: %s", e)
         await cb.answer("❌ Не удалось продлить доступ", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("revoke_"))
+@router.callback_query(F.data.startswith("admin_revoke_"))
 async def admin_revoke_btn(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    uid = int(cb.data.split("_")[1])
-    await set_pending_admin_action(ADMIN_ID, "revoke", {"action": "revoke", "target": uid})
+    _, _, uid_raw, page_raw = cb.data.split("_", 3)
+    uid = int(uid_raw)
+    page = int(page_raw)
+    await set_pending_admin_action(ADMIN_ID, "revoke", {"action": "revoke", "target": uid, "page": page})
     await cb.message.answer(
         (
             "⚠️ <b>Подтвердите отключение доступа</b>\n\n"
@@ -302,13 +399,15 @@ async def cancel_revoke(cb: types.CallbackQuery):
     await cb.answer("Отменено")
 
 
-@router.callback_query(F.data.startswith("del_"))
+@router.callback_query(F.data.startswith("admin_delete_"))
 async def admin_del_user(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    uid = int(cb.data.split("_")[1])
-    await set_pending_admin_action(ADMIN_ID, "delete_user", {"action": "delete_user", "target": uid})
+    _, _, uid_raw, page_raw = cb.data.split("_", 3)
+    uid = int(uid_raw)
+    page = int(page_raw)
+    await set_pending_admin_action(ADMIN_ID, "delete_user", {"action": "delete_user", "target": uid, "page": page})
     await cb.message.answer(
         (
             "⚠️ <b>Подтвердите полное удаление пользователя</b>\n\n"
@@ -344,7 +443,7 @@ async def confirm_delete_user(cb: types.CallbackQuery):
         await cb.answer("Готово")
     except Exception as e:
         logger.exception("Ошибка confirm_delete_user: %s", e)
-        await cb.answer("❌ Не удалось удалить пользователя", show_alert=True)
+        await cb.answer(f"❌ Не удалось удалить пользователя: {str(e)[:120]}", show_alert=True)
 
 
 @router.callback_query(F.data == "cancel_delete_user")
@@ -555,9 +654,18 @@ async def sync_awg_cmd(message: types.Message):
 async def clean_orphans_cmd(message: types.Message):
     try:
         orphans = await get_orphan_awg_peers()
-        await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans"})
+        await set_pending_admin_action(
+            ADMIN_ID,
+            "clean_orphans",
+            {"action": "clean_orphans", "orphans": len(orphans)},
+        )
         await message.answer(
-            f"⚠️ Подтвердите очистку orphan peer.\nБудет удалено: <b>{len(orphans)}</b>",
+            (
+                "⚠️ <b>Подтвердите orphan cleanup (quarantine)</b>\n\n"
+                f"Найдено orphan peer: <b>{len(orphans)}</b>\n"
+                "На этом шаге peer только помечаются как quarantine и не удаляются физически.\n"
+                "Для физического удаления используйте отдельную команду <code>/clean_orphans_force</code> после проверки."
+            ),
             parse_mode="HTML",
             reply_markup=get_admin_confirm_kb("clean_orphans"),
         )
@@ -571,7 +679,13 @@ async def clean_orphans_force_cmd(message: types.Message):
     try:
         removed = await clean_orphan_awg_peers(force=True)
         await write_audit_log(ADMIN_ID, "clean_orphans_force", f"removed={removed}")
-        await message.answer(f"🧨 Принудительно удалено orphan peer: <b>{removed}</b>", parse_mode="HTML")
+        await message.answer(
+            (
+                "🧨 <b>Force-cleanup завершён</b>\n\n"
+                f"Физически удалено orphan peer: <b>{removed}</b>"
+            ),
+            parse_mode="HTML",
+        )
     except Exception as e:
         logger.exception("Ошибка /clean_orphans_force: %s", e)
         await message.answer("❌ Не удалось выполнить принудительную очистку orphan peer.")

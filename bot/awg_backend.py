@@ -12,8 +12,8 @@ from config import (
     AWG_JC, AWG_JMAX, AWG_JMIN, AWG_PEERS_CACHE_TTL_SECONDS, AWG_PROTOCOL_VERSION, AWG_S1, AWG_S2, AWG_S3,
     AWG_S4, AWG_TRANSPORT_PROTO, CLIENT_ALLOWED_IPS, CLIENT_MTU, CONFIGS_PER_USER, DOCKER_CONTAINER,
     DOCKER_RETRIES, DOCKER_RETRY_BASE_DELAY, DOCKER_TIMEOUT_SECONDS, FIRST_CLIENT_OCTET, IGNORE_PEERS, MAX_CLIENT_OCTET,
-    PERSISTENT_KEEPALIVE, PRIMARY_DNS, SECONDARY_DNS, SERVER_IP, SERVER_NAME, SERVER_PUBLIC_KEY,
-    VPN_SUBNET_PREFIX, WG_INTERFACE, logger,
+    PENDING_KEY_TTL_SECONDS, PERSISTENT_KEEPALIVE, PRIMARY_DNS, SECONDARY_DNS, SERVER_IP, SERVER_NAME, SERVER_PUBLIC_KEY,
+    VPN_SUBNET_PREFIX, WG_INTERFACE, AWG_HELPER_PATH, AWG_HELPER_USE_SUDO, logger,
 )
 from database import (
     add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall,
@@ -33,8 +33,12 @@ def _invalidate_peers_cache() -> None:
 
 
 async def run_docker_once(args: list[str], input_data: str | None = None, timeout: int = DOCKER_TIMEOUT_SECONDS) -> str:
+    cmd = [AWG_HELPER_PATH]
+    if AWG_HELPER_USE_SUDO:
+        cmd = ["sudo", "-n", AWG_HELPER_PATH]
     process = await asyncio.create_subprocess_exec(
-        "docker", "exec", "-i", DOCKER_CONTAINER, *args,
+        *cmd,
+        *args,
         stdin=asyncio.subprocess.PIPE if input_data is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -56,34 +60,58 @@ async def run_docker(args: list[str], input_data: str | None = None, timeout: in
         try:
             return await run_docker_once(args, input_data=input_data, timeout=timeout)
         except asyncio.TimeoutError:
-            last_error = RuntimeError(f"docker timeout: {' '.join(args)}")
-            logger.warning("docker timeout attempt=%s/%s cmd=%s", attempt, DOCKER_RETRIES, args)
+            last_error = RuntimeError(f"helper timeout: {' '.join(args)}")
+            logger.warning("helper timeout attempt=%s/%s cmd=%s", attempt, DOCKER_RETRIES, args)
         except Exception as e:
-            last_error = RuntimeError(f"docker exec failed: {e}")
-            logger.warning("docker error attempt=%s/%s cmd=%s error=%s", attempt, DOCKER_RETRIES, args, e)
+            last_error = RuntimeError(f"helper exec failed: {e}")
+            logger.warning("helper error attempt=%s/%s cmd=%s error=%s", attempt, DOCKER_RETRIES, args, e)
         if attempt < DOCKER_RETRIES:
             await asyncio.sleep(DOCKER_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
-    raise last_error if last_error else RuntimeError("docker exec failed")
+    raise last_error if last_error else RuntimeError("helper exec failed")
+
+
+def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
+    lines = show_output.splitlines()
+    peers: list[dict[str, str | None]] = []
+    current_pub: str | None = None
+    current_ip: str | None = None
+    for raw_line in lines:
+        line = raw_line.strip()
+        lowered = line.lower()
+        if lowered.startswith("peer:"):
+            if current_pub:
+                peers.append({"public_key": current_pub, "ip": current_ip})
+            current_pub = line.split(":", 1)[1].strip()
+            current_ip = None
+            continue
+        if lowered.startswith("allowed ips:"):
+            allowed = line.split(":", 1)[1].strip()
+            m = re.search(rf"({re.escape(VPN_SUBNET_PREFIX)}\d+)/32", allowed)
+            if m:
+                current_ip = m.group(1)
+    if current_pub:
+        peers.append({"public_key": current_pub, "ip": current_ip})
+    return peers
 
 
 async def check_awg_container() -> None:
-    result = await run_docker(["awg", "show", WG_INTERFACE])
+    result = await run_docker(["check-awg"])
     if "interface:" not in result:
         raise RuntimeError(f"Не удалось проверить интерфейс {WG_INTERFACE}")
 
 
 async def generate_keypair() -> tuple[str, str]:
-    private_key = (await run_docker(["awg", "genkey"])).strip()
+    private_key = (await run_docker(["genkey"])).strip()
     if not private_key:
         raise RuntimeError("awg genkey вернул пустой private key")
-    public_key = (await run_docker(["awg", "pubkey"], input_data=private_key)).strip()
+    public_key = (await run_docker(["pubkey"], input_data=private_key)).strip()
     if not public_key or not is_valid_awg_public_key(public_key):
         raise RuntimeError("awg pubkey вернул некорректный public key")
     return private_key, public_key
 
 
 async def generate_psk() -> str:
-    psk = (await run_docker(["wg", "genpsk"])).strip()
+    psk = (await run_docker(["genpsk"])).strip()
     if not psk:
         raise RuntimeError("wg genpsk вернул пустой PSK")
     return psk
@@ -92,17 +120,21 @@ async def generate_psk() -> str:
 async def add_peer_to_awg(public_key: str, ip: str, psk_key: str) -> None:
     if not is_valid_awg_public_key(public_key):
         raise RuntimeError("Некорректный public key перед awg set")
-    await run_docker(
-        ["awg", "set", WG_INTERFACE, "peer", public_key, "preshared-key", "/dev/stdin", "allowed-ips", f"{ip}/32"],
-        input_data=psk_key,
-    )
+    await run_docker([
+        "add-peer",
+        "--public-key", public_key,
+        "--ip", ip,
+    ], input_data=psk_key)
     _invalidate_peers_cache()
 
 
 async def remove_peer_from_awg(public_key: str) -> None:
     if not is_valid_awg_public_key(public_key):
         raise RuntimeError("Некорректный public key для удаления peer")
-    await run_docker(["awg", "set", WG_INTERFACE, "peer", public_key, "remove"])
+    await run_docker([
+        "remove-peer",
+        "--public-key", public_key,
+    ])
     _invalidate_peers_cache()
 
 
@@ -113,26 +145,8 @@ async def get_awg_peers() -> list[dict[str, str | None]]:
     if cached is not None and isinstance(expires_at, (int, float)) and now_ts < expires_at:
         return list(cached)
 
-    output = await run_docker(["awg", "show", WG_INTERFACE])
-    lines = output.splitlines()
-    peers: list[dict[str, str | None]] = []
-    current_pub: str | None = None
-    current_ip: str | None = None
-    for raw_line in lines:
-        line = raw_line.strip()
-        if line.startswith("peer: "):
-            if current_pub:
-                peers.append({"public_key": current_pub, "ip": current_ip})
-            current_pub = line.replace("peer: ", "", 1).strip()
-            current_ip = None
-            continue
-        if line.startswith("allowed ips:"):
-            allowed = line.replace("allowed ips:", "", 1).strip()
-            m = re.search(rf"({re.escape(VPN_SUBNET_PREFIX)}\d+)/32", allowed)
-            if m:
-                current_ip = m.group(1)
-    if current_pub:
-        peers.append({"public_key": current_pub, "ip": current_ip})
+    output = await run_docker(["show"])
+    peers = parse_awg_show_output(output)
     _peers_cache["data"] = list(peers)
     _peers_cache["expires_at"] = now_ts + AWG_PEERS_CACHE_TTL_SECONDS
     return peers
@@ -366,6 +380,13 @@ async def bootstrap_protected_peers() -> int:
     return removed_legacy + added
 
 
+async def _get_quarantined_public_keys() -> set[str]:
+    rows = await fetchall(
+        "SELECT public_key FROM protected_peers WHERE reason = 'orphan-quarantine' AND public_key IS NOT NULL AND TRIM(public_key) != ''"
+    )
+    return {row[0].strip() for row in rows if row and row[0]}
+
+
 async def get_orphan_awg_peers() -> list[dict[str, str | None]]:
     awg_peers = await get_awg_peers()
     if not awg_peers:
@@ -383,27 +404,99 @@ async def clean_orphan_awg_peers(force: bool = False) -> int:
         raise RuntimeError(
             "Очистка orphan peer запрещена: в БД 0 валидных ключей при наличии записей keys. Используйте принудительный режим только если уверены, что БД и AWG рассинхронизированы."
         )
-    orphans = await get_orphan_awg_peers()
+
+    if force:
+        awg_peers = await get_awg_peers()
+        quarantined = await _get_quarantined_public_keys()
+        protected = await get_protected_public_keys()
+        allowed_force = quarantined | ({peer_key for peer_key in db_keys if peer_key in quarantined})
+        protected_non_quarantine = protected - quarantined
+        orphans = [
+            peer for peer in awg_peers
+            if (
+                (peer.get("public_key") in quarantined)
+                or (
+                    peer.get("public_key") not in db_keys
+                    and peer.get("public_key") not in protected_non_quarantine
+                    and peer.get("public_key") not in IGNORE_PEERS
+                )
+            )
+        ]
+    else:
+        orphans = await get_orphan_awg_peers()
+
     removed = 0
     protected = await get_protected_public_keys()
     protected.update(IGNORE_PEERS)
+    quarantined = await _get_quarantined_public_keys()
     for peer in orphans:
         public_key = peer.get("public_key")
         if not public_key:
             continue
-        if public_key in protected:
+        if not force and public_key in protected:
             logger.info("Пропущен protected peer: %s", public_key)
+            continue
+        if not force:
+            await add_protected_peer(public_key, "orphan-quarantine")
+            logger.warning("Orphan peer помещен в quarantine: %s", public_key)
             continue
         try:
             await remove_peer_from_awg(public_key)
             removed += 1
-            logger.info("Удалён orphan peer: %s", public_key)
+            logger.info("Удалён orphan peer (force): %s", public_key)
         except Exception as e:
             logger.error("Не удалось удалить orphan peer %s: %s", public_key, e)
     return removed
 
 
-async def issue_subscription(user_id: int, days: int, silent: bool = False) -> datetime:
+async def _get_subscription_operation(db, operation_id: str) -> tuple[str, str, str] | None:
+    async with db.execute(
+        "SELECT previous_sub_until, new_until, status FROM subscription_operations WHERE operation_id = ?",
+        (operation_id,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    if not row:
+        return None
+    return str(row[0]), str(row[1]), str(row[2])
+
+
+async def _upsert_subscription_operation_pending(
+    db,
+    operation_id: str,
+    user_id: int,
+    days: int,
+    previous_sub_until: str,
+    new_until: str,
+    now_iso: str,
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO subscription_operations (operation_id, user_id, days, previous_sub_until, new_until, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+        ON CONFLICT(operation_id) DO UPDATE SET
+            user_id = excluded.user_id,
+            days = excluded.days,
+            previous_sub_until = excluded.previous_sub_until,
+            new_until = excluded.new_until,
+            updated_at = excluded.updated_at
+        """,
+        (operation_id, user_id, days, previous_sub_until, new_until, now_iso, now_iso),
+    )
+
+
+async def _mark_subscription_operation_applied(operation_id: str) -> None:
+    db = await open_db()
+    try:
+        await db.execute(
+            "UPDATE subscription_operations SET status = 'applied', updated_at = ? WHERE operation_id = ?",
+            (utc_now_naive().isoformat(), operation_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def issue_subscription(user_id: int, days: int, silent: bool = False, operation_id: str | None = None) -> datetime:
     async with subscription_lock:
         now = utc_now_naive()
         created_peers: list[str] = []
@@ -413,6 +506,8 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
         db = await open_db()
         previous_sub_until = "0"
         new_until: datetime
+        reused_operation = False
+        placeholder_prefix = f"pending:{operation_id}:" if operation_id else None
         try:
             await db.execute("BEGIN IMMEDIATE")
             async with db.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
@@ -426,14 +521,39 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                 except ValueError:
                     current_until = None
 
-            new_until = current_until + timedelta(days=days) if current_until and current_until > now else now + timedelta(days=days)
-            await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
+            if operation_id:
+                op_row = await _get_subscription_operation(db, operation_id)
+                if op_row:
+                    stored_previous_sub_until, stored_new_until, op_status = op_row
+                    if op_status == "applied":
+                        await db.rollback()
+                        return datetime.fromisoformat(stored_new_until)
+                    reused_operation = True
+                    previous_sub_until = stored_previous_sub_until
+                    new_until = datetime.fromisoformat(stored_new_until)
+                    await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
+                else:
+                    new_until = current_until + timedelta(days=days) if current_until and current_until > now else now + timedelta(days=days)
+                    await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
+                    await _upsert_subscription_operation_pending(
+                        db,
+                        operation_id,
+                        user_id,
+                        days,
+                        previous_sub_until,
+                        new_until.isoformat(),
+                        now.isoformat(),
+                    )
+            else:
+                new_until = current_until + timedelta(days=days) if current_until and current_until > now else now + timedelta(days=days)
+                await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (new_until.isoformat(), user_id))
 
             async with db.execute(
                 """
                 SELECT COUNT(*)
                 FROM keys
                 WHERE user_id = ?
+                  AND state = 'active'
                   AND public_key NOT LIKE 'pending:%'
                   AND public_key IS NOT NULL
                   AND TRIM(public_key) != ''
@@ -444,14 +564,36 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
             ) as cursor:
                 valid_keys_count = (await cursor.fetchone())[0]
 
-            missing_count = max(0, CONFIGS_PER_USER - valid_keys_count)
+            if operation_id:
+                async with db.execute(
+                    """
+                    SELECT public_key
+                    FROM keys
+                    WHERE user_id = ?
+                      AND state = 'pending'
+                      AND public_key LIKE ?
+                    ORDER BY device_num
+                    """,
+                    (user_id, f"{placeholder_prefix}%"),
+                ) as cursor:
+                    placeholders = [r[0] for r in await cursor.fetchall()]
+            else:
+                placeholders = []
+
+            missing_count = max(0, CONFIGS_PER_USER - valid_keys_count - len(placeholders))
             if missing_count > 0:
                 used_ips_awg = await get_used_ips_from_awg()
                 reserved_ips_db = await get_reserved_ips_from_db_conn(db)
                 free_ips = pick_free_ips(used_ips_awg | reserved_ips_db, missing_count)
 
                 async with db.execute(
-                    "SELECT device_num FROM keys WHERE user_id = ? ORDER BY device_num",
+                    """
+                    SELECT device_num
+                    FROM keys
+                    WHERE user_id = ?
+                      AND state != 'deleted'
+                    ORDER BY device_num
+                    """,
                     (user_id,),
                 ) as cursor:
                     existing_nums = {r[0] for r in await cursor.fetchall()}
@@ -463,18 +605,66 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                     if len(next_device_nums) == missing_count:
                         break
 
+                if len(next_device_nums) != missing_count:
+                    raise RuntimeError(
+                        "Не хватает свободных device slots из-за незавершённых записей keys; требуется repair/cleanup состояния пользователя."
+                    )
+
                 reserved_rows: list[tuple[int, int, str, str, str, str]] = []
+                reuse_deleted_rows: list[tuple[str, str, str, str, int, int]] = []
                 for device_num, ip in zip(next_device_nums, free_ips, strict=False):
-                    placeholder_key = f"pending:{uuid.uuid4()}"
+                    suffix = operation_id or str(uuid.uuid4())
+                    placeholder_key = f"pending:{suffix}:{uuid.uuid4()}"
                     placeholders.append(placeholder_key)
                     reserved_rows.append((user_id, device_num, placeholder_key, "", ip, now.isoformat()))
+                    reuse_deleted_rows.append((placeholder_key, "", ip, now.isoformat(), user_id, device_num))
 
+                if reuse_deleted_rows:
+                    await db.executemany(
+                        """
+                        UPDATE keys
+                        SET public_key = ?,
+                            config = ?,
+                            ip = ?,
+                            created_at = ?,
+                            client_private_key = NULL,
+                            psk_key = NULL,
+                            vpn_key = NULL,
+                            delete_reason = NULL,
+                            state = 'pending',
+                            state_updated_at = ?
+                        WHERE user_id = ?
+                          AND device_num = ?
+                          AND state = 'deleted'
+                        """,
+                        [
+                            (placeholder_key, config, ip, created_at, now.isoformat(), uid, device_num)
+                            for placeholder_key, config, ip, created_at, uid, device_num in reuse_deleted_rows
+                        ],
+                    )
+
+                insert_rows: list[tuple[int, int, str, str, str, str]] = []
+                for row in reserved_rows:
+                    uid, device_num, *_ = row
+                    async with db.execute(
+                        "SELECT 1 FROM keys WHERE user_id = ? AND device_num = ?",
+                        (uid, device_num),
+                    ) as cursor:
+                        exists_row = await cursor.fetchone()
+                    if not exists_row:
+                        insert_rows.append(row)
+
+                if insert_rows:
+                    await db.executemany(
+                        """
+                        INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        insert_rows,
+                    )
                 await db.executemany(
-                    """
-                    INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    reserved_rows,
+                    "UPDATE keys SET state='pending', state_updated_at=? WHERE public_key = ?",
+                    [(now.isoformat(), placeholder_key) for placeholder_key in placeholders],
                 )
             await db.commit()
         except Exception:
@@ -489,7 +679,7 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                 db = await open_db()
                 try:
                     async with db.execute(
-                        "SELECT device_num, ip FROM keys WHERE public_key = ?",
+                        "SELECT device_num, ip, state FROM keys WHERE public_key = ?",
                         (placeholder_key,),
                     ) as cursor:
                         row = await cursor.fetchone()
@@ -497,7 +687,9 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                     await db.close()
                 if not row:
                     raise RuntimeError("Не найдена зарезервированная запись ключа")
-                _, ip = row
+                _, ip, state = row
+                if state != 'pending':
+                    continue
                 private_key, public_key = await generate_keypair()
                 psk_key = await generate_psk()
                 await add_peer_to_awg(public_key, ip, psk_key)
@@ -516,10 +708,12 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                                 config = '',
                                 vpn_key = '',
                                 client_private_key = ?,
-                                psk_key = ?
+                                psk_key = ?,
+                                state = 'active',
+                                state_updated_at = ?
                             WHERE public_key = ? AND ip = ?
                             """,
-                            (public_key, private_key_enc, psk_key_enc, placeholder_key, ip),
+                            (public_key, private_key_enc, psk_key_enc, utc_now_naive().isoformat(), placeholder_key, ip),
                         )
                     await db.commit()
                 finally:
@@ -527,12 +721,31 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                 if user_id == ADMIN_ID:
                     for _, public_key, _, _, _ in generated_rows:
                         await add_protected_peer(public_key, 'admin-issued')
+
+            if operation_id:
+                await _mark_subscription_operation_applied(operation_id)
         except Exception:
             db = await open_db()
             try:
                 await db.execute("BEGIN IMMEDIATE")
-                await db.execute("DELETE FROM keys WHERE user_id = ? AND public_key LIKE 'pending:%'", (user_id,))
+                if placeholder_prefix:
+                    await db.execute(
+                        "DELETE FROM keys WHERE user_id = ? AND (public_key LIKE ? OR state='pending' AND public_key LIKE ?)",
+                        (user_id, f"{placeholder_prefix}%", f"{placeholder_prefix}%"),
+                    )
+                else:
+                    await db.execute("DELETE FROM keys WHERE user_id = ? AND (public_key LIKE 'pending:%' OR state='pending')", (user_id,))
                 await db.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (previous_sub_until, user_id))
+                if operation_id:
+                    await _upsert_subscription_operation_pending(
+                        db,
+                        operation_id,
+                        user_id,
+                        days,
+                        previous_sub_until,
+                        new_until.isoformat(),
+                        utc_now_naive().isoformat(),
+                    )
                 await db.commit()
             finally:
                 await db.close()
@@ -543,36 +756,90 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False) -> d
                     logger.error("Rollback: не удалось удалить peer %s: %s", public_key, remove_error)
             raise
 
-        await write_audit_log(user_id, "issue_subscription", f"days={days}; until={new_until.isoformat()}; silent={silent}")
+        await write_audit_log(user_id, "issue_subscription", f"days={days}; until={new_until.isoformat()}; silent={silent}; reused={int(reused_operation)}")
         return new_until
 
 
-async def revoke_user_access(user_id: int) -> int:
+async def revoke_user_access(user_id: int, only_if_expired: bool = False) -> int:
     db = await open_db()
     try:
+        await db.execute("BEGIN IMMEDIATE")
+        if only_if_expired:
+            async with db.execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+            if not row or row[0] == "0":
+                await db.commit()
+                return 0
+            try:
+                if datetime.fromisoformat(row[0]) > utc_now_naive():
+                    await db.commit()
+                    return 0
+            except ValueError:
+                pass
+
+        await db.execute(
+            """
+            UPDATE keys
+            SET state='revoke_pending',
+                state_updated_at=?,
+                delete_reason='revoke_expired_or_admin'
+            WHERE user_id = ?
+              AND public_key NOT LIKE 'pending:%'
+              AND state != 'deleted'
+            """,
+            (utc_now_naive().isoformat(), user_id),
+        )
         async with db.execute(
-            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state IN ('active','delete_pending','revoke_pending')",
             (user_id,),
         ) as cursor:
             rows = await cursor.fetchall()
+        await db.commit()
     finally:
         await db.close()
 
     public_keys = [row[0] for row in rows]
     removed_keys: list[str] = []
+    failed_remove: list[str] = []
     for public_key in public_keys:
         try:
             await remove_peer_from_awg(public_key)
             removed_keys.append(public_key)
         except Exception as e:
-            logger.error("Ошибка удаления peer %s для user %s: %s", public_key, user_id, e)
+            current_keys = {(peer.get("public_key") or "").strip() for peer in await get_awg_peers()}
+            if public_key and public_key not in current_keys:
+                removed_keys.append(public_key)
+                logger.info("Peer %s уже отсутствует в AWG при revoke, считаем удаленным", public_key)
+            else:
+                logger.error("Ошибка удаления peer %s для user %s: %s", public_key, user_id, e)
+                failed_remove.append(public_key)
+
+    if failed_remove:
+        await write_audit_log(
+            user_id,
+            "revoke_user_access_pending",
+            f"failed_peers={len(failed_remove)}; total_found={len(public_keys)}",
+        )
+        raise RuntimeError(f"Не удалось удалить {len(failed_remove)} peer в AWG. Пользователь оставлен в состоянии revoke_pending.")
 
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
         if removed_keys:
-            await db.executemany("DELETE FROM keys WHERE public_key = ?", [(key,) for key in removed_keys])
-        await db.execute("DELETE FROM keys WHERE user_id = ? AND public_key LIKE 'pending:%'", (user_id,))
+            await db.executemany(
+                "UPDATE keys SET state='deleted', state_updated_at=? WHERE public_key = ?",
+                [(utc_now_naive().isoformat(), key) for key in removed_keys],
+            )
+        async with db.execute(
+            "SELECT COUNT(*) FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state='revoke_pending'",
+            (user_id,),
+        ) as cursor:
+            still_pending = (await cursor.fetchone())[0]
+        if still_pending > 0:
+            await db.commit()
+            await write_audit_log(user_id, "revoke_user_access_retry_needed", f"pending_keys={still_pending}")
+            raise RuntimeError("Не все peer удалены при revoke, требуется повторный запуск.")
+        await db.execute("DELETE FROM keys WHERE user_id = ?", (user_id,))
         await db.execute("UPDATE users SET sub_until = '0' WHERE user_id = ?", (user_id,))
         await db.commit()
     finally:
@@ -586,7 +853,7 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
     db = await open_db()
     try:
         async with db.execute(
-            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%'",
+            "SELECT public_key FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state != 'deleted'",
             (user_id,),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -595,20 +862,61 @@ async def delete_user_everywhere(user_id: int) -> tuple[int, int]:
 
     public_keys = [row[0] for row in rows]
     removed_keys: list[str] = []
+    failed_remove: list[str] = []
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            "UPDATE keys SET state='delete_pending', state_updated_at=?, delete_reason='user_delete' WHERE user_id = ? AND state != 'deleted'",
+            (utc_now_naive().isoformat(), user_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
     for public_key in public_keys:
         try:
             await remove_peer_from_awg(public_key)
             removed_keys.append(public_key)
         except Exception as e:
-            logger.error("Не удалось удалить peer %s: %s", public_key, e)
+            current_keys = {(peer.get("public_key") or "").strip() for peer in await get_awg_peers()}
+            if public_key and public_key not in current_keys:
+                removed_keys.append(public_key)
+                logger.info("Peer %s уже отсутствует в AWG, считаем удаленным", public_key)
+            else:
+                logger.error("Не удалось удалить peer %s: %s", public_key, e)
+                failed_remove.append(public_key)
+
+    if failed_remove:
+        await write_audit_log(
+            user_id,
+            "delete_user_everywhere_pending",
+            f"failed_peers={len(failed_remove)}",
+        )
+        raise RuntimeError(f"Не удалось удалить {len(failed_remove)} peer в AWG. Пользователь оставлен в состоянии delete_pending.")
 
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
         if removed_keys:
-            await db.executemany("DELETE FROM keys WHERE public_key = ?", [(key,) for key in removed_keys])
+            await db.executemany(
+                "UPDATE keys SET state='deleted', state_updated_at=? WHERE public_key = ?",
+                [(utc_now_naive().isoformat(), key) for key in removed_keys],
+            )
+        async with db.execute(
+            "SELECT COUNT(*) FROM keys WHERE user_id = ? AND public_key NOT LIKE 'pending:%' AND state='delete_pending'",
+            (user_id,),
+        ) as cursor:
+            still_pending = (await cursor.fetchone())[0]
+        if still_pending > 0:
+            await db.commit()
+            await write_audit_log(user_id, "delete_user_everywhere_retry_needed", f"pending_keys={still_pending}")
+            raise RuntimeError("Не все peer удалены, требуется повторный запуск delete.")
         cur_keys = await db.execute("DELETE FROM keys WHERE user_id = ?", (user_id,))
-        cur_users = await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        cur_users = await db.execute(
+            "DELETE FROM users WHERE user_id = ? AND NOT EXISTS (SELECT 1 FROM keys WHERE keys.user_id = users.user_id)",
+            (user_id,),
+        )
         await db.commit()
         affected = (cur_keys.rowcount or 0) + (cur_users.rowcount or 0) + len(removed_keys)
     finally:
@@ -638,8 +946,8 @@ async def cleanup_expired_subscriptions() -> int:
     cleaned = 0
     for user_id in expired_users:
         try:
-            await revoke_user_access(user_id)
-            cleaned += 1
+            removed = await revoke_user_access(user_id, only_if_expired=True)
+            cleaned += int(removed > 0)
         except Exception as e:
             logger.exception("Ошибка cleanup user_id=%s: %s", user_id, e)
     return cleaned

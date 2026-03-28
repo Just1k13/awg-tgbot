@@ -11,7 +11,7 @@ def get_instruction_text() -> str:
         "3. Оплатите доступ в Telegram Stars\n"
         "4. После оплаты откройте <b>🔑 Конфиги</b>\n"
         "5. Скопируйте ключ доступа или скачайте <code>.conf</code> файл\n"
-        f"6. Установите приложение <a href='{download_url}'>Amnezia</a>\n"
+        f"6. Установите <a href='{download_url}'>Amnezia</a>\n"
         "7. В приложении можно:\n"
         "   • вставить ключ доступа\n"
         "   • или импортировать <code>.conf</code> файл\n\n"

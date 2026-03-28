@@ -1,5 +1,6 @@
-
+import hashlib
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,9 @@ async def init_db() -> None:
         await ensure_column(db, "keys", "psk_key", "TEXT")
         await ensure_column(db, "keys", "vpn_key", "TEXT")
         await ensure_column(db, "keys", "client_private_key", "TEXT")
+        await ensure_column(db, "keys", "state", "TEXT NOT NULL DEFAULT 'active'")
+        await ensure_column(db, "keys", "state_updated_at", "TEXT")
+        await ensure_column(db, "keys", "delete_reason", "TEXT")
 
         await db.execute(
             """
@@ -118,6 +122,9 @@ async def init_db() -> None:
         await ensure_column(db, "payments", "provisioned_until", "TEXT")
         await ensure_column(db, "payments", "error_message", "TEXT")
         await ensure_column(db, "payments", "raw_payload_json", "TEXT")
+        await ensure_column(db, "payments", "updated_at", "TEXT")
+        await ensure_column(db, "payments", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        await ensure_column(db, "payments", "last_attempt_at", "TEXT")
 
         await db.execute(
             """
@@ -162,13 +169,61 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS provisioning_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                payment_id TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'received',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                lock_token TEXT,
+                last_error TEXT,
+                next_retry_at TEXT,
+                lease_expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await ensure_column(db, "provisioning_jobs", "lease_expires_at", "TEXT")
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS callback_guards (
+                guard_key TEXT PRIMARY KEY,
+                action_scope TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscription_operations (
+                operation_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                days INTEGER NOT NULL,
+                previous_sub_until TEXT NOT NULL,
+                new_until TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub_until ON users(sub_until)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_user_id ON keys(user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_ip ON keys(ip)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created_at ON payments(user_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_retry ON provisioning_jobs(status, next_retry_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_lease_expires ON provisioning_jobs(lease_expires_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_state ON keys(state)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_guards_expires ON callback_guards(expires_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_subscription_operations_status ON subscription_operations(status)")
 
         await db.commit()
     finally:
@@ -293,7 +348,7 @@ async def get_reserved_ips_from_db() -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
+          AND state != 'delete_pending'
         """
     )
     used: set[int] = set()
@@ -313,7 +368,7 @@ async def get_reserved_ips_from_db_conn(db: aiosqlite.Connection) -> set[int]:
         FROM keys
         WHERE ip IS NOT NULL
           AND TRIM(ip) != ''
-          AND public_key NOT LIKE 'pending:%'
+          AND state != 'delete_pending'
         """
     ) as cursor:
         rows = await cursor.fetchall()
@@ -336,6 +391,7 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
         JOIN users u ON u.user_id = k.user_id
         WHERE k.user_id = ?
           AND k.public_key NOT LIKE 'pending:%'
+          AND k.state = 'active'
           AND k.ip IS NOT NULL
           AND TRIM(k.ip) != ''
           AND u.sub_until != '0'
@@ -348,8 +404,12 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
 
     result: list[tuple[int, int, str, str]] = []
     for key_id, device_num, ip, client_private_key, public_key, psk_key in rows:
-        private_key = decrypt_text(client_private_key)
-        psk = decrypt_text(psk_key)
+        try:
+            private_key = decrypt_text(client_private_key)
+            psk = decrypt_text(psk_key)
+        except Exception as e:
+            logger.error("Пропуск key_id=%s из-за ошибки расшифровки: %s", key_id, e)
+            continue
         if not private_key or not public_key or not psk or not ip:
             continue
         config = build_client_config(private_key, ip, psk)
@@ -382,52 +442,190 @@ async def save_payment(
     status: str = "received",
     raw_payload_json: str | None = None,
 ) -> None:
-    await execute(
-        """
-        INSERT INTO payments (
-            telegram_payment_charge_id,
-            provider_payment_charge_id,
-            user_id,
-            payload,
-            amount,
-            currency,
-            payment_method,
-            status,
-            raw_payload_json,
-            created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(telegram_payment_charge_id) DO NOTHING
-        """,
-        (
-            telegram_payment_charge_id,
-            provider_payment_charge_id,
-            user_id,
-            payload,
-            amount,
-            currency,
-            payment_method,
-            status,
-            raw_payload_json,
-            utc_now_naive().isoformat(),
-        ),
-    )
-
-
-async def claim_payment_for_provisioning(telegram_payment_charge_id: str) -> bool:
+    now_iso = utc_now_naive().isoformat()
     db = await open_db()
     try:
         await db.execute("BEGIN IMMEDIATE")
-        cursor = await db.execute(
+        await db.execute(
             """
-            UPDATE payments
-            SET status = 'provisioning'
-            WHERE telegram_payment_charge_id = ?
-              AND status = 'received'
+            INSERT INTO payments (
+                telegram_payment_charge_id,
+                provider_payment_charge_id,
+                user_id,
+                payload,
+                amount,
+                currency,
+                payment_method,
+                status,
+                raw_payload_json,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_payment_charge_id) DO UPDATE SET
+                provider_payment_charge_id = COALESCE(excluded.provider_payment_charge_id, provider_payment_charge_id),
+                raw_payload_json = COALESCE(excluded.raw_payload_json, raw_payload_json),
+                updated_at = excluded.updated_at
             """,
-            (telegram_payment_charge_id,),
+            (
+                telegram_payment_charge_id,
+                provider_payment_charge_id,
+                user_id,
+                payload,
+                amount,
+                currency,
+                payment_method,
+                status,
+                raw_payload_json,
+                now_iso,
+                now_iso,
+            ),
+        )
+        await db.execute(
+            """
+            INSERT INTO provisioning_jobs (payment_id, user_id, payload, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(payment_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                payload = excluded.payload,
+                updated_at = excluded.updated_at
+            """,
+            (telegram_payment_charge_id, user_id, payload, status, now_iso, now_iso),
         )
         await db.commit()
-        return (cursor.rowcount or 0) == 1
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def claim_payment_and_job_for_provisioning(
+    payment_id: str,
+    lock_token: str,
+    lease_expires_at: str,
+) -> bool:
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            """
+            SELECT p.status, j.status, j.lease_expires_at
+            FROM payments p
+            JOIN provisioning_jobs j ON j.payment_id = p.telegram_payment_charge_id
+            WHERE p.telegram_payment_charge_id = ?
+            """,
+            (payment_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if not row:
+            await db.rollback()
+            return False
+
+        payment_status, job_status, current_lease_expires_at = row
+
+        claimable = False
+        if payment_status == "applied" or job_status == "applied":
+            await db.rollback()
+            return False
+
+        if payment_status in {"received", "needs_repair", "failed"} and job_status in {"received", "needs_repair", "failed"}:
+            claimable = True
+        elif job_status == "provisioning":
+            lease_expired = bool(current_lease_expires_at and str(current_lease_expires_at) <= now_iso)
+            if lease_expired and payment_status in {"provisioning", "received", "needs_repair", "failed"}:
+                claimable = True
+
+        if not claimable:
+            await db.rollback()
+            return False
+
+        payment_cur = await db.execute(
+            """
+            UPDATE payments
+            SET status = 'provisioning',
+                error_message = NULL,
+                updated_at = ?,
+                attempt_count = attempt_count + 1,
+                last_attempt_at = ?
+            WHERE telegram_payment_charge_id = ?
+            """,
+            (now_iso, now_iso, payment_id),
+        )
+        job_cur = await db.execute(
+            """
+            UPDATE provisioning_jobs
+            SET status = 'provisioning',
+                lock_token = ?,
+                last_error = NULL,
+                next_retry_at = NULL,
+                lease_expires_at = ?,
+                updated_at = ?,
+                attempt_count = attempt_count + 1
+            WHERE payment_id = ?
+            """,
+            (lock_token, lease_expires_at, now_iso, payment_id),
+        )
+        await db.commit()
+        return (payment_cur.rowcount or 0) == 1 and (job_cur.rowcount or 0) == 1
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def finalize_payment_and_job(
+    payment_id: str,
+    lock_token: str,
+    status: str,
+    provisioned_until: str | None = None,
+    error_message: str | None = None,
+    next_retry_at: str | None = None,
+) -> bool:
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT lock_token FROM provisioning_jobs WHERE payment_id = ?",
+            (payment_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row or row[0] != lock_token:
+            await db.rollback()
+            return False
+
+        payment_cur = await db.execute(
+            """
+            UPDATE payments
+            SET status = ?,
+                provisioned_until = COALESCE(?, provisioned_until),
+                error_message = ?,
+                updated_at = ?
+            WHERE telegram_payment_charge_id = ?
+            """,
+            (status, provisioned_until, error_message, now_iso, payment_id),
+        )
+        job_cur = await db.execute(
+            """
+            UPDATE provisioning_jobs
+            SET lock_token = NULL,
+                status = ?,
+                last_error = ?,
+                updated_at = ?,
+                next_retry_at = ?,
+                lease_expires_at = NULL
+            WHERE payment_id = ?
+            """,
+            (status, error_message, now_iso, next_retry_at, payment_id),
+        )
+        await db.commit()
+        return (payment_cur.rowcount or 0) == 1 and (job_cur.rowcount or 0) == 1
+    except Exception:
+        await db.rollback()
+        raise
     finally:
         await db.close()
 
@@ -437,18 +635,112 @@ async def update_payment_status(
     status: str,
     provisioned_until: str | None = None,
     error_message: str | None = None,
+    next_retry_at: str | None = None,
 ) -> None:
-    await execute(
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """
+            UPDATE payments
+            SET status = ?,
+                provisioned_until = COALESCE(?, provisioned_until),
+                error_message = ?,
+                provider_payment_charge_id = provider_payment_charge_id,
+                updated_at = ?
+            WHERE telegram_payment_charge_id = ?
+            """,
+            (status, provisioned_until, error_message, now_iso, telegram_payment_charge_id),
+        )
+        await db.execute(
+            """
+            UPDATE provisioning_jobs
+            SET status = ?,
+                last_error = ?,
+                updated_at = ?,
+                next_retry_at = ?,
+                lease_expires_at = CASE WHEN ? = 'provisioning' THEN lease_expires_at ELSE NULL END
+            WHERE payment_id = ?
+            """,
+            (status, error_message, now_iso, next_retry_at, status, telegram_payment_charge_id),
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def get_repairable_payments(limit: int = 20) -> list[tuple[str, int, str]]:
+    return await fetchall(
         """
-        UPDATE payments
-        SET status = ?,
-            provisioned_until = COALESCE(?, provisioned_until),
-            error_message = ?,
-            provider_payment_charge_id = provider_payment_charge_id
-        WHERE telegram_payment_charge_id = ?
+        SELECT payment_id, user_id, payload
+        FROM provisioning_jobs
+        WHERE (
+                status IN ('failed', 'needs_repair', 'received')
+                AND (next_retry_at IS NULL OR next_retry_at <= ?)
+              )
+           OR (
+                status = 'provisioning'
+                AND lease_expires_at IS NOT NULL
+                AND lease_expires_at <= ?
+              )
+        ORDER BY updated_at ASC
+        LIMIT ?
         """,
-        (status, provisioned_until, error_message, telegram_payment_charge_id),
+        (utc_now_naive().isoformat(), utc_now_naive().isoformat(), limit),
     )
+
+
+async def cleanup_stale_pending_keys(max_age_seconds: int) -> int:
+    cutoff = utc_now_naive().timestamp() - max_age_seconds
+    rows = await fetchall(
+        "SELECT id, created_at FROM keys WHERE public_key LIKE 'pending:%' OR state='pending'",
+    )
+    stale_ids: list[int] = []
+    for key_id, created_at in rows:
+        try:
+            if datetime.fromisoformat(created_at).timestamp() <= cutoff:
+                stale_ids.append(int(key_id))
+        except Exception:
+            stale_ids.append(int(key_id))
+    if not stale_ids:
+        return 0
+    await execute(
+        f"DELETE FROM keys WHERE id IN ({','.join(['?'] * len(stale_ids))})",
+        tuple(stale_ids),
+    )
+    return len(stale_ids)
+
+
+def _guard_digest(scope: str, actor_id: int, payload: str) -> str:
+    raw = f"{scope}:{actor_id}:{payload}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+async def persistent_guard_hit(scope: str, actor_id: int, payload: str, ttl_seconds: int) -> bool:
+    key = _guard_digest(scope, actor_id, payload)
+    now = utc_now_naive()
+    expires = now.timestamp() + ttl_seconds
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute("DELETE FROM callback_guards WHERE expires_at <= ?", (now.isoformat(),))
+        async with db.execute("SELECT guard_key FROM callback_guards WHERE guard_key = ?", (key,)) as cursor:
+            row = await cursor.fetchone()
+        if row:
+            await db.commit()
+            return True
+        await db.execute(
+            "INSERT INTO callback_guards (guard_key, action_scope, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (key, scope, now.isoformat(), datetime.fromtimestamp(expires).isoformat()),
+        )
+        await db.commit()
+        return False
+    finally:
+        await db.close()
 
 
 async def write_audit_log(user_id: int, action: str, details: str = "") -> None:
@@ -515,9 +807,6 @@ async def db_health_info() -> dict[str, Any]:
         return info
     finally:
         await db.close()
-
-
-
 
 
 async def add_protected_peer(public_key: str, reason: str) -> None:

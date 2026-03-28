@@ -15,6 +15,7 @@ from database import ensure_user_exists, get_user_keys, get_user_subscription
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active
 from keyboards import (
     get_buy_inline_kb,
+    get_config_result_kb,
     get_configs_devices_kb,
     get_instruction_inline_kb,
     get_main_menu,
@@ -27,7 +28,9 @@ from ui_constants import (
     BTN_GUIDE,
     BTN_PROFILE,
     BTN_SUPPORT,
+    CB_CONFIG_CONF_PREFIX,
     CB_CONFIG_DEVICE_PREFIX,
+    CB_OPEN_CONFIGS,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
 )
@@ -36,8 +39,8 @@ router = Router()
 
 
 def _config_filename_prefix() -> str:
-    base = re.sub(r"[^\w.-]+", "_", (SERVER_NAME or "vpn").strip(), flags=re.UNICODE).strip("._")
-    return base or "vpn"
+    base = re.sub(r"[^\w.-]+", "_", (SERVER_NAME or "configs").strip(), flags=re.UNICODE).strip("._")
+    return base or "configs"
 
 
 async def _send_buy_menu(target, user_id: int):
@@ -66,6 +69,38 @@ async def _send_buy_menu(target, user_id: int):
     )
 
 
+async def _send_configs_menu(target, user: types.User):
+    configs = await get_user_keys(user.id)
+    if not configs:
+        await target.answer(
+            (
+                "🔑 <b>Конфиги</b>\n\n"
+                "У вас пока нет активных конфигураций.\n"
+                "Сначала оформите или продлите подписку.\n\n"
+                "Если нужна помощь — откройте инструкцию ниже."
+            ),
+            parse_mode="HTML",
+            reply_markup=get_instruction_inline_kb(),
+        )
+        return
+
+    await target.answer(
+        (
+            "🔑 <b>Конфиги</b>\n\n"
+            "Выберите устройство. Я сначала отправлю:\n"
+            "• <code>vpn://</code> — быстрый импорт в Amnezia.\n\n"
+            "Файл <code>.conf</code> можно запросить отдельно для опытных пользователей."
+        ),
+        parse_mode="HTML",
+        reply_markup=get_configs_devices_kb(configs),
+    )
+
+
+async def _find_user_config_by_key_id(user_id: int, key_id: int):
+    configs = await get_user_keys(user_id)
+    return next((item for item in configs if item[0] == key_id), None)
+
+
 @router.callback_query(F.data == "noop")
 async def noop_callback(cb: types.CallbackQuery):
     await cb.answer()
@@ -78,12 +113,12 @@ async def start(message: types.Message):
         maybe_set_support_username(message.from_user.username)
     await message.answer(
         (
-            "🌐 <b>Свободный Интернет</b>\n\n"
+            "🌐 <b>Свободный интернет</b>\n\n"
             "Здесь можно:\n"
             "• оформить или продлить подписку\n"
             "• получить ключ доступа\n"
             "• скачать <b>.conf</b>\n"
-            "• посмотреть срок действия\n"
+            "• проверить срок действия\n"
             "• открыть инструкцию\n"
             "• написать в поддержку\n\n"
             "Выберите действие в меню ниже."
@@ -110,9 +145,10 @@ async def profile(message: types.Message):
             f"🆔 <b>ID:</b> <code>{message.from_user.id}</code>\n"
             f"👤 <b>Имя:</b> {first_name}\n"
             f"✈️ <b>Telegram:</b> {escape_html(tg_username)}\n"
-            f"📌 <b>Статус:</b> {status_text}\n"
+            f"📌 <b>Подписка:</b> {status_text}\n"
             f"📅 <b>Действует до:</b> {until_text}\n"
-            f"⏳ <b>Осталось:</b> {remaining}"
+            f"⏳ <b>Осталось:</b> {remaining}\n\n"
+            "⬇️ Ниже — быстрые действия."
         ),
         parse_mode="HTML",
         reply_markup=get_profile_inline_kb(is_active),
@@ -124,27 +160,7 @@ async def my_keys(message: types.Message):
     await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
-    configs = await get_user_keys(message.from_user.id)
-    if not configs:
-        await message.answer(
-            (
-                "🔑 <b>Конфиги</b>\n\n"
-                "У вас пока нет активных конфигураций.\n"
-                "Сначала оформите доступ.\n\n"
-                "Если нужна помощь — откройте инструкцию ниже."
-            ),
-            parse_mode="HTML",
-            reply_markup=get_instruction_inline_kb(),
-        )
-        return
-    await message.answer(
-        (
-            "🔑 <b>Ваши конфиги</b>\n\n"
-            "Сначала выберите устройство. После выбора бот отправит <b>ключ доступа</b> и файл <b>.conf</b> для этого устройства."
-        ),
-        parse_mode="HTML",
-        reply_markup=get_configs_devices_kb(configs),
-    )
+    await _send_configs_menu(message, message.from_user)
 
 
 @router.callback_query(F.data.startswith(CB_CONFIG_DEVICE_PREFIX))
@@ -157,21 +173,48 @@ async def show_selected_device_config(cb: types.CallbackQuery):
         await cb.answer("Некорректный выбор устройства", show_alert=True)
         return
 
-    configs = await get_user_keys(cb.from_user.id)
-    selected = next((item for item in configs if item[0] == key_id), None)
+    selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
     if not selected:
         await cb.message.answer(
-            "Не удалось найти конфиг для выбранного устройства. Попробуйте открыть раздел «Конфиги» ещё раз.",
+            "Не удалось найти ключ для выбранного устройства. Попробуйте открыть раздел «Конфиги» ещё раз.",
             reply_markup=get_instruction_inline_kb(),
         )
         return
 
-    _, device_num, cfg, vpn_key = selected
+    _, device_num, _cfg, vpn_key = selected
     if vpn_key and vpn_key.strip():
         await cb.message.answer(
-            f"🔐 <b>Ключ доступа для устройства {device_num}</b>\n\n<code>{escape_html(vpn_key)}</code>",
+            f"🔐 <b>vpn:// для устройства {device_num}</b>\n\n<code>{escape_html(vpn_key)}</code>\n\n"
+            "Подходит для быстрого импорта в Amnezia.",
             parse_mode="HTML",
+            reply_markup=get_config_result_kb(key_id),
         )
+    else:
+        await cb.message.answer(
+            "Для выбранного устройства не удалось собрать ключ импорта. Напишите в поддержку или попросите администратора перевыдать доступ.",
+            reply_markup=get_instruction_inline_kb(),
+        )
+
+
+@router.callback_query(F.data.startswith(CB_CONFIG_CONF_PREFIX))
+async def send_selected_device_conf(cb: types.CallbackQuery):
+    await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    await cb.answer()
+    try:
+        key_id = int(cb.data.removeprefix(CB_CONFIG_CONF_PREFIX))
+    except ValueError:
+        await cb.answer("Некорректный запрос .conf", show_alert=True)
+        return
+
+    selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
+    if not selected:
+        await cb.message.answer(
+            "Не удалось найти .conf для выбранного устройства. Откройте раздел «Конфиги» ещё раз.",
+            reply_markup=get_instruction_inline_kb(),
+        )
+        return
+
+    _, device_num, cfg, _vpn_key = selected
     if cfg and cfg.strip():
         await cb.message.answer_document(
             types.BufferedInputFile(
@@ -181,16 +224,27 @@ async def show_selected_device_config(cb: types.CallbackQuery):
             caption=f"📄 Конфиг для устройства {device_num}",
             parse_mode="HTML",
         )
+        await cb.message.answer(
+            "Файл отправлен ✅ Можно вернуться к списку устройств:",
+            reply_markup=get_config_result_kb(key_id),
+        )
     else:
         await cb.message.answer(
             "Для выбранного устройства не удалось собрать .conf. Напишите в поддержку или попросите администратора перевыдать доступ.",
             reply_markup=get_instruction_inline_kb(),
         )
+
+
+@router.callback_query(F.data == CB_OPEN_CONFIGS)
+async def open_configs_from_profile(cb: types.CallbackQuery):
+    await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
+    if cb.from_user.id == ADMIN_ID:
+        maybe_set_support_username(cb.from_user.username)
+    await cb.answer()
+    if not cb.message:
+        await cb.answer("Сообщение недоступно", show_alert=True)
         return
-    await cb.message.answer(
-        "Если не знаете, что делать дальше, откройте инструкцию:",
-        reply_markup=get_instruction_inline_kb(),
-    )
+    await _send_configs_menu(cb.message, cb.from_user)
 
 
 @router.message(F.text == BTN_GUIDE)
@@ -240,13 +294,17 @@ async def buy(message: types.Message):
 async def show_buy_menu_callback(cb: types.CallbackQuery):
     await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
     await cb.answer()
+    if not cb.message:
+        await cb.answer("Сообщение недоступно", show_alert=True)
+        return
     await _send_buy_menu(cb.message, cb.from_user.id)
 
 
 @router.callback_query(F.data == CB_SHOW_INSTRUCTION)
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
-    await cb.message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+    if cb.message:
+        await cb.message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message()

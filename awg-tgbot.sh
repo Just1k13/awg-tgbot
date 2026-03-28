@@ -1053,11 +1053,17 @@ prompt_admin_id() {
 
 write_common_env() {
   local api_token="$1" admin_id="$2" server_name="$3" secret="$4"
+  local db_path=""
   set_env_value API_TOKEN "$api_token"
   set_env_value ADMIN_ID "$admin_id"
   set_env_value SERVER_NAME "$server_name"
   set_env_value ENCRYPTION_SECRET "$secret"
-  set_env_value DB_PATH "vpn_bot.db"
+  db_path="$(get_env_value DB_PATH)"
+  if [[ -n "$db_path" ]]; then
+    set_env_value DB_PATH "$db_path"
+  else
+    set_env_value DB_PATH "vpn_bot.db"
+  fi
   return 0
 }
 

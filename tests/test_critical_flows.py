@@ -340,6 +340,17 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertIn('gpasswd -d "$BOT_USER" docker', script)
         self.assertIn('не в группе docker', script)
 
+    def test_installer_preserves_existing_db_path_on_update(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn('db_path="$(get_env_value DB_PATH)"', script)
+        self.assertIn('if [[ -n "$db_path" ]]; then', script)
+        self.assertIn('set_env_value DB_PATH "$db_path"', script)
+
+    def test_clean_orphans_command_does_not_promise_physical_delete(self):
+        admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")
+        self.assertIn("quarantine", admin_handler)
+        self.assertNotIn("Будет удалено: <b>{len(orphans)}</b>", admin_handler)
+
     def test_helper_rejects_invalid_policy_json(self):
         import awg_helper
 

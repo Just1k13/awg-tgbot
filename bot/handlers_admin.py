@@ -654,9 +654,18 @@ async def sync_awg_cmd(message: types.Message):
 async def clean_orphans_cmd(message: types.Message):
     try:
         orphans = await get_orphan_awg_peers()
-        await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans"})
+        await set_pending_admin_action(
+            ADMIN_ID,
+            "clean_orphans",
+            {"action": "clean_orphans", "orphans": len(orphans)},
+        )
         await message.answer(
-            f"⚠️ Подтвердите очистку orphan peer.\nБудет удалено: <b>{len(orphans)}</b>",
+            (
+                "⚠️ <b>Подтвердите orphan cleanup (quarantine)</b>\n\n"
+                f"Найдено orphan peer: <b>{len(orphans)}</b>\n"
+                "На этом шаге peer только помечаются как quarantine и не удаляются физически.\n"
+                "Для физического удаления используйте отдельную команду <code>/clean_orphans_force</code> после проверки."
+            ),
             parse_mode="HTML",
             reply_markup=get_admin_confirm_kb("clean_orphans"),
         )
@@ -670,7 +679,13 @@ async def clean_orphans_force_cmd(message: types.Message):
     try:
         removed = await clean_orphan_awg_peers(force=True)
         await write_audit_log(ADMIN_ID, "clean_orphans_force", f"removed={removed}")
-        await message.answer(f"🧨 Принудительно удалено orphan peer: <b>{removed}</b>", parse_mode="HTML")
+        await message.answer(
+            (
+                "🧨 <b>Force-cleanup завершён</b>\n\n"
+                f"Физически удалено orphan peer: <b>{removed}</b>"
+            ),
+            parse_mode="HTML",
+        )
     except Exception as e:
         logger.exception("Ошибка /clean_orphans_force: %s", e)
         await message.answer("❌ Не удалось выполнить принудительную очистку orphan peer.")

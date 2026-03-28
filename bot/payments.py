@@ -7,6 +7,8 @@ from aiogram.types import LabeledPrice, PreCheckoutQuery
 
 from awg_backend import issue_subscription
 from config import (
+    ADMIN_ID,
+    PAYMENT_MAX_ATTEMPTS,
     PAYMENT_PROVISIONING_LEASE_SECONDS,
     PAYMENT_RETRY_DELAY_SECONDS,
     PURCHASE_CLICK_COOLDOWN_SECONDS,
@@ -19,8 +21,10 @@ from database import (
     claim_payment_and_job_for_provisioning,
     ensure_user_exists,
     finalize_payment_and_job,
+    get_provisioning_attempt_count,
     get_payment_status,
     get_repairable_payments,
+    mark_payment_stuck_manual,
     payment_already_processed,
     persistent_guard_hit,
     save_payment,
@@ -215,14 +219,44 @@ async def process_payment_provisioning(payment_id: str, user_id: int, payload: s
             error_message=str(e)[:500],
             next_retry_at=retry_at,
         )
+        attempts = await get_provisioning_attempt_count(payment_id)
+        if attempts >= PAYMENT_MAX_ATTEMPTS:
+            reason = f"max_attempts_exceeded attempts={attempts}; last_error={str(e)[:220]}"
+            await mark_payment_stuck_manual(payment_id, reason)
+            await write_audit_log(user_id, "payment_provisioning_stuck_manual", f"payment_id={payment_id}; {reason}")
         await write_audit_log(user_id, "payment_provisioning_failed", f"payment_id={payment_id}; retry_at={retry_at}; error={str(e)[:300]}")
         raise
 
 
-async def payment_recovery_worker() -> int:
+async def _notify_admin_stuck(bot: Bot | None, payment_id: str, user_id: int, reason: str) -> None:
+    if bot is None:
+        return
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            (
+                "⚠️ <b>Payment stuck_manual</b>\n\n"
+                f"payment_id=<code>{payment_id}</code>\n"
+                f"user_id=<code>{user_id}</code>\n"
+                f"reason={reason[:200]}"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning("Не удалось отправить stuck alert администратору: %s", e)
+
+
+async def payment_recovery_worker(bot: Bot | None = None) -> int:
     repaired = 0
     jobs = await get_repairable_payments(limit=25)
     for payment_id, user_id, payload in jobs:
+        attempts = await get_provisioning_attempt_count(payment_id)
+        if attempts >= PAYMENT_MAX_ATTEMPTS:
+            reason = f"max_attempts_exceeded attempts={attempts}"
+            await mark_payment_stuck_manual(payment_id, reason)
+            await write_audit_log(user_id, "payment_recovery_stuck_manual", f"payment_id={payment_id}; {reason}")
+            await _notify_admin_stuck(bot, payment_id, user_id, reason)
+            continue
         tariff = TARIFFS.get(payload)
         if not tariff:
             await update_payment_status(payment_id, "failed", error_message="unknown payload in recovery")
@@ -232,4 +266,10 @@ async def payment_recovery_worker() -> int:
             repaired += int(done)
         except Exception as e:
             logger.warning("Recovery failed for payment=%s: %s", payment_id, e)
+            attempts = await get_provisioning_attempt_count(payment_id)
+            if attempts >= PAYMENT_MAX_ATTEMPTS:
+                reason = f"max_attempts_exceeded attempts={attempts}; last_error={str(e)[:180]}"
+                await mark_payment_stuck_manual(payment_id, reason)
+                await write_audit_log(user_id, "payment_recovery_stuck_manual", f"payment_id={payment_id}; {reason}")
+                await _notify_admin_stuck(bot, payment_id, user_id, reason)
     return repaired

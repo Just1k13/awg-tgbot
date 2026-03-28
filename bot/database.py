@@ -159,6 +159,25 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS broadcast_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                total_count INTEGER NOT NULL DEFAULT 0,
+                delivered_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                offset_cursor INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
         await db.execute(
             """
@@ -212,6 +231,15 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS runtime_metrics (
+                metric_key TEXT PRIMARY KEY,
+                metric_value INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub_until ON users(sub_until)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_user_id ON keys(user_id)")
@@ -224,6 +252,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guards_expires ON callback_guards(expires_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_subscription_operations_status ON subscription_operations(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_jobs_status ON broadcast_jobs(status, created_at)")
 
         await db.commit()
     finally:
@@ -694,6 +723,20 @@ async def get_repairable_payments(limit: int = 20) -> list[tuple[str, int, str]]
     )
 
 
+async def get_provisioning_attempt_count(payment_id: str) -> int:
+    row = await fetchone("SELECT attempt_count FROM provisioning_jobs WHERE payment_id = ?", (payment_id,))
+    return int(row[0]) if row else 0
+
+
+async def mark_payment_stuck_manual(payment_id: str, reason: str) -> None:
+    await update_payment_status(
+        payment_id,
+        status="stuck_manual",
+        error_message=reason[:500],
+        next_retry_at=None,
+    )
+
+
 async def cleanup_stale_pending_keys(max_age_seconds: int) -> int:
     cutoff = utc_now_naive().timestamp() - max_age_seconds
     rows = await fetchall(
@@ -708,11 +751,185 @@ async def cleanup_stale_pending_keys(max_age_seconds: int) -> int:
             stale_ids.append(int(key_id))
     if not stale_ids:
         return 0
-    await execute(
-        f"DELETE FROM keys WHERE id IN ({','.join(['?'] * len(stale_ids))})",
-        tuple(stale_ids),
-    )
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.executemany(
+            """
+            UPDATE keys
+            SET state='needs_manual_repair',
+                delete_reason='stale_pending_placeholder',
+                state_updated_at=?
+            WHERE id = ?
+            """,
+            [(now_iso, key_id) for key_id in stale_ids],
+        )
+        await db.commit()
+    finally:
+        await db.close()
     return len(stale_ids)
+
+
+async def increment_metric(metric_key: str, delta: int = 1) -> None:
+    now_iso = utc_now_naive().isoformat()
+    await execute(
+        """
+        INSERT INTO runtime_metrics (metric_key, metric_value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(metric_key) DO UPDATE SET
+            metric_value = metric_value + excluded.metric_value,
+            updated_at = excluded.updated_at
+        """,
+        (metric_key, delta, now_iso),
+    )
+
+
+async def get_metric(metric_key: str) -> int:
+    row = await fetchone("SELECT metric_value FROM runtime_metrics WHERE metric_key = ?", (metric_key,))
+    return int(row[0]) if row else 0
+
+
+async def create_broadcast_job(admin_id: int, text: str) -> int:
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            """
+            INSERT INTO broadcast_jobs (admin_id, text, status, created_at, updated_at)
+            VALUES (?, ?, 'queued', ?, ?)
+            """,
+            (admin_id, text, now_iso, now_iso),
+        )
+        await db.execute("UPDATE pending_broadcasts SET text = ? WHERE admin_id = ?", (text, admin_id))
+        await db.commit()
+        return int(cur.lastrowid)
+    finally:
+        await db.close()
+
+
+async def claim_next_broadcast_job() -> tuple[int, int, str, int] | None:
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            """
+            SELECT id, admin_id, text
+            FROM broadcast_jobs
+            WHERE status = 'queued'
+            ORDER BY created_at ASC
+            LIMIT 1
+            """
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            await db.rollback()
+            return None
+        job_id, admin_id, text = int(row[0]), int(row[1]), str(row[2])
+        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+            total = int((await cursor.fetchone())[0])
+        await db.execute(
+            """
+            UPDATE broadcast_jobs
+            SET status='running',
+                started_at=?,
+                total_count=?,
+                updated_at=?
+            WHERE id = ?
+            """,
+            (now_iso, total, now_iso, job_id),
+        )
+        await db.commit()
+        return job_id, admin_id, text, total
+    finally:
+        await db.close()
+
+
+async def get_broadcast_recipients(offset: int, limit: int) -> list[int]:
+    rows = await fetchall(
+        "SELECT user_id FROM users ORDER BY user_id ASC LIMIT ? OFFSET ?",
+        (limit, offset),
+    )
+    return [int(row[0]) for row in rows]
+
+
+async def update_broadcast_job_progress(job_id: int, delivered_delta: int, failed_delta: int, offset_cursor: int) -> None:
+    await execute(
+        """
+        UPDATE broadcast_jobs
+        SET delivered_count = delivered_count + ?,
+            failed_count = failed_count + ?,
+            offset_cursor = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (delivered_delta, failed_delta, offset_cursor, utc_now_naive().isoformat(), job_id),
+    )
+
+
+async def complete_broadcast_job(job_id: int, status: str, last_error: str | None = None) -> tuple[int, int, int]:
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            """
+            UPDATE broadcast_jobs
+            SET status = ?, last_error = ?, finished_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, last_error, now_iso, now_iso, job_id),
+        )
+        async with db.execute(
+            "SELECT admin_id, delivered_count, failed_count FROM broadcast_jobs WHERE id = ?",
+            (job_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        await db.commit()
+        if not row:
+            return 0, 0, 0
+        return int(row[0]), int(row[1]), int(row[2])
+    finally:
+        await db.close()
+
+
+async def get_pending_jobs_stats() -> dict[str, int]:
+    rows = await fetchall(
+        """
+        SELECT status, COUNT(*)
+        FROM provisioning_jobs
+        GROUP BY status
+        """
+    )
+    data = {str(status): int(count) for status, count in rows}
+    return {
+        "received": data.get("received", 0),
+        "provisioning": data.get("provisioning", 0),
+        "needs_repair": data.get("needs_repair", 0),
+        "stuck_manual": data.get("stuck_manual", 0),
+        "failed": data.get("failed", 0),
+        "applied": data.get("applied", 0),
+    }
+
+
+async def get_recovery_lag_seconds() -> int:
+    row = await fetchone(
+        """
+        SELECT MIN(next_retry_at)
+        FROM provisioning_jobs
+        WHERE status = 'needs_repair'
+          AND next_retry_at IS NOT NULL
+        """
+    )
+    if not row or not row[0]:
+        return 0
+    try:
+        lag = (utc_now_naive() - datetime.fromisoformat(str(row[0]))).total_seconds()
+        return int(max(0, lag))
+    except Exception:
+        return 0
 
 
 def _guard_digest(scope: str, actor_id: int, payload: str) -> str:

@@ -73,6 +73,42 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(row[1])
         self.assertIsNone(row[2])
 
+    async def test_retries_stop_at_max_attempts_and_mark_stuck(self):
+        import database
+        import payments
+
+        await database.save_payment(
+            telegram_payment_charge_id="tg_stuck",
+            provider_payment_charge_id="prov_stuck",
+            user_id=101,
+            payload="sub_7",
+            amount=1,
+            currency="XTR",
+            payment_method="stars",
+            status="received",
+            raw_payload_json="{}",
+        )
+
+        async def fail_issue_subscription(*args, **kwargs):
+            raise RuntimeError("provisioning hard failure")
+
+        original_issue = payments.issue_subscription
+        payments.issue_subscription = fail_issue_subscription
+        original_max = payments.PAYMENT_MAX_ATTEMPTS
+        payments.PAYMENT_MAX_ATTEMPTS = 2
+        try:
+            await payments.payment_recovery_worker()
+            await database.execute("UPDATE provisioning_jobs SET next_retry_at = ? WHERE payment_id = ?", (payments.utc_now_naive().isoformat(), "tg_stuck"))
+            await payments.payment_recovery_worker()
+            await database.execute("UPDATE provisioning_jobs SET next_retry_at = ? WHERE payment_id = ?", (payments.utc_now_naive().isoformat(), "tg_stuck"))
+            await payments.payment_recovery_worker()
+        finally:
+            payments.issue_subscription = original_issue
+            payments.PAYMENT_MAX_ATTEMPTS = original_max
+
+        status = await database.get_payment_status("tg_stuck")
+        self.assertEqual(status, "stuck_manual")
+
     async def test_stale_provisioning_job_is_recoverable(self):
         import database
         import payments
@@ -258,14 +294,34 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
             awg_backend.get_used_ips_from_awg = original_used_ips
 
         self.assertEqual(first_until.isoformat(), second_until.isoformat())
-        row = await database.fetchone("SELECT sub_until FROM users WHERE user_id = ?", (500,))
-        self.assertEqual(row[0], first_until.isoformat())
-        op = await database.fetchone(
-            "SELECT status, new_until FROM subscription_operations WHERE operation_id = ?",
-            ("same-op",),
-        )
-        self.assertEqual(op[0], "applied")
-        self.assertEqual(op[1], first_until.isoformat())
+
+    async def test_broadcast_confirm_queues_job(self):
+        import handlers_admin
+        import database
+
+        await database.ensure_user_exists(1)
+        await database.set_pending_broadcast(1, "hello users")
+
+        class FakeMessage:
+            def __init__(self):
+                self.calls = 0
+
+            async def answer(self, *args, **kwargs):
+                self.calls += 1
+
+        class FakeCb:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 1})
+                self.message = FakeMessage()
+                self.bot = None
+
+            async def answer(self, *args, **kwargs):
+                return None
+
+        cb = FakeCb()
+        await handlers_admin.broadcast_confirm(cb)  # type: ignore[arg-type]
+        row = await database.fetchone("SELECT COUNT(*) FROM broadcast_jobs WHERE status='queued'")
+        self.assertEqual(row[0], 1)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 from datetime import timedelta
+from cryptography.fernet import Fernet
 
 
 from aiogram import F, Router, types
@@ -9,9 +10,10 @@ from awg_backend import (
     clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
     get_orphan_awg_peers, issue_subscription, revoke_user_access,
 )
-from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, logger
+from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, BACKUP_ENCRYPTION_KEY, BACKUP_SECURE_MODE, logger
 from database import (
-    clear_pending_admin_action, clear_pending_broadcast, db_health_info, fetchall, fetchone,
+    clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone,
+    get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
     get_pending_broadcast, get_recent_audit, get_user_meta, pop_pending_admin_action,
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
@@ -479,28 +481,18 @@ async def broadcast_confirm(cb: types.CallbackQuery):
     if not text:
         await cb.answer("Нет ожидающей рассылки", show_alert=True)
         return
-    users = await fetchall("SELECT user_id FROM users")
-    delivered = 0
-    failed = 0
-    for (uid,) in users:
-        try:
-            await cb.bot.send_message(uid, text, disable_web_page_preview=True)
-            delivered += 1
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            failed += 1
-            logger.warning("Не удалось отправить сообщение user_id=%s: %s", uid, e)
+    job_id = await create_broadcast_job(ADMIN_ID, text)
     await clear_pending_broadcast(ADMIN_ID)
-    await write_audit_log(ADMIN_ID, "broadcast", f"delivered={delivered}; failed={failed}")
+    await write_audit_log(ADMIN_ID, "broadcast_queued", f"job_id={job_id}")
     await cb.message.answer(
         (
-            "📢 <b>Рассылка завершена</b>\n\n"
-            f"✅ Доставлено: <b>{delivered}</b>\n"
-            f"❌ Ошибок: <b>{failed}</b>"
+            "📢 <b>Рассылка поставлена в очередь</b>\n\n"
+            f"job_id: <code>{job_id}</code>\n"
+            "Отправка идёт в фоне; итог придёт отдельным сообщением."
         ),
         parse_mode="HTML",
     )
-    await cb.answer("Отправлено")
+    await cb.answer("Поставлено в очередь")
 
 
 @router.callback_query(F.data == CB_BROADCAST_CANCEL)
@@ -714,10 +706,21 @@ async def backup_db(message: types.Message):
             dst.close()
             src.close()
         redacted = Path(tmp_path)
+        payload = redacted.read_bytes()
+        filename = f"redacted_{db_file.name}"
+        caption = (f"📦 Резервная копия базы данных без секретов\n"
+                   f"📅 {utc_now_naive().strftime('%d.%m.%Y %H:%M')}")
+        if BACKUP_SECURE_MODE:
+            if not BACKUP_ENCRYPTION_KEY:
+                await message.answer("❌ BACKUP_SECURE_MODE=1, но BACKUP_ENCRYPTION_KEY не задан.")
+                redacted.unlink(missing_ok=True)
+                return
+            payload = Fernet(BACKUP_ENCRYPTION_KEY.encode("utf-8")).encrypt(payload)
+            filename = f"{filename}.enc"
+            caption += "\n🔐 Secure mode: backup зашифрован (Fernet)."
         await message.answer_document(
-            types.BufferedInputFile(redacted.read_bytes(), filename=f"redacted_{db_file.name}"),
-            caption=(f"📦 Резервная копия базы данных без секретов\n"
-                     f"📅 {utc_now_naive().strftime('%d.%m.%Y %H:%M')}") ,
+            types.BufferedInputFile(payload, filename=filename),
+            caption=caption,
         )
         redacted.unlink(missing_ok=True)
     except Exception as e:
@@ -741,4 +744,23 @@ async def broadcast_prepare(message: types.Message, command: CommandObject):
         ),
         parse_mode="HTML",
         reply_markup=get_broadcast_confirm_kb(),
+    )
+
+
+@router.message(Command("health"), IsAdmin())
+async def health_cmd(message: types.Message):
+    stats = await get_pending_jobs_stats()
+    lag = await get_recovery_lag_seconds()
+    helper_failures = await get_metric("awg_helper_failures")
+    await message.answer(
+        (
+            "🩺 <b>Health report</b>\n\n"
+            f"jobs.received=<b>{stats['received']}</b>\n"
+            f"jobs.provisioning=<b>{stats['provisioning']}</b>\n"
+            f"jobs.needs_repair=<b>{stats['needs_repair']}</b>\n"
+            f"jobs.stuck_manual=<b>{stats['stuck_manual']}</b>\n"
+            f"recovery_lag_sec=<b>{lag}</b>\n"
+            f"awg_helper_failures=<b>{helper_failures}</b>"
+        ),
+        parse_mode="HTML",
     )

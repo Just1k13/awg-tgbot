@@ -58,7 +58,7 @@ async def notify_user_subscription_granted(bot: Bot, user_id: int, days: int, ne
                 "🎁 <b>Вам выдан доступ</b>\n\n"
                 f"⏳ <b>Срок:</b> +{days} дн.\n"
                 f"📅 <b>Действует до:</b> {new_until.strftime('%d.%m.%Y %H:%M')}\n\n"
-                "🔑 Конфиги доступны в разделе <b>Конфиги</b>."
+                "📲 Данные для подключения доступны в разделе <b>Подключить устройство</b>."
             ),
             parse_mode="HTML",
         )

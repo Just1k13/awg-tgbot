@@ -32,6 +32,7 @@ from database import (
     write_audit_log,
 )
 from helpers import utc_now_naive
+from keyboards import get_post_payment_kb
 from ui_constants import CB_BUY_30, CB_BUY_7
 
 router = Router()
@@ -75,7 +76,7 @@ async def _send_stars_invoice(bot: Bot, chat_id: int, payload: str, title: str, 
     await bot.send_invoice(
         chat_id=chat_id,
         title=title,
-        description="Доступ для 2 устройств",
+        description="Безопасный интернет для 2 устройств. После оплаты данные для подключения придут в этот чат.",
         payload=payload,
         provider_token="",
         currency="XTR",
@@ -136,7 +137,10 @@ async def success_pay(message: types.Message):
         await message.answer("✅ Этот платёж уже был обработан.")
         return
     if current_status == "provisioning":
-        await message.answer("⏳ Платёж уже обрабатывается. Подождите немного и проверьте профиль или конфиги.")
+        await message.answer(
+            "⏳ Платёж уже обрабатывается. Обычно это занимает немного времени.",
+            reply_markup=get_post_payment_kb(),
+        )
         return
 
     raw_payload = {
@@ -169,12 +173,17 @@ async def success_pay(message: types.Message):
             await message.answer(
                 (
                     "🎉 <b>Оплата подтверждена</b>\n\n"
-                    "Подписка активирована. Откройте раздел <b>🔑 Конфиги</b>, чтобы получить доступ."
+                    "Доступ активирован.\n"
+                    "Нажмите кнопку ниже — и сразу получите данные для подключения."
                 ),
                 parse_mode="HTML",
+                reply_markup=get_post_payment_kb(),
             )
         else:
-            await message.answer("⏳ Платёж принят. Выдача доступа выполняется в фоне, это обычно занимает до минуты.")
+            await message.answer(
+                "⏳ Платёж принят. Выдача доступа выполняется в фоне, это обычно занимает немного времени.",
+                reply_markup=get_post_payment_kb(),
+            )
     except Exception as e:
         logger.exception("Ошибка обработки оплаты: %s", e)
         retry_at = (utc_now_naive() + timedelta(seconds=PAYMENT_RETRY_DELAY_SECONDS)).isoformat()
@@ -186,7 +195,12 @@ async def success_pay(message: types.Message):
         )
         await write_audit_log(message.from_user.id, "payment_provision_failed", str(e)[:500])
         await message.answer(
-            "❌ Платёж получен, но возникла ошибка при активации доступа. Администратор увидит это в журнале и сможет повторно выдать доступ."
+            (
+                "⚠️ Платёж получен, но подключение временно не удалось подготовить.\n"
+                "Мы уже сохранили заявку на повторную обработку.\n"
+                "Если вопрос срочный — напишите в поддержку."
+            ),
+            reply_markup=get_post_payment_kb(),
         )
 
 

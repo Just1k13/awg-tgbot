@@ -302,8 +302,8 @@ tail -f /var/log/awg-tgbot/bot.log
 - `/orphans` — посмотреть orphan peer;
 - `/audit` — журнал действий;
 - `/sync_awg` — быстрая проверка AWG ↔ БД;
-- `/clean_orphans` — аккуратная очистка orphan peer;
-- `/clean_orphans_force` — принудительная очистка;
+- `/clean_orphans` — quarantine-этап (помечает orphan peer, без физического удаления);
+- `/clean_orphans_force` — физическое удаление orphan peer (использовать после проверки);
 - `/backup` — резервная копия БД без секретных данных;
 - `/send` — массовая рассылка.
 
@@ -395,6 +395,25 @@ sudo awg-tgbot status
 | Лог установки | `/var/log/awg-tgbot-install.log` |
 | Лог приложения | `/var/log/awg-tgbot/bot.log` |
 | Сохранённая ветка | `/opt/amnezia/bot/.state/repo_branch` |
+| Helper policy | `/etc/awg-bot-helper.json` |
+| Helper sudoers | `/etc/sudoers.d/awg-bot-helper` |
+| Helper binary | `/usr/local/libexec/awg-bot-helper` |
+
+---
+
+### 8) Какие переменные в `.env` важны для runtime
+
+Ключевые runtime-переменные (`API_TOKEN`, `ADMIN_ID`, `SERVER_PUBLIC_KEY`, `SERVER_IP`, `DOCKER_CONTAINER`, `WG_INTERFACE`) должны оставаться валидными.
+
+Дополнительно поддерживаются:
+- `AWG_HELPER_PATH`
+- `AWG_HELPER_USE_SUDO`
+- `AWG_HELPER_POLICY_PATH`
+- `PENDING_KEY_TTL_SECONDS`
+- `PAYMENT_RETRY_DELAY_SECONDS`
+- `PAYMENT_PROVISIONING_LEASE_SECONDS`
+
+Installer сам поддерживает в актуальном состоянии helper/policy/sudoers файлы; после ручных правок `DOCKER_CONTAINER`/`WG_INTERFACE` всегда выполняйте `sync-helper-policy`.
 
 ---
 

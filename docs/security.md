@@ -26,6 +26,13 @@
 - Installer syncs policy from `.env` during install/update and validates values before writing policy.
 - `awg-tgbot status` displays both env target and policy target; on mismatch operator must run `sudo awg-tgbot sync-helper-policy`.
 
+## Destructive admin actions safety
+
+- Orphan cleanup is explicitly two-step:
+  - `/clean_orphans` and admin inline cleanup only move orphan peers into quarantine protection;
+  - `/clean_orphans_force` performs physical peer deletion.
+- `revoke`/`delete` flows keep DB states (`revoke_pending` / `delete_pending`) on partial AWG failures to avoid silent data loss.
+
 ## Encryption
 
 - New values are written as `enc:v2` (PBKDF2HMAC-SHA256).

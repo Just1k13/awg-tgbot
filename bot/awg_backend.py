@@ -611,19 +611,57 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                     )
 
                 reserved_rows: list[tuple[int, int, str, str, str, str]] = []
+                reuse_deleted_rows: list[tuple[str, str, str, str, int, int]] = []
                 for device_num, ip in zip(next_device_nums, free_ips, strict=False):
                     suffix = operation_id or str(uuid.uuid4())
                     placeholder_key = f"pending:{suffix}:{uuid.uuid4()}"
                     placeholders.append(placeholder_key)
                     reserved_rows.append((user_id, device_num, placeholder_key, "", ip, now.isoformat()))
+                    reuse_deleted_rows.append((placeholder_key, "", ip, now.isoformat(), user_id, device_num))
 
-                await db.executemany(
-                    """
-                    INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    reserved_rows,
-                )
+                if reuse_deleted_rows:
+                    await db.executemany(
+                        """
+                        UPDATE keys
+                        SET public_key = ?,
+                            config = ?,
+                            ip = ?,
+                            created_at = ?,
+                            client_private_key = NULL,
+                            psk_key = NULL,
+                            vpn_key = NULL,
+                            delete_reason = NULL,
+                            state = 'pending',
+                            state_updated_at = ?
+                        WHERE user_id = ?
+                          AND device_num = ?
+                          AND state = 'deleted'
+                        """,
+                        [
+                            (placeholder_key, config, ip, created_at, now.isoformat(), uid, device_num)
+                            for placeholder_key, config, ip, created_at, uid, device_num in reuse_deleted_rows
+                        ],
+                    )
+
+                insert_rows: list[tuple[int, int, str, str, str, str]] = []
+                for row in reserved_rows:
+                    uid, device_num, *_ = row
+                    async with db.execute(
+                        "SELECT 1 FROM keys WHERE user_id = ? AND device_num = ?",
+                        (uid, device_num),
+                    ) as cursor:
+                        exists_row = await cursor.fetchone()
+                    if not exists_row:
+                        insert_rows.append(row)
+
+                if insert_rows:
+                    await db.executemany(
+                        """
+                        INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        insert_rows,
+                    )
                 await db.executemany(
                     "UPDATE keys SET state='pending', state_updated_at=? WHERE public_key = ?",
                     [(now.isoformat(), placeholder_key) for placeholder_key in placeholders],

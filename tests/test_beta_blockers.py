@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import tempfile
@@ -199,15 +200,18 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         original_keypair = awg_backend.generate_keypair
         original_psk = awg_backend.generate_psk
         original_add = awg_backend.add_peer_to_awg
+        original_used_ips = awg_backend.get_used_ips_from_awg
         awg_backend.generate_keypair = fake_keypair
         awg_backend.generate_psk = fake_psk
         awg_backend.add_peer_to_awg = fake_add_peer
+        awg_backend.get_used_ips_from_awg = lambda: asyncio.sleep(0, result=set())  # type: ignore[assignment]
         try:
             new_until = await awg_backend.issue_subscription(400, 7, operation_id="test-op")
         finally:
             awg_backend.generate_keypair = original_keypair
             awg_backend.generate_psk = original_psk
             awg_backend.add_peer_to_awg = original_add
+            awg_backend.get_used_ips_from_awg = original_used_ips
 
         self.assertIsNotNone(new_until)
         rows = await database.fetchall(
@@ -239,9 +243,11 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         original_keypair = awg_backend.generate_keypair
         original_psk = awg_backend.generate_psk
         original_add = awg_backend.add_peer_to_awg
+        original_used_ips = awg_backend.get_used_ips_from_awg
         awg_backend.generate_keypair = fake_keypair
         awg_backend.generate_psk = fake_psk
         awg_backend.add_peer_to_awg = fake_add_peer
+        awg_backend.get_used_ips_from_awg = lambda: asyncio.sleep(0, result=set())  # type: ignore[assignment]
         try:
             first_until = await awg_backend.issue_subscription(500, 7, operation_id="same-op")
             second_until = await awg_backend.issue_subscription(500, 7, operation_id="same-op")
@@ -249,6 +255,7 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
             awg_backend.generate_keypair = original_keypair
             awg_backend.generate_psk = original_psk
             awg_backend.add_peer_to_awg = original_add
+            awg_backend.get_used_ips_from_awg = original_used_ips
 
         self.assertEqual(first_until.isoformat(), second_until.isoformat())
         row = await database.fetchone("SELECT sub_until FROM users WHERE user_id = ?", (500,))

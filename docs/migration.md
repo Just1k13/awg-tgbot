@@ -11,6 +11,10 @@ After update, installer will:
 
 If bot was previously in `docker` group, this is no longer required.
 
+Also note:
+- `sync-helper-policy` writes policy from current `.env` (`DOCKER_CONTAINER` + `WG_INTERFACE`);
+- runtime startup checks hard-fail on `.env` vs helper policy mismatch, so this sync step is mandatory after manual target edits.
+
 ## 2) Encryption migration
 
 - Existing encrypted records (`enc:v1`) continue to decrypt normally.
@@ -38,3 +42,7 @@ If bot was previously in `docker` group, this is no longer required.
    - `sudo awg-tgbot sync-helper-policy`
    - `sudo awg-tgbot status`
 6. In app logs verify helper operations are successful and no `sudo` permission errors.
+7. Validate orphan flow semantics in admin UX:
+   - `/clean_orphans` performs quarantine only;
+   - `/clean_orphans_force` performs physical deletion.
+8. If you used a custom DB path in old installation, verify `DB_PATH` in `.env` remained unchanged after update.

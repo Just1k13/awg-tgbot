@@ -1,104 +1,32 @@
-import ipaddress
-import json
 import logging
 import os
-import subprocess
-from pathlib import Path
 
-from dotenv import load_dotenv
-
-ENV_FILE = Path('.env')
-load_dotenv(ENV_FILE)
-
-DEFAULT_ENV: dict[str, str] = {
-    'SERVER_NAME': 'My VPN',
-    'DOWNLOAD_URL': 'https://m-1-14-3w5hsuiikq-ez.a.run.app/ru/downloads',
-    'PUBLIC_HOST': '',
-    'SUPPORT_USERNAME': '',
-    'AWG_I1': '<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>',
-    'AWG_PROTOCOL_VERSION': '2',
-    'AWG_TRANSPORT_PROTO': 'udp',
-    'DOCKER_CONTAINER': 'amnezia-awg2',
-    'WG_INTERFACE': 'awg0',
-    'DB_PATH': 'vpn_bot.db',
-    'VPN_SUBNET_PREFIX': '10.8.1.',
-    'FIRST_CLIENT_OCTET': '3',
-    'MAX_CLIENT_OCTET': '254',
-    'CONFIGS_PER_USER': '2',
-    'CLEANUP_INTERVAL_SECONDS': '300',
-    'PRIMARY_DNS': '1.1.1.1',
-    'SECONDARY_DNS': '1.0.0.1',
-    'CLIENT_MTU': '1376',
-    'PERSISTENT_KEEPALIVE': '25',
-    'CLIENT_ALLOWED_IPS': '0.0.0.0/0, ::/0',
-    'STARS_PRICE_7_DAYS': '15',
-    'STARS_PRICE_30_DAYS': '50',
-    'PURCHASE_CLICK_COOLDOWN_SECONDS': '2',
-    'PURCHASE_RATE_LIMIT_TTL_SECONDS': '3600',
-    'ADMIN_COMMAND_COOLDOWN_SECONDS': '2',
-    'DOCKER_RETRIES': '3',
-    'DOCKER_RETRY_BASE_DELAY': '0.5',
-    'DOCKER_TIMEOUT_SECONDS': '20',
-    'AWG_HELPER_PATH': '/usr/local/libexec/awg-bot-helper',
-    'AWG_HELPER_USE_SUDO': '1',
-    'AWG_HELPER_POLICY_PATH': '/etc/awg-bot-helper.json',
-    'AWG_PEERS_CACHE_TTL_SECONDS': '5.0',
-    'PENDING_KEY_TTL_SECONDS': '900',
-    'PAYMENT_RETRY_DELAY_SECONDS': '60',
-    'PAYMENT_PROVISIONING_LEASE_SECONDS': '180',
-    'PAYMENT_MAX_ATTEMPTS': '5',
-    'BROADCAST_BATCH_SIZE': '20',
-    'BROADCAST_BATCH_DELAY_SECONDS': '0.2',
-    'RECONCILIATION_INTERVAL_SECONDS': '45',
-    'BACKUP_SECURE_MODE': '0',
-    'BACKUP_ENCRYPTION_KEY': '',
-    'AWG_JC': '6',
-    'AWG_JMIN': '10',
-    'AWG_JMAX': '50',
-    'AWG_S1': '37',
-    'AWG_S2': '98',
-    'AWG_S3': '47',
-    'AWG_S4': '14',
-    'AWG_H1': '1486401722-1692300209',
-    'AWG_H2': '1696990121-1817276760',
-    'AWG_H3': '1841833217-1995591429',
-    'AWG_H4': '2109962185-2145796739',
-    'AWG_I2': '',
-    'AWG_I3': '',
-    'AWG_I4': '',
-    'AWG_I5': '',
-    'IGNORE_PEERS': '',
-}
+from config_defaults import DEFAULT_ENV
+from config_detect import (
+    detect_awg_from_container,
+    detect_public_host,
+    find_awg_container,
+    resolve_public_ipv4,
+)
+from config_env import env_float, env_int, env_with_runtime_default, save_env_value_raw
+from config_validate import read_helper_policy, validate_helper_policy, validate_required_env
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def _read_env_file(path: Path) -> dict[str, str]:
-    data: dict[str, str] = {}
-    if not path.exists():
-        return data
-    for raw_line in path.read_text(encoding='utf-8').splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        data[key.strip()] = value.strip()
-    return data
+# compatibility aliases for previous private helpers
+_detect_awg_from_container = detect_awg_from_container
+_detect_public_host = detect_public_host
+def _find_awg_container() -> str:
+    return find_awg_container(DEFAULT_ENV['DOCKER_CONTAINER'])
 
-
-_existing_env = _read_env_file(ENV_FILE)
-
-
-def _save_env_value(name: str, value: str) -> None:
-    _existing_env[name] = value
-    content = '\n'.join(f'{key}={val}' for key, val in sorted(_existing_env.items())) + '\n'
-    ENV_FILE.write_text(content, encoding='utf-8')
-    os.environ[name] = value
+_read_helper_policy = read_helper_policy
+_env_with_runtime_default = env_with_runtime_default
 
 
 def save_env_value(name: str, value: str) -> None:
-    _save_env_value(name, value)
+    save_env_value_raw(name, value)
     globals()[name] = value
 
 
@@ -118,212 +46,6 @@ def maybe_set_support_username(username: str | None) -> str:
     return normalized
 
 
-def _command_exists(name: str) -> bool:
-    return subprocess.run(['bash', '-lc', f'command -v {name} >/dev/null 2>&1'], check=False).returncode == 0
-
-
-def _run_local_command(args: list[str], timeout: int = 10) -> str:
-    result = subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or 'command failed')
-    return result.stdout.strip()
-
-
-def _docker_available() -> bool:
-    if not _command_exists('docker'):
-        return False
-    try:
-        _run_local_command(['docker', 'ps'], timeout=8)
-        return True
-    except Exception:
-        return False
-
-
-def _docker_exec(container: str, command: list[str], timeout: int = 10) -> str:
-    return _run_local_command(['docker', 'exec', '-i', container, *command], timeout=timeout)
-
-
-def _valid_container(name: str) -> bool:
-    try:
-        _run_local_command(['docker', 'inspect', name], timeout=8)
-        return True
-    except Exception:
-        return False
-
-
-def _find_awg_container() -> str:
-    configured = os.getenv('DOCKER_CONTAINER', '').strip()
-    if configured and _docker_available() and _valid_container(configured):
-        return configured
-    if not _docker_available():
-        return configured or DEFAULT_ENV['DOCKER_CONTAINER']
-    try:
-        lines = _run_local_command(['docker', 'ps', '--format', '{{.Names}}\t{{.Image}}'], timeout=8).splitlines()
-    except Exception:
-        return configured or DEFAULT_ENV['DOCKER_CONTAINER']
-
-    ranked: list[tuple[int, str]] = []
-    patterns = [('amnezia-awg', 100), ('awg', 70), ('wireguard', 60), ('vpn', 30)]
-    for raw in lines:
-        parts = raw.split('\t', 1)
-        name = parts[0].strip()
-        image = parts[1].strip() if len(parts) > 1 else ''
-        haystack = f'{name} {image}'.lower()
-        score = 0
-        for pattern, weight in patterns:
-            if pattern in haystack:
-                score += weight
-        if score:
-            ranked.append((score, name))
-    if ranked:
-        ranked.sort(reverse=True)
-        return ranked[0][1]
-    return configured or DEFAULT_ENV['DOCKER_CONTAINER']
-
-
-def _is_public_ip(value: str) -> bool:
-    try:
-        addr = ipaddress.ip_address(value)
-        return addr.version == 4 and not (addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_multicast or addr.is_unspecified)
-    except ValueError:
-        return False
-
-
-def _resolve_public_ipv4(value: str) -> str:
-    value = value.strip()
-    if not value:
-        return ''
-    if _is_public_ip(value):
-        return value
-    return ''
-
-
-def _detect_public_host() -> str:
-    direct = _resolve_public_ipv4(os.getenv('PUBLIC_HOST', '').strip())
-    if direct:
-        return direct
-
-    if _command_exists('curl'):
-        for url in ('https://api.ipify.org', 'https://ifconfig.me/ip', 'https://ipv4.icanhazip.com'):
-            try:
-                value = _run_local_command(['curl', '-4', '-fsSL', url], timeout=8).strip()
-                if _is_public_ip(value):
-                    return value
-            except Exception:
-                continue
-    return ''
-
-
-def _parse_subnet_prefix(show_output: str) -> str:
-    prefixes: list[str] = []
-    for line in show_output.splitlines():
-        lowered = line.strip().lower()
-        if not lowered.startswith('allowed ips:'):
-            continue
-        ips_part = line.split(':', 1)[1]
-        for piece in ips_part.split(','):
-            token = piece.strip().split('/')[0]
-            octets = token.split('.')
-            if len(octets) == 4 and all(part.isdigit() for part in octets):
-                prefixes.append('.'.join(octets[:3]) + '.')
-    if not prefixes:
-        return ''
-    return max(set(prefixes), key=prefixes.count)
-
-
-def _detect_awg_from_container(container: str, interface_hint: str) -> dict[str, str]:
-    detected: dict[str, str] = {}
-    if not container or not _docker_available() or not _valid_container(container):
-        return detected
-
-    show_output = ''
-    last_error: Exception | None = None
-    for cmd in ([['awg', 'show', interface_hint], ['awg', 'show']]):
-        try:
-            show_output = _docker_exec(container, cmd, timeout=12)
-            if show_output:
-                break
-        except Exception as e:
-            last_error = e
-    if not show_output:
-        if last_error:
-            logger.info('Автоопределение AWG пропущено: %s', last_error)
-        return detected
-
-    mapping = {
-        'jc:': 'AWG_JC',
-        'jmin:': 'AWG_JMIN',
-        'jmax:': 'AWG_JMAX',
-        's1:': 'AWG_S1',
-        's2:': 'AWG_S2',
-        's3:': 'AWG_S3',
-        's4:': 'AWG_S4',
-        'h1:': 'AWG_H1',
-        'h2:': 'AWG_H2',
-        'h3:': 'AWG_H3',
-        'h4:': 'AWG_H4',
-    }
-
-    for raw_line in show_output.splitlines():
-        line = raw_line.strip()
-        lowered = line.lower()
-        if lowered.startswith('interface: '):
-            detected['WG_INTERFACE'] = line.split(':', 1)[1].strip()
-            continue
-        if lowered.startswith('public key: '):
-            detected['SERVER_PUBLIC_KEY'] = line.split(':', 1)[1].strip()
-            continue
-        if lowered.startswith('listening port: '):
-            detected['DETECTED_AWG_PORT'] = line.split(':', 1)[1].strip()
-            continue
-        for prefix, env_name in mapping.items():
-            if lowered.startswith(prefix):
-                detected[env_name] = line.split(':', 1)[1].strip()
-                break
-
-    subnet_prefix = _parse_subnet_prefix(show_output)
-    if subnet_prefix:
-        detected['VPN_SUBNET_PREFIX'] = subnet_prefix
-
-    port_value = detected.get('DETECTED_AWG_PORT', '').strip()
-    if port_value:
-        try:
-            host_port_output = _run_local_command(['docker', 'port', container, f'{port_value}/udp'], timeout=10)
-            first_line = host_port_output.strip().splitlines()[0]
-            host_port = first_line.rsplit(':', 1)[-1].strip()
-            if host_port:
-                detected['DETECTED_HOST_PORT'] = host_port
-        except Exception:
-            detected['DETECTED_HOST_PORT'] = port_value
-
-    return detected
-
-
-def _env_with_runtime_default(name: str, default: str) -> str:
-    value = os.getenv(name, '').strip()
-    if value:
-        return value
-    return default
-
-
-def _read_helper_policy(path: Path) -> tuple[str, str, str]:
-    if not path.exists():
-        return '', '', f'helper policy not found: {path}'
-    if path.is_symlink():
-        return '', '', f'helper policy must not be symlink: {path}'
-    try:
-        raw = json.loads(path.read_text(encoding='utf-8'))
-    except PermissionError as e:
-        return '', '', f'helper policy unreadable by runtime user: {e}'
-    except Exception as e:
-        return '', '', f'helper policy parse failed: {e}'
-    if not isinstance(raw, dict):
-        return '', '', 'helper policy must be a JSON object'
-    container = str(raw.get('container', '')).strip()
-    interface = str(raw.get('interface', '')).strip()
-    return container, interface, ''
-
-
 AUTO_DETECT_ON_IMPORT = os.getenv('CONFIG_AUTODETECT_ON_IMPORT', '0').strip() == '1'
 if AUTO_DETECT_ON_IMPORT:
     DOCKER_CONTAINER_HINT = _find_awg_container()
@@ -336,7 +58,7 @@ else:
     _detected_awg = {}
     PUBLIC_HOST_HINT = _env_with_runtime_default('PUBLIC_HOST', DEFAULT_ENV['PUBLIC_HOST'])
 _raw_public_host = os.getenv('PUBLIC_HOST', '').strip()
-PUBLIC_HOST_HINT = _resolve_public_ipv4(PUBLIC_HOST_HINT)
+PUBLIC_HOST_HINT = resolve_public_ipv4(PUBLIC_HOST_HINT)
 _public_host_error = ''
 if _raw_public_host and not PUBLIC_HOST_HINT:
     _public_host_error = 'PUBLIC_HOST (ожидается публичный IPv4 без порта)'
@@ -351,7 +73,7 @@ _server_ip_error = ''
 if _raw_server_ip:
     if ':' in _raw_server_ip:
         raw_host, raw_port = _raw_server_ip.rsplit(':', 1)
-        resolved_host = _resolve_public_ipv4(raw_host)
+        resolved_host = resolve_public_ipv4(raw_host)
         if resolved_host and raw_port.isdigit() and 1 <= int(raw_port) <= 65535:
             SERVER_IP_HINT = f'{resolved_host}:{raw_port}'
         else:
@@ -376,26 +98,6 @@ if AUTO_DETECT_ON_IMPORT and _detected_awg:
     if SERVER_IP_HINT:
         summary_parts.append(f'endpoint={SERVER_IP_HINT}')
     logger.info('Автоопределение AWG: %s', ', '.join(summary_parts))
-
-
-def env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None or value == '':
-        return default
-    try:
-        return int(value)
-    except ValueError as e:
-        raise RuntimeError(f'Некорректное целое число в {name}: {value}') from e
-
-
-def env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None or value == '':
-        return default
-    try:
-        return float(value)
-    except ValueError as e:
-        raise RuntimeError(f'Некорректное число в {name}: {value}') from e
 
 
 API_TOKEN = os.getenv('API_TOKEN', '').strip()
@@ -469,35 +171,19 @@ RECONCILIATION_INTERVAL_SECONDS = env_int('RECONCILIATION_INTERVAL_SECONDS', int
 BACKUP_SECURE_MODE = env_int('BACKUP_SECURE_MODE', int(DEFAULT_ENV['BACKUP_SECURE_MODE'])) == 1
 BACKUP_ENCRYPTION_KEY = _env_with_runtime_default('BACKUP_ENCRYPTION_KEY', DEFAULT_ENV['BACKUP_ENCRYPTION_KEY'])
 
-required_missing = []
-if not API_TOKEN:
-    required_missing.append('API_TOKEN')
-if ADMIN_ID <= 0:
-    required_missing.append('ADMIN_ID')
-if not SERVER_PUBLIC_KEY:
-    required_missing.append('SERVER_PUBLIC_KEY')
-if not SERVER_IP:
-    required_missing.append(_server_ip_error or 'SERVER_IP')
-if _public_host_error:
-    required_missing.append(_public_host_error)
-if not ENCRYPTION_SECRET:
-    required_missing.append('ENCRYPTION_SECRET')
-if required_missing:
-    raise RuntimeError(
-        'Не заданы или некорректны переменные окружения: '
-        + ', '.join(required_missing)
-        + '. Запусти установщик awg-tgbot.sh или заполни .env вручную.'
-    )
+validate_required_env(
+    api_token=API_TOKEN,
+    admin_id=ADMIN_ID,
+    server_public_key=SERVER_PUBLIC_KEY,
+    server_ip=SERVER_IP,
+    encryption_secret=ENCRYPTION_SECRET,
+    server_ip_error=_server_ip_error,
+    public_host_error=_public_host_error,
+)
 
-policy_container, policy_interface, policy_error = _read_helper_policy(Path(AWG_HELPER_POLICY_PATH))
-if policy_error:
-    if policy_error.startswith('helper policy unreadable by runtime user:'):
-        logger.info('AWG helper policy status: %s', policy_error)
-    else:
-        logger.warning('AWG helper policy status: %s', policy_error)
-elif policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:
-    raise RuntimeError(
-        'AWG helper policy mismatch: '
-        f'env={DOCKER_CONTAINER}/{WG_INTERFACE} policy={policy_container}/{policy_interface}. '
-        'Выполни sync-helper-policy в installer.'
-    )
+validate_helper_policy(
+    policy_path=AWG_HELPER_POLICY_PATH,
+    docker_container=DOCKER_CONTAINER,
+    wg_interface=WG_INTERFACE,
+    logger=logger,
+)

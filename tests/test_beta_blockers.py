@@ -323,6 +323,20 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         row = await database.fetchone("SELECT COUNT(*) FROM broadcast_jobs WHERE status='queued'")
         self.assertEqual(row[0], 1)
 
+    async def test_broadcast_targets_are_snapshotted_at_claim_time(self):
+        import database
+
+        await database.ensure_user_exists(10)
+        await database.ensure_user_exists(11)
+        job_id = await database.create_broadcast_job(1, "snapshot")
+        claimed = await database.claim_next_broadcast_job()
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed[0], job_id)
+
+        await database.ensure_user_exists(12)
+        recipients = await database.get_broadcast_recipients(job_id, 0, 50)
+        self.assertEqual(recipients, [10, 11])
+
 
 if __name__ == "__main__":
     unittest.main()

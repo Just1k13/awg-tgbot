@@ -178,6 +178,17 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS broadcast_job_targets (
+                job_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (job_id, user_id),
+                FOREIGN KEY (job_id) REFERENCES broadcast_jobs(id) ON DELETE CASCADE
+            )
+            """
+        )
 
         await db.execute(
             """
@@ -253,6 +264,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_subscription_operations_status ON subscription_operations(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_jobs_status ON broadcast_jobs(status, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_targets_job ON broadcast_job_targets(job_id, user_id)")
 
         await db.commit()
     finally:
@@ -828,7 +840,15 @@ async def claim_next_broadcast_job() -> tuple[int, int, str, int] | None:
             await db.rollback()
             return None
         job_id, admin_id, text = int(row[0]), int(row[1]), str(row[2])
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
+        await db.execute("DELETE FROM broadcast_job_targets WHERE job_id = ?", (job_id,))
+        await db.execute(
+            """
+            INSERT INTO broadcast_job_targets (job_id, user_id, created_at)
+            SELECT ?, user_id, ? FROM users
+            """,
+            (job_id, now_iso),
+        )
+        async with db.execute("SELECT COUNT(*) FROM broadcast_job_targets WHERE job_id = ?", (job_id,)) as cursor:
             total = int((await cursor.fetchone())[0])
         await db.execute(
             """
@@ -847,10 +867,10 @@ async def claim_next_broadcast_job() -> tuple[int, int, str, int] | None:
         await db.close()
 
 
-async def get_broadcast_recipients(offset: int, limit: int) -> list[int]:
+async def get_broadcast_recipients(job_id: int, offset: int, limit: int) -> list[int]:
     rows = await fetchall(
-        "SELECT user_id FROM users ORDER BY user_id ASC LIMIT ? OFFSET ?",
-        (limit, offset),
+        "SELECT user_id FROM broadcast_job_targets WHERE job_id = ? ORDER BY user_id ASC LIMIT ? OFFSET ?",
+        (job_id, limit, offset),
     )
     return [int(row[0]) for row in rows]
 
@@ -887,6 +907,7 @@ async def complete_broadcast_job(job_id: int, status: str, last_error: str | Non
             (job_id,),
         ) as cursor:
             row = await cursor.fetchone()
+        await db.execute("DELETE FROM broadcast_job_targets WHERE job_id = ?", (job_id,))
         await db.commit()
         if not row:
             return 0, 0, 0

@@ -973,18 +973,19 @@ async def reconcile_pending_awg_state() -> dict[str, int]:
     db = await open_db()
     stats = {"activated": 0, "deleted": 0, "marked_manual": 0, "awg_removed": 0}
     users_for_finalize: set[int] = set()
+    finalize_intent: dict[int, set[str]] = {}
     try:
         await db.execute("BEGIN IMMEDIATE")
         async with db.execute(
             """
-            SELECT id, user_id, public_key, state, created_at
+            SELECT id, user_id, public_key, state, created_at, COALESCE(delete_reason, '')
             FROM keys
             WHERE state IN ('pending', 'revoke_pending', 'delete_pending')
             """
         ) as cursor:
             rows = await cursor.fetchall()
 
-        for key_id, user_id, public_key, state, created_at in rows:
+        for key_id, user_id, public_key, state, created_at, delete_reason in rows:
             key = (public_key or "").strip()
             if state == "pending":
                 if key.startswith("pending:"):
@@ -1024,27 +1025,48 @@ async def reconcile_pending_awg_state() -> dict[str, int]:
                     continue
             await db.execute("UPDATE keys SET state='deleted', state_updated_at=? WHERE id=?", (now_iso, key_id))
             stats["deleted"] += 1
-            users_for_finalize.add(int(user_id))
+            user_id_int = int(user_id)
+            users_for_finalize.add(user_id_int)
+            reason = str(delete_reason or "").strip() or "unknown"
+            finalize_intent.setdefault(user_id_int, set()).add(reason)
 
         for user_id in users_for_finalize:
             async with db.execute(
-                "SELECT COUNT(*) FROM keys WHERE user_id=? AND state IN ('revoke_pending','delete_pending')",
+                "SELECT state FROM keys WHERE user_id=?",
                 (user_id,),
             ) as cursor:
-                pending_left = int((await cursor.fetchone())[0])
-            if pending_left > 0:
+                state_rows = [str(row[0]) for row in await cursor.fetchall()]
+            if not state_rows:
                 continue
-            async with db.execute(
-                "SELECT COUNT(*) FROM keys WHERE user_id=? AND state='needs_manual_repair'",
-                (user_id,),
-            ) as cursor:
-                has_manual = int((await cursor.fetchone())[0]) > 0
-            if has_manual:
+            state_set = set(state_rows)
+            has_live_keys = any(
+                state in {"active", "pending", "revoke_pending", "delete_pending"}
+                for state in state_set
+            )
+            if has_live_keys:
                 continue
-            await db.execute("DELETE FROM keys WHERE user_id=?", (user_id,))
+            if "needs_manual_repair" in state_set:
+                continue
+            if any(state != "deleted" for state in state_set):
+                await db.execute(
+                    "INSERT INTO audit_log (user_id, action, details, created_at) VALUES (?, ?, ?, ?)",
+                    (user_id, "reconcile_user_finalize_skipped", f"unexpected_states={','.join(sorted(state_set))}", now_iso),
+                )
+                continue
+
+            intents = finalize_intent.get(user_id, set())
+            if "user_delete" in intents:
+                await db.execute("DELETE FROM keys WHERE user_id=?", (user_id,))
+                await db.execute("DELETE FROM users WHERE user_id=?", (user_id,))
+                continue
+            if "revoke_expired_or_admin" in intents:
+                await db.execute("DELETE FROM keys WHERE user_id=?", (user_id,))
+                await db.execute("UPDATE users SET sub_until='0' WHERE user_id=?", (user_id,))
+                continue
+
             await db.execute(
-                "UPDATE users SET sub_until='0' WHERE user_id=?",
-                (user_id,),
+                "INSERT INTO audit_log (user_id, action, details, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, "reconcile_user_finalize_skipped", f"ambiguous_intent={','.join(sorted(intents)) or 'none'}", now_iso),
             )
         await db.commit()
     finally:

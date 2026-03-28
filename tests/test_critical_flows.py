@@ -278,8 +278,8 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
             await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (701, '2026-06-01T00:00:00', '2026-01-01T00:00:00')")
             await db.execute(
                 """
-                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
-                VALUES (701, 1, 'DELETEPUB=', '', '10.8.1.71', '2026-01-01T00:00:00', 'delete_pending')
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, delete_reason)
+                VALUES (701, 1, 'DELETEPUB=', '', '10.8.1.71', '2026-01-01T00:00:00', 'delete_pending', 'user_delete')
                 """
             )
             await db.commit()
@@ -294,6 +294,107 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats["deleted"], 1)
         row = await database.fetchone("SELECT COUNT(*) FROM keys WHERE user_id=701")
         self.assertEqual(row[0], 0)
+
+    async def test_reconciliation_does_not_finalize_user_if_active_key_exists(self):
+        import awg_backend
+        import database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (702, '2026-06-01T00:00:00', '2026-01-01T00:00:00')")
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, delete_reason)
+                VALUES (702, 1, 'DELETE-702', '', '10.8.1.72', '2026-01-01T00:00:00', 'delete_pending', 'user_delete')
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
+                VALUES (702, 2, 'ACTIVE-702', '', '10.8.1.73', '2026-01-01T00:00:00', 'active')
+                """
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        original_peers = awg_backend.get_awg_peers
+        awg_backend.get_awg_peers = lambda: asyncio.sleep(0, result=[])  # type: ignore[assignment]
+        try:
+            await awg_backend.reconcile_pending_awg_state()
+        finally:
+            awg_backend.get_awg_peers = original_peers
+        count_keys = await database.fetchone("SELECT COUNT(*) FROM keys WHERE user_id=702")
+        self.assertEqual(count_keys[0], 2)
+        sub = await database.fetchone("SELECT sub_until FROM users WHERE user_id=702")
+        self.assertEqual(sub[0], "2026-06-01T00:00:00")
+
+    async def test_reconciliation_does_not_finalize_with_manual_repair_state(self):
+        import awg_backend
+        import database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (703, '2026-06-01T00:00:00', '2026-01-01T00:00:00')")
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, delete_reason)
+                VALUES (703, 1, 'REVOKE-703', '', '10.8.1.74', '2026-01-01T00:00:00', 'revoke_pending', 'revoke_expired_or_admin')
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, delete_reason)
+                VALUES (703, 2, 'MANUAL-703', '', '10.8.1.75', '2026-01-01T00:00:00', 'needs_manual_repair', 'pending_stuck')
+                """
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        original_peers = awg_backend.get_awg_peers
+        awg_backend.get_awg_peers = lambda: asyncio.sleep(0, result=[])  # type: ignore[assignment]
+        try:
+            await awg_backend.reconcile_pending_awg_state()
+        finally:
+            awg_backend.get_awg_peers = original_peers
+        sub = await database.fetchone("SELECT sub_until FROM users WHERE user_id=703")
+        self.assertEqual(sub[0], "2026-06-01T00:00:00")
+        rows = await database.fetchall("SELECT state FROM keys WHERE user_id=703 ORDER BY device_num")
+        self.assertEqual([r[0] for r in rows], ["deleted", "needs_manual_repair"])
+
+    async def test_reconciliation_mixed_partial_cleanup_keeps_data(self):
+        import awg_backend
+        import database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (704, '2026-06-01T00:00:00', '2026-01-01T00:00:00')")
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, delete_reason)
+                VALUES (704, 1, 'DELETE-704', '', '10.8.1.76', '2026-01-01T00:00:00', 'delete_pending', 'user_delete')
+                """
+            )
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
+                VALUES (704, 2, 'PENDING-704', '', '10.8.1.77', '2026-01-01T00:00:00', 'pending')
+                """
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        original_peers = awg_backend.get_awg_peers
+        awg_backend.get_awg_peers = lambda: asyncio.sleep(0, result=[])  # type: ignore[assignment]
+        try:
+            await awg_backend.reconcile_pending_awg_state()
+        finally:
+            awg_backend.get_awg_peers = original_peers
+        count_keys = await database.fetchone("SELECT COUNT(*) FROM keys WHERE user_id=704")
+        self.assertEqual(count_keys[0], 2)
+        sub = await database.fetchone("SELECT sub_until FROM users WHERE user_id=704")
+        self.assertEqual(sub[0], "2026-06-01T00:00:00")
+        rows = await database.fetchall("SELECT state FROM keys WHERE user_id=704 ORDER BY device_num")
+        self.assertEqual([r[0] for r in rows], ["deleted", "needs_manual_repair"])
 
     async def test_decrypt_log_does_not_leak_ciphertext(self):
         import security_utils

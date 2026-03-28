@@ -217,7 +217,7 @@ async def main():
         job_id, admin_id, text, total = claimed
         cursor = 0
         while True:
-            recipients = await get_broadcast_recipients(cursor, BROADCAST_BATCH_SIZE)
+            recipients = await get_broadcast_recipients(job_id, cursor, BROADCAST_BATCH_SIZE)
             if not recipients:
                 break
             batch_delivered = 0

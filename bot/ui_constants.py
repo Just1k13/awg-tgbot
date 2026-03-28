@@ -1,7 +1,7 @@
 BTN_PROFILE = "👤 Профиль"
-BTN_CONFIGS = "🔑 Конфиги"
-BTN_BUY = "💳 Купить / Продлить"
-BTN_GUIDE = "📖 Инструкция"
+BTN_CONFIGS = "📲 Подключить устройство"
+BTN_BUY = "💳 Оформить доступ"
+BTN_GUIDE = "📖 Подключение за 1 минуту"
 BTN_SUPPORT = "🆘 Поддержка"
 BTN_ADMIN = "⚙️ Админка"
 

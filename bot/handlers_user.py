@@ -56,6 +56,7 @@ async def _send_buy_menu(target, user_id: int):
                 "🔄 <b>У вас уже есть активная подписка</b>\n"
                 f"⏳ Осталось: <b>{remaining}</b>\n\n"
                 "💡 Вы можете продлить её заранее. Новые дни добавятся к текущему сроку.\n\n"
+                "В подписку входит доступ до <b>2 устройств</b>.\n\n"
                 + "\n".join(price_lines)
             ),
             parse_mode="HTML",
@@ -63,7 +64,9 @@ async def _send_buy_menu(target, user_id: int):
         )
         return
     await target.answer(
-        "💳 <b>Выберите срок доступа</b>\n\n" + "\n".join(price_lines),
+        "💳 <b>Выберите срок доступа</b>\n\n"
+        "В подписку входит доступ до <b>2 устройств</b>.\n\n"
+        + "\n".join(price_lines),
         parse_mode="HTML",
         reply_markup=get_buy_inline_kb(),
     )
@@ -74,8 +77,8 @@ async def _send_configs_menu(target, user: types.User):
     if not configs:
         await target.answer(
             (
-                "🔑 <b>Конфиги</b>\n\n"
-                "У вас пока нет активных конфигураций.\n"
+                "🔑 <b>Подключение</b>\n\n"
+                "У вас пока нет активного подключения.\n"
                 "Сначала оформите или продлите подписку.\n\n"
                 "Если нужна помощь — откройте инструкцию ниже."
             ),
@@ -86,10 +89,12 @@ async def _send_configs_menu(target, user: types.User):
 
     await target.answer(
         (
-            "🔑 <b>Конфиги</b>\n\n"
-            "Выберите устройство. Я сначала отправлю:\n"
+            "🔑 <b>Подключение</b>\n\n"
+            "Выберите устройство, с которого хотите подключиться.\n"
+            "Это может быть любое устройство: телефон, планшет, ноутбук, ПК и т.д.\n\n"
+            "Сначала я отправлю:\n"
             "• <code>vpn://</code> — быстрый импорт в Amnezia.\n\n"
-            "Файл <code>.conf</code> можно запросить отдельно для опытных пользователей."
+            "Файл <code>.conf</code> можно запросить отдельно, если нужен ручной вариант настройки."
         ),
         parse_mode="HTML",
         reply_markup=get_configs_devices_kb(configs),
@@ -114,13 +119,12 @@ async def start(message: types.Message):
     await message.answer(
         (
             "🌐 <b>Свободный интернет</b>\n\n"
-            "Здесь можно:\n"
-            "• оформить или продлить подписку\n"
-            "• получить ключ доступа\n"
-            "• скачать <b>.conf</b>\n"
-            "• проверить срок действия\n"
-            "• открыть инструкцию\n"
-            "• написать в поддержку\n\n"
+            "Как начать в 3 шага:\n"
+            "1) <b>💳 Оплатить доступ</b>\n"
+            "2) <b>🔑 Получить подключение</b>\n"
+            "3) Импортировать ключ в <b>Amnezia</b>\n\n"
+            "В подписку входит доступ до <b>2 устройств</b>.\n"
+            "Если нужна помощь, нажмите <b>📖 Как подключиться</b>.\n\n"
             "Выберите действие в меню ниже."
         ),
         parse_mode="HTML",
@@ -176,7 +180,7 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
     if not selected:
         await cb.message.answer(
-            "Не удалось найти ключ для выбранного устройства. Попробуйте открыть раздел «Конфиги» ещё раз.",
+            "Не удалось найти ключ для выбранного устройства. Попробуйте открыть раздел «Подключение» ещё раз.",
             reply_markup=get_instruction_inline_kb(),
         )
         return
@@ -209,7 +213,7 @@ async def send_selected_device_conf(cb: types.CallbackQuery):
     selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
     if not selected:
         await cb.message.answer(
-            "Не удалось найти .conf для выбранного устройства. Откройте раздел «Конфиги» ещё раз.",
+            "Не удалось найти .conf для выбранного устройства. Откройте раздел «Подключение» ещё раз.",
             reply_markup=get_instruction_inline_kb(),
         )
         return
@@ -221,7 +225,7 @@ async def send_selected_device_conf(cb: types.CallbackQuery):
                 cfg.encode("utf-8"),
                 filename=f"{_config_filename_prefix()}_device_{device_num}.conf",
             ),
-            caption=f"📄 Конфиг для устройства {device_num}",
+            caption=f"📄 Файл подключения для устройства {device_num}",
             parse_mode="HTML",
         )
         await cb.message.answer(
@@ -277,6 +281,7 @@ async def buy(message: types.Message):
                 "🔄 <b>У вас уже есть активная подписка</b>\n"
                 f"⏳ Осталось: <b>{remaining}</b>\n\n"
                 "💡 Вы можете продлить её заранее. Новые дни добавятся к текущему сроку.\n\n"
+                "В подписку входит доступ до <b>2 устройств</b>.\n\n"
                 + "\n".join(price_lines)
             ),
             parse_mode="HTML",
@@ -284,7 +289,9 @@ async def buy(message: types.Message):
         )
         return
     await message.answer(
-        "💳 <b>Выберите срок доступа</b>\n\n" + "\n".join(price_lines),
+        "💳 <b>Выберите срок доступа</b>\n\n"
+        "В подписку входит доступ до <b>2 устройств</b>.\n\n"
+        + "\n".join(price_lines),
         parse_mode="HTML",
         reply_markup=get_buy_inline_kb(),
     )

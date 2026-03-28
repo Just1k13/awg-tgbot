@@ -269,32 +269,7 @@ async def buy(message: types.Message):
     await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
-    sub_until = await get_user_subscription(message.from_user.id)
-    price_lines = [
-        f"• 7 дней — {STARS_PRICE_7_DAYS}⭐",
-        f"• 30 дней — {STARS_PRICE_30_DAYS}⭐",
-    ]
-    if subscription_is_active(sub_until):
-        remaining = format_remaining_time(sub_until)
-        await message.answer(
-            (
-                "🔄 <b>У вас уже есть активная подписка</b>\n"
-                f"⏳ Осталось: <b>{remaining}</b>\n\n"
-                "💡 Вы можете продлить её заранее. Новые дни добавятся к текущему сроку.\n\n"
-                "В подписку входит доступ до <b>2 устройств</b>.\n\n"
-                + "\n".join(price_lines)
-            ),
-            parse_mode="HTML",
-            reply_markup=get_buy_inline_kb(),
-        )
-        return
-    await message.answer(
-        "💳 <b>Выберите срок доступа</b>\n\n"
-        "В подписку входит доступ до <b>2 устройств</b>.\n\n"
-        + "\n".join(price_lines),
-        parse_mode="HTML",
-        reply_markup=get_buy_inline_kb(),
-    )
+    await _send_buy_menu(message, message.from_user.id)
 
 
 @router.callback_query(F.data == CB_SHOW_BUY_MENU)

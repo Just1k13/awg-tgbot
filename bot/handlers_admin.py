@@ -18,7 +18,6 @@ from database import (
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
-import asyncio
 from keyboards import get_admin_confirm_kb, get_admin_inline_kb, get_broadcast_confirm_kb
 from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
@@ -66,6 +65,24 @@ async def notify_user_subscription_granted(bot: Bot, user_id: int, days: int, ne
     except Exception as notify_error:
         logger.warning("Не удалось уведомить пользователя %s о выдаче доступа: %s", user_id, notify_error)
         return False
+
+
+async def build_awg_sync_text() -> str:
+    db_info = await db_health_info()
+    orphans = await get_orphan_awg_peers()
+    details = []
+    for peer in orphans[:20]:
+        details.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'IP не указан'}")
+    extra = "\n".join(details) if details else "Потерянных peer не найдено."
+    return (
+        "🔄 <b>Проверка синхронизации AWG ↔ БД</b>\n\n"
+        f"🗄 БД существует: <b>{'да' if db_info['exists'] else 'нет'}</b>\n"
+        f"📋 Таблица keys: <b>{'да' if db_info['keys_table_exists'] else 'нет'}</b>\n"
+        f"🧱 Нужные колонки: <b>{'да' if db_info['has_required_columns'] else 'нет'}</b>\n"
+        f"✅ Валидных ключей в БД: <b>{db_info['valid_keys_count']}</b>\n"
+        f"👻 Потерянных peer в AWG: <b>{len(orphans)}</b>\n\n"
+        f"{extra}"
+    )
 
 
 async def build_stats_text() -> str:
@@ -186,22 +203,7 @@ async def admin_sync_awg(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
         return
     try:
-        db_info = await db_health_info()
-        orphans = await get_orphan_awg_peers()
-        details = []
-        for peer in orphans[:20]:
-            details.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'IP не указан'}")
-        extra = "\n".join(details) if details else "Потерянных peer не найдено."
-        text = (
-            "🔄 <b>Проверка синхронизации AWG ↔ БД</b>\n\n"
-            f"🗄 БД существует: <b>{'да' if db_info['exists'] else 'нет'}</b>\n"
-            f"📋 Таблица keys: <b>{'да' if db_info['keys_table_exists'] else 'нет'}</b>\n"
-            f"🧱 Нужные колонки: <b>{'да' if db_info['has_required_columns'] else 'нет'}</b>\n"
-            f"✅ Валидных ключей в БД: <b>{db_info['valid_keys_count']}</b>\n"
-            f"👻 Потерянных peer в AWG: <b>{len(orphans)}</b>\n\n"
-            f"{extra}"
-        )
-        await cb.message.answer(text, parse_mode="HTML")
+        await cb.message.answer(await build_awg_sync_text(), parse_mode="HTML")
         await cb.answer("Синхронизация проверена")
     except Exception as e:
         logger.exception("Ошибка admin_sync_awg: %s", e)
@@ -624,19 +626,7 @@ async def audit_cmd(message: types.Message, command: CommandObject):
 @router.message(Command("sync_awg"), IsAdmin())
 async def sync_awg_cmd(message: types.Message):
     try:
-        db_info = await db_health_info()
-        orphans = await get_orphan_awg_peers()
-        await message.answer(
-            (
-                "🔄 <b>Проверка синхронизации AWG ↔ БД</b>\n\n"
-                f"🗄 БД существует: <b>{'да' if db_info['exists'] else 'нет'}</b>\n"
-                f"📋 Таблица keys: <b>{'да' if db_info['keys_table_exists'] else 'нет'}</b>\n"
-                f"🧱 Нужные колонки: <b>{'да' if db_info['has_required_columns'] else 'нет'}</b>\n"
-                f"✅ Валидных ключей в БД: <b>{db_info['valid_keys_count']}</b>\n"
-                f"👻 Потерянных peer в AWG: <b>{len(orphans)}</b>"
-            ),
-            parse_mode="HTML",
-        )
+        await message.answer(await build_awg_sync_text(), parse_mode="HTML")
     except Exception as e:
         logger.exception("Ошибка /sync_awg: %s", e)
         await message.answer("❌ Ошибка проверки синхронизации.")

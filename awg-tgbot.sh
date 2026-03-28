@@ -204,22 +204,6 @@ prompt_with_default() {
   done
 }
 
-confirm() {
-  local prompt="$1"
-  local default="${2:-Y}"
-  local value=""
-  local suffix="[Y/n]"
-  [[ "$default" == "N" ]] && suffix="[y/N]"
-  while true; do
-    prompt_raw "$prompt $suffix: " value
-    value="${value:-$default}"
-    case "${value,,}" in
-      y|yes|д|да) return 0 ;;
-      n|no|н|нет) return 1 ;;
-      *) warn "Введите y или n." ;;
-    esac
-  done
-}
 
 confirm_explicit() {
   local prompt="$1"
@@ -1139,58 +1123,7 @@ configure_manual_awg_only() {
   return 0
 }
 
-configure_auto_install() {
-  local api_token admin_id server_name secret value default
-  prompt_api_token api_token
-  prompt_admin_id admin_id
-  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  prompt_with_default 'Введите название сервера' "$default" server_name
-  secret="$(ensure_secret)"
-  write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
-  write_detected_awg_env
-  if [[ -z "$(get_env_value SERVER_PUBLIC_KEY)" ]]; then
-    warn "Не удалось автоматически определить SERVER_PUBLIC_KEY. Нужен один ручной шаг."
-    prompt_with_default 'SERVER_PUBLIC_KEY' "$DETECTED_PUBLIC_KEY" value
-    set_env_value SERVER_PUBLIC_KEY "$value"
-  fi
-  if [[ -z "$(get_env_value SERVER_IP)" ]]; then
-    warn "Не удалось автоматически определить SERVER_IP. Укажи внешний IP и порт."
-    default="$(pick_existing_or_default "$(get_env_value PUBLIC_HOST)" "$DETECTED_PUBLIC_HOST")"
-    prompt_with_default 'PUBLIC_HOST / внешний IP' "$default" value
-    set_env_value PUBLIC_HOST "$value"
-    if [[ -n "$DETECTED_LISTEN_PORT" && -n "$value" ]]; then
-      set_env_value SERVER_IP "${value}:${DETECTED_LISTEN_PORT}"
-    else
-      prompt_with_default 'SERVER_IP (IP:port)' "$DETECTED_SERVER_IP" value
-      set_env_value SERVER_IP "$value"
-    fi
-  fi
-  return 0
-}
 
-configure_manual_install() {
-  local api_token admin_id server_name secret value default
-  prompt_api_token api_token
-  prompt_admin_id admin_id
-  default="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "$DETECTED_SERVER_NAME")"
-  prompt_with_default 'Введите название сервера' "$default" server_name
-  secret="$(ensure_secret)"
-  write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
-  configure_manual_awg_only
-  default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
-  prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
-  set_env_value STARS_PRICE_7_DAYS "$value"
-  default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"
-  prompt_with_default 'Цена 30 дней в Telegram Stars' "$default" value
-  set_env_value STARS_PRICE_30_DAYS "$value"
-  default="$(pick_existing_or_default "$(get_env_value DOWNLOAD_URL)" "https://m-1-14-3w5hsuiikq-ez.a.run.app/ru/downloads")"
-  prompt_with_default 'Ссылка на Amnezia / инструкцию скачивания' "$default" value
-  set_env_value DOWNLOAD_URL "$value"
-  default="$(get_env_value SUPPORT_USERNAME)"
-  prompt_with_default 'Username поддержки (можно @username)' "${default:-@support}" value
-  set_env_value SUPPORT_USERNAME "$value"
-  return 0
-}
 
 
 ensure_bot_not_in_docker_group() {
@@ -1787,18 +1720,6 @@ print_file_tail_tty_safe() {
   fi
 }
 
-print_file_matches_tty_safe() {
-  local file="$1" pattern="$2" lines="${3:-20}"
-  if [[ ! -f "$file" ]]; then
-    screen_warn "Файл не найден: $file"
-    return 0
-  fi
-  if has_tty; then
-    grep -Ei "$pattern" "$file" | tail -n "$lines" >&3 2>/dev/null || true
-  else
-    grep -Ei "$pattern" "$file" | tail -n "$lines" 2>/dev/null || true
-  fi
-}
 
 print_journal_tail_tty_safe() {
   local lines="${1:-50}"

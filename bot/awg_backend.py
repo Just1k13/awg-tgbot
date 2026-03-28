@@ -18,7 +18,7 @@ from config import (
 from database import (
     add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall,
     get_protected_public_keys, get_reserved_ips_from_db, get_reserved_ips_from_db_conn, get_valid_db_public_keys,
-    open_db, write_audit_log,
+    increment_metric, open_db, write_audit_log,
 )
 from helpers import is_valid_awg_public_key, parse_server_host_port, utc_now_naive
 from security_utils import encrypt_text
@@ -62,9 +62,11 @@ async def run_docker(args: list[str], input_data: str | None = None, timeout: in
         except asyncio.TimeoutError:
             last_error = RuntimeError(f"helper timeout: {' '.join(args)}")
             logger.warning("helper timeout attempt=%s/%s cmd=%s", attempt, DOCKER_RETRIES, args)
+            await increment_metric("awg_helper_failures")
         except Exception as e:
             last_error = RuntimeError(f"helper exec failed: {e}")
             logger.warning("helper error attempt=%s/%s cmd=%s error=%s", attempt, DOCKER_RETRIES, args, e)
+            await increment_metric("awg_helper_failures")
         if attempt < DOCKER_RETRIES:
             await asyncio.sleep(DOCKER_RETRY_BASE_DELAY * (2 ** (attempt - 1)))
     raise last_error if last_error else RuntimeError("helper exec failed")
@@ -962,3 +964,111 @@ async def expired_subscriptions_worker(cleanup_interval_seconds: int) -> None:
         except Exception as e:
             logger.exception("Ошибка фоновой очистки: %s", e)
         await asyncio.sleep(cleanup_interval_seconds)
+
+
+async def reconcile_pending_awg_state() -> dict[str, int]:
+    peers = await get_awg_peers()
+    awg_keys = {(peer.get("public_key") or "").strip() for peer in peers if (peer.get("public_key") or "").strip()}
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    stats = {"activated": 0, "deleted": 0, "marked_manual": 0, "awg_removed": 0}
+    users_for_finalize: set[int] = set()
+    finalize_intent: dict[int, set[str]] = {}
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            """
+            SELECT id, user_id, public_key, state, created_at, COALESCE(delete_reason, '')
+            FROM keys
+            WHERE state IN ('pending', 'revoke_pending', 'delete_pending')
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        for key_id, user_id, public_key, state, created_at, delete_reason in rows:
+            key = (public_key or "").strip()
+            if state == "pending":
+                if key.startswith("pending:"):
+                    stale = False
+                    try:
+                        stale = (utc_now_naive() - datetime.fromisoformat(str(created_at))).total_seconds() > PENDING_KEY_TTL_SECONDS
+                    except Exception:
+                        stale = True
+                    if stale:
+                        await db.execute(
+                            "UPDATE keys SET state='needs_manual_repair', delete_reason='pending_stuck', state_updated_at=? WHERE id=?",
+                            (now_iso, key_id),
+                        )
+                        stats["marked_manual"] += 1
+                    continue
+                if key in awg_keys:
+                    await db.execute("UPDATE keys SET state='active', state_updated_at=? WHERE id=?", (now_iso, key_id))
+                    stats["activated"] += 1
+                else:
+                    await db.execute(
+                        "UPDATE keys SET state='needs_manual_repair', delete_reason='pending_missing_in_awg', state_updated_at=? WHERE id=?",
+                        (now_iso, key_id),
+                    )
+                    stats["marked_manual"] += 1
+                continue
+
+            if key and key in awg_keys:
+                try:
+                    await remove_peer_from_awg(key)
+                    stats["awg_removed"] += 1
+                except Exception:
+                    await db.execute(
+                        "UPDATE keys SET state='needs_manual_repair', delete_reason='pending_remove_failed', state_updated_at=? WHERE id=?",
+                        (now_iso, key_id),
+                    )
+                    stats["marked_manual"] += 1
+                    continue
+            await db.execute("UPDATE keys SET state='deleted', state_updated_at=? WHERE id=?", (now_iso, key_id))
+            stats["deleted"] += 1
+            user_id_int = int(user_id)
+            users_for_finalize.add(user_id_int)
+            reason = str(delete_reason or "").strip() or "unknown"
+            finalize_intent.setdefault(user_id_int, set()).add(reason)
+
+        for user_id in users_for_finalize:
+            async with db.execute(
+                "SELECT state FROM keys WHERE user_id=?",
+                (user_id,),
+            ) as cursor:
+                state_rows = [str(row[0]) for row in await cursor.fetchall()]
+            if not state_rows:
+                continue
+            state_set = set(state_rows)
+            has_live_keys = any(
+                state in {"active", "pending", "revoke_pending", "delete_pending"}
+                for state in state_set
+            )
+            if has_live_keys:
+                continue
+            if "needs_manual_repair" in state_set:
+                continue
+            if any(state != "deleted" for state in state_set):
+                await db.execute(
+                    "INSERT INTO audit_log (user_id, action, details, created_at) VALUES (?, ?, ?, ?)",
+                    (user_id, "reconcile_user_finalize_skipped", f"unexpected_states={','.join(sorted(state_set))}", now_iso),
+                )
+                continue
+
+            intents = finalize_intent.get(user_id, set())
+            if "user_delete" in intents:
+                await db.execute("DELETE FROM keys WHERE user_id=?", (user_id,))
+                await db.execute("DELETE FROM users WHERE user_id=?", (user_id,))
+                continue
+            if "revoke_expired_or_admin" in intents:
+                await db.execute("DELETE FROM keys WHERE user_id=?", (user_id,))
+                await db.execute("UPDATE users SET sub_until='0' WHERE user_id=?", (user_id,))
+                continue
+
+            await db.execute(
+                "INSERT INTO audit_log (user_id, action, details, created_at) VALUES (?, ?, ?, ?)",
+                (user_id, "reconcile_user_finalize_skipped", f"ambiguous_intent={','.join(sorted(intents)) or 'none'}", now_iso),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+    return stats

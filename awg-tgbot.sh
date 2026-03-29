@@ -1014,6 +1014,54 @@ deploy_repo() {
   return 1
 }
 
+create_update_backup() {
+  local backup_dir
+  backup_dir="$(mktemp -d "${INSTALL_DIR}/.update-backup.XXXXXX")"
+  if [[ -d "$BOT_DIR" ]]; then
+    cp -a "$BOT_DIR" "$backup_dir/bot" || { rm -rf "$backup_dir"; return 1; }
+  fi
+  if [[ -f "$INSTALL_DIR/awg-tgbot.sh" ]]; then
+    cp "$INSTALL_DIR/awg-tgbot.sh" "$backup_dir/awg-tgbot.sh" || { rm -rf "$backup_dir"; return 1; }
+  fi
+  if [[ -f "$ENV_FILE" ]]; then
+    cp "$ENV_FILE" "$backup_dir/.env" || { rm -rf "$backup_dir"; return 1; }
+  fi
+  if [[ -f "$VERSION_FILE" ]]; then
+    cp "$VERSION_FILE" "$backup_dir/version" || { rm -rf "$backup_dir"; return 1; }
+  fi
+  printf '%s' "$backup_dir"
+}
+
+rollback_update_backup() {
+  local backup_dir="$1"
+  [[ -n "$backup_dir" && -d "$backup_dir" ]] || return 1
+  warn "Обновление прервано. Выполняю откат к предыдущей рабочей версии."
+  stop_service_if_exists || true
+  rm -rf "$BOT_DIR"
+  if [[ -d "$backup_dir/bot" ]]; then
+    cp -a "$backup_dir/bot" "$BOT_DIR" || return 1
+  fi
+  if [[ -f "$backup_dir/awg-tgbot.sh" ]]; then
+    cp "$backup_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh" || return 1
+    chmod +x "$INSTALL_DIR/awg-tgbot.sh" || true
+    ln -sfn "$INSTALL_DIR/awg-tgbot.sh" "$SELF_SYMLINK" || true
+  fi
+  if [[ -f "$backup_dir/.env" ]]; then
+    cp "$backup_dir/.env" "$ENV_FILE" || return 1
+  fi
+  if [[ -f "$backup_dir/version" ]]; then
+    cp "$backup_dir/version" "$VERSION_FILE" || true
+  fi
+  ensure_venv_and_requirements || warn "Не удалось восстановить python зависимости после отката."
+  write_service || warn "Не удалось полностью восстановить systemd unit после отката."
+  if start_service; then
+    ok "Откат завершён, сервис восстановлен."
+  else
+    warn "Откат выполнен, но сервис не запустился автоматически. Проверь 'sudo awg-tgbot status'."
+  fi
+  return 0
+}
+
 ensure_env_file() {
   mkdir -p "$INSTALL_DIR"
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -1432,7 +1480,7 @@ relaunch_installer_menu() {
 }
 
 update_bot() {
-  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret requested_ref local_sha
+  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret requested_ref local_sha update_backup_dir=""
   detect_install_state
   if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
     warn "Бот не установлен."
@@ -1469,6 +1517,7 @@ update_bot() {
   ensure_packages || die "Не удалось обновить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
 
+  update_backup_dir="$(create_update_backup)" || die "Не удалось подготовить backup перед обновлением."
   tmp_dir="$(download_repo "$requested_ref")" || die "Не удалось скачать код проекта из GitHub."
   stop_service_if_exists
   deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; die "Не удалось развернуть обновление."; }
@@ -1485,14 +1534,15 @@ update_bot() {
 
   detect_awg_environment
   write_detected_awg_env
-  ensure_venv_and_requirements || die "Не удалось обновить Python зависимости."
-  ensure_bot_user || die "Не удалось подготовить service пользователя."
-  install_awg_helper || die "Не удалось установить helper для AWG."
-  write_service || die "Не удалось обновить systemd сервис."
+  ensure_venv_and_requirements || { rollback_update_backup "$update_backup_dir"; die "Не удалось обновить Python зависимости."; }
+  ensure_bot_user || { rollback_update_backup "$update_backup_dir"; die "Не удалось подготовить service пользователя."; }
+  install_awg_helper || { rollback_update_backup "$update_backup_dir"; die "Не удалось установить helper для AWG."; }
+  write_service || { rollback_update_backup "$update_backup_dir"; die "Не удалось обновить systemd сервис."; }
   persist_repo_branch
   mkdir -p "$STATE_DIR"
   printf '%s\n' "$requested_ref" > "$VERSION_FILE"
-  start_service || die "Не удалось перезапустить сервис."
+  start_service || { rollback_update_backup "$update_backup_dir"; die "Не удалось перезапустить сервис."; }
+  [[ -n "$update_backup_dir" ]] && rm -rf "$update_backup_dir"
   ok "Обновление завершено."
 
   if [[ "$mode" == "menu" ]] && has_tty; then

@@ -1,6 +1,7 @@
 import json
 from ipaddress import ip_network
 from pathlib import Path
+import re
 
 
 def read_helper_policy(path: Path) -> tuple[str, str, str]:
@@ -79,16 +80,50 @@ def _parse_non_negative_int(value: str, field: str) -> int:
     return int(raw)
 
 
-def validate_awg_obfuscation_settings(*, awg_jc: str, awg_jmin: str, awg_jmax: str, awg_i1: str, awg_i2: str, awg_i3: str, awg_i4: str, awg_i5: str) -> None:
+def validate_awg_obfuscation_settings(
+    *,
+    awg_jc: str,
+    awg_jmin: str,
+    awg_jmax: str,
+    awg_s1: str,
+    awg_s2: str,
+    awg_s3: str,
+    awg_s4: str,
+    awg_h1: str,
+    awg_h2: str,
+    awg_h3: str,
+    awg_h4: str,
+    awg_i1: str,
+    awg_i2: str,
+    awg_i3: str,
+    awg_i4: str,
+    awg_i5: str,
+) -> None:
     """
     Fail fast only for known-invalid numeric settings.
     Keep I1..I5 semantics aligned with upstream amneziawg-go behavior.
     """
     jmin = _parse_non_negative_int(awg_jmin, 'AWG_JMIN')
     jmax = _parse_non_negative_int(awg_jmax, 'AWG_JMAX')
-    _parse_non_negative_int(awg_jc, 'AWG_JC')
+    jc = _parse_non_negative_int(awg_jc, 'AWG_JC')
+    if jc > 65535:
+        raise RuntimeError('AWG_JC должен быть в диапазоне 0..65535')
+    if jmin > 65535:
+        raise RuntimeError('AWG_JMIN должен быть в диапазоне 0..65535')
+    if jmax > 65535:
+        raise RuntimeError('AWG_JMAX должен быть в диапазоне 0..65535')
     if jmin > jmax:
         raise RuntimeError('AWG_JMIN не может быть больше AWG_JMAX')
+
+    for field, raw in (('AWG_S1', awg_s1), ('AWG_S2', awg_s2), ('AWG_S3', awg_s3), ('AWG_S4', awg_s4)):
+        value = _parse_non_negative_int(raw, field)
+        if value > 65535:
+            raise RuntimeError(f'{field} должен быть в диапазоне 0..65535')
+
+    for field, raw in (('AWG_H1', awg_h1), ('AWG_H2', awg_h2), ('AWG_H3', awg_h3), ('AWG_H4', awg_h4)):
+        value = str(raw).strip()
+        if value and not re.fullmatch(r'\d+-\d+', value):
+            raise RuntimeError(f'{field} должен быть в формате N-N')
 
 
 def validate_persistent_keepalive(raw_value: str) -> str:

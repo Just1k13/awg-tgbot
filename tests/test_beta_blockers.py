@@ -73,6 +73,31 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(row[1])
         self.assertIsNone(row[2])
 
+    async def test_pre_checkout_rejects_amount_currency_mismatch(self):
+        import payments
+
+        class DummyBot:
+            def __init__(self):
+                self.calls = []
+
+            async def answer_pre_checkout_query(self, qid, ok, error_message=None):
+                self.calls.append((qid, ok, error_message))
+
+        class DummyQuery:
+            def __init__(self, payload, amount, currency):
+                self.id = "q1"
+                self.invoice_payload = payload
+                self.total_amount = amount
+                self.currency = currency
+
+        bot = DummyBot()
+        await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS + 1, "XTR"), bot)
+        self.assertEqual(bot.calls[-1][1], False)
+        await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "USD"), bot)
+        self.assertEqual(bot.calls[-1][1], False)
+        await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "XTR"), bot)
+        self.assertEqual(bot.calls[-1][1], True)
+
     async def test_retries_stop_at_max_attempts_and_mark_stuck(self):
         import database
         import payments

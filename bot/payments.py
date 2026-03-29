@@ -112,8 +112,15 @@ async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
 
 @router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
-    if q.invoice_payload not in TARIFFS:
+    tariff = TARIFFS.get(q.invoice_payload)
+    if not tariff:
         await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректный платеж.")
+        return
+    if q.currency != tariff["currency"]:
+        await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректная валюта платежа.")
+        return
+    if q.total_amount != tariff["amount"]:
+        await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректная сумма платежа.")
         return
     await bot.answer_pre_checkout_query(q.id, ok=True)
 

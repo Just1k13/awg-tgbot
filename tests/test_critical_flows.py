@@ -584,6 +584,14 @@ peer: PUBKEY2
 
 
 class InstallerAndHelperHardeningTests(unittest.TestCase):
+    def _extract_shell_function(self, script: str, fn_name: str) -> str:
+        marker = f"{fn_name}() {{"
+        start = script.find(marker)
+        self.assertNotEqual(start, -1, f"function {fn_name} not found")
+        end = script.find("\n}\n", start)
+        self.assertNotEqual(end, -1, f"function {fn_name} end not found")
+        return script[start:end]
+
     def test_installer_menu_safe_fails_without_tty(self):
         if os.geteuid() != 0:
             self.skipTest("requires root to pass installer preflight")
@@ -665,6 +673,13 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
         self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', script)
         self.assertIn('Запрошенный SHA уже установлен', script)
+
+    def test_installer_update_does_not_gate_explicit_requested_sha_by_branch_status(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        update_body = self._extract_shell_function(script, "update_bot")
+        self.assertIn('requested_ref="${REPO_UPDATE_REF:-}"', update_body)
+        self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', update_body)
+        self.assertNotIn('if [[ "$UPDATE_STATUS" == "current" ]]; then', update_body)
 
     def test_clean_orphans_command_does_not_promise_physical_delete(self):
         admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")

@@ -1457,12 +1457,6 @@ update_bot() {
     print_line
     return 0
   fi
-  if [[ "$UPDATE_STATUS" == "current" ]]; then
-    print_line
-    ok "Обновления не найдены. Установлена актуальная версия."
-    print_line
-    return 0
-  fi
 
   print_line
   info "Обновление AWG Telegram Bot"

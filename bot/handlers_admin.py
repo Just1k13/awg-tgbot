@@ -10,7 +10,14 @@ from awg_backend import (
     clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
     get_orphan_awg_peers, issue_subscription, list_orphan_delete_candidates_force, revoke_user_access,
 )
-from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, BACKUP_ENCRYPTION_KEY, BACKUP_SECURE_MODE, logger
+from config import (
+    ADMIN_COMMAND_COOLDOWN_SECONDS,
+    ADMIN_ID,
+    BACKUP_ALLOW_INSECURE_SEND,
+    BACKUP_ENCRYPTION_KEY,
+    BACKUP_SECURE_MODE,
+    logger,
+)
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
@@ -775,6 +782,12 @@ async def backup_db(message: types.Message):
             payload = Fernet(BACKUP_ENCRYPTION_KEY.encode("utf-8")).encrypt(payload)
             filename = f"{filename}.enc"
             caption += "\n🔐 Secure mode: backup зашифрован (Fernet)."
+        elif not BACKUP_ALLOW_INSECURE_SEND:
+            redacted.unlink(missing_ok=True)
+            await message.answer("❌ Небезопасная отправка backup отключена. Включите BACKUP_SECURE_MODE=1 или явно задайте BACKUP_ALLOW_INSECURE_SEND=1.")
+            return
+        else:
+            caption += "\n⚠️ Insecure mode: файл отправлен без шифрования (явный opt-in)."
         await message.answer_document(
             types.BufferedInputFile(payload, filename=filename),
             caption=caption,

@@ -718,6 +718,39 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     awg_helper._load_policy()
 
+    def test_helper_rejects_symlink_policy(self):
+        import awg_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target.json"
+            policy_path = Path(tmp) / "policy.json"
+            target.write_text(json.dumps({"container": "allowed-c", "interface": "awg0"}), encoding="utf-8")
+            policy_path.symlink_to(target)
+            with patch.object(awg_helper, "POLICY_PATH", policy_path):
+                with self.assertRaises(RuntimeError):
+                    awg_helper._load_policy()
+
+    def test_validate_helper_policy_mismatch_is_hard_failure(self):
+        import config_validate
+
+        class DummyLogger:
+            def error(self, *_args, **_kwargs):
+                return None
+
+            def warning(self, *_args, **_kwargs):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"container": "amnezia-awg2", "interface": "awg0"}), encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                config_validate.validate_helper_policy(
+                    policy_path=str(policy_path),
+                    docker_container="different-container",
+                    wg_interface="awg0",
+                    logger=DummyLogger(),
+                )
+
     def test_helper_parser_has_no_external_target_args(self):
         import awg_helper
 

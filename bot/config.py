@@ -32,7 +32,7 @@ def save_env_value(name: str, value: str) -> None:
 
 
 def get_support_username() -> str:
-    return globals().get('SUPPORT_USERNAME', '').strip() or '@support'
+    return globals().get('SUPPORT_USERNAME', '').strip()
 
 
 def get_download_url() -> str:
@@ -170,6 +170,7 @@ BROADCAST_BATCH_SIZE = env_int('BROADCAST_BATCH_SIZE', int(DEFAULT_ENV['BROADCAS
 BROADCAST_BATCH_DELAY_SECONDS = env_float('BROADCAST_BATCH_DELAY_SECONDS', float(DEFAULT_ENV['BROADCAST_BATCH_DELAY_SECONDS']))
 RECONCILIATION_INTERVAL_SECONDS = env_int('RECONCILIATION_INTERVAL_SECONDS', int(DEFAULT_ENV['RECONCILIATION_INTERVAL_SECONDS']))
 BACKUP_SECURE_MODE = env_int('BACKUP_SECURE_MODE', int(DEFAULT_ENV['BACKUP_SECURE_MODE'])) == 1
+BACKUP_ALLOW_INSECURE_SEND = env_int('BACKUP_ALLOW_INSECURE_SEND', int(DEFAULT_ENV['BACKUP_ALLOW_INSECURE_SEND'])) == 1
 BACKUP_ENCRYPTION_KEY = _env_with_runtime_default('BACKUP_ENCRYPTION_KEY', DEFAULT_ENV['BACKUP_ENCRYPTION_KEY'])
 
 validate_required_env(

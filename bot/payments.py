@@ -1,12 +1,15 @@
 import json
 import uuid
 from datetime import timedelta
+from pathlib import Path
 
 from aiogram import Bot, F, Router, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 
-from awg_backend import issue_subscription
+from awg_backend import check_awg_container, issue_subscription
 from config import (
+    AWG_HELPER_POLICY_PATH,
+    DOCKER_CONTAINER,
     ADMIN_ID,
     PAYMENT_MAX_ATTEMPTS,
     PAYMENT_PROVISIONING_LEASE_SECONDS,
@@ -15,15 +18,20 @@ from config import (
     PURCHASE_RATE_LIMIT_TTL_SECONDS,
     STARS_PRICE_7_DAYS,
     STARS_PRICE_30_DAYS,
+    WG_INTERFACE,
     logger,
 )
+from config_validate import read_helper_policy
 from database import (
     claim_payment_and_job_for_provisioning,
+    db_health_info,
     ensure_user_exists,
     finalize_payment_and_job,
+    mark_ready_notification_sent,
     get_provisioning_attempt_count,
     get_payment_status,
     get_repairable_payments,
+    update_last_provision_status,
     mark_payment_stuck_manual,
     payment_already_processed,
     persistent_guard_hit,
@@ -37,6 +45,8 @@ from ui_constants import CB_BUY_30, CB_BUY_7
 
 router = Router()
 purchase_rate_limit: dict[int, object] = {}
+_checkout_readiness_cache = {"ok": True, "reason": "", "expires_at": None}
+CHECKOUT_READINESS_TTL_SECONDS = 12
 
 
 TARIFFS = {
@@ -84,6 +94,34 @@ async def _send_stars_invoice(bot: Bot, chat_id: int, payload: str, title: str, 
     )
 
 
+async def checkout_readiness() -> tuple[bool, str]:
+    now_ts = utc_now_naive().timestamp()
+    expires_at = _checkout_readiness_cache.get("expires_at")
+    if isinstance(expires_at, (int, float)) and now_ts < expires_at:
+        return bool(_checkout_readiness_cache["ok"]), str(_checkout_readiness_cache["reason"])
+    ok = True
+    reason = ""
+    try:
+        if not DOCKER_CONTAINER or not WG_INTERFACE:
+            raise RuntimeError("missing_awg_target")
+        policy_container, policy_interface, policy_error = read_helper_policy(Path(AWG_HELPER_POLICY_PATH))
+        if policy_error:
+            raise RuntimeError(policy_error)
+        if policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:
+            raise RuntimeError("helper policy mismatch")
+        db_info = await db_health_info()
+        if not db_info.get("is_healthy"):
+            raise RuntimeError("database_not_ready")
+        await check_awg_container()
+    except Exception as e:
+        ok = False
+        reason = str(e)[:200]
+    _checkout_readiness_cache["ok"] = ok
+    _checkout_readiness_cache["reason"] = reason
+    _checkout_readiness_cache["expires_at"] = now_ts + CHECKOUT_READINESS_TTL_SECONDS
+    return ok, reason
+
+
 @router.callback_query(F.data == CB_BUY_7)
 async def buy_7_days(cb: types.CallbackQuery, bot: Bot):
     mem_limited, mem_wait = is_purchase_rate_limited(cb.from_user.id)
@@ -121,6 +159,15 @@ async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
         return
     if q.total_amount != tariff["amount"]:
         await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректная сумма платежа.")
+        return
+    ready, reason = await checkout_readiness()
+    if not ready:
+        logger.warning("pre_checkout rejected: readiness degraded: %s", reason)
+        await bot.answer_pre_checkout_query(
+            q.id,
+            ok=False,
+            error_message="Сервис временно недоступен для активации. Попробуйте чуть позже.",
+        )
         return
     await bot.answer_pre_checkout_query(q.id, ok=True)
 
@@ -167,6 +214,10 @@ async def success_pay(message: types.Message):
             status="received",
             raw_payload_json=json.dumps(raw_payload, ensure_ascii=False),
         )
+        await message.answer("✅ Оплата получена.")
+        await update_last_provision_status(payment.telegram_payment_charge_id, "payment_received")
+        await message.answer("⏳ Доступ выпускается. Обычно это занимает до минуты.")
+        await update_last_provision_status(payment.telegram_payment_charge_id, "provisioning")
         applied = await process_payment_provisioning(
             payment_id=payment.telegram_payment_charge_id,
             user_id=message.from_user.id,
@@ -174,11 +225,13 @@ async def success_pay(message: types.Message):
             days=tariff["days"],
         )
         if applied:
+            await update_last_provision_status(payment.telegram_payment_charge_id, "ready")
+            await mark_ready_notification_sent(payment.telegram_payment_charge_id)
             await message.answer(
                 (
-                    "🎉 <b>Оплата подтверждена</b>\n\n"
-                    "Подписка активирована ✅\n"
-                    "Следующий шаг — получите подключение и импортируйте его в Amnezia."
+                    "🎉 <b>Доступ готов</b>\n\n"
+                    "Статусы: оплата получена → доступ выпускается → доступ готов ✅\n"
+                    "Следующий шаг — откройте подключение и импортируйте его в Amnezia."
                 ),
                 parse_mode="HTML",
                 reply_markup=get_post_payment_kb(),
@@ -278,6 +331,13 @@ async def payment_recovery_worker(bot: Bot | None = None) -> int:
         try:
             done = await process_payment_provisioning(payment_id, user_id, payload, tariff["days"])
             repaired += int(done)
+            if done:
+                await update_last_provision_status(payment_id, "ready")
+                if bot is not None and await mark_ready_notification_sent(payment_id):
+                    await bot.send_message(
+                        user_id,
+                        "✅ Доступ готов. Платёж успешно применён в фоне. Откройте «🔑 Подключение».",
+                    )
         except Exception as e:
             logger.warning("Recovery failed for payment=%s: %s", payment_id, e)
             attempts = await get_provisioning_attempt_count(payment_id)

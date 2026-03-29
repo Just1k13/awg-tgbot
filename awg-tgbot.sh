@@ -300,7 +300,7 @@ write_awg_helper_policy() {
   "interface": "${interface}"
 }
 POLICY
-  install -o root -g root -m 640 "$tmp" "$AWG_HELPER_POLICY"
+  install -o root -g "$BOT_USER" -m 640 "$tmp" "$AWG_HELPER_POLICY"
   rm -f "$tmp"
   return 0
 }
@@ -1162,6 +1162,10 @@ install_awg_helper() {
   install -d -m 755 /usr/local/libexec
   install -o root -g root -m 750 "$BOT_DIR/awg_helper.py" "$AWG_HELPER_TARGET"
   sync_awg_helper_policy_from_env
+  if id -u "$BOT_USER" >/dev/null 2>&1; then
+    chown root:"$BOT_USER" "$AWG_HELPER_POLICY"
+    chmod 640 "$AWG_HELPER_POLICY"
+  fi
   cat > "$AWG_HELPER_SUDOERS" <<SUDOERS
 ${BOT_USER} ALL=(root) NOPASSWD: ${AWG_HELPER_TARGET} *
 SUDOERS

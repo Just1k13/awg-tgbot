@@ -202,7 +202,7 @@ def _is_managed_client_ip(ip: str | None) -> bool:
 
 
 def _awg_settings() -> dict[str, str]:
-    return {
+    settings = {
         "Jc": AWG_JC,
         "Jmin": AWG_JMIN,
         "Jmax": AWG_JMAX,
@@ -220,6 +220,11 @@ def _awg_settings() -> dict[str, str]:
         "I4": AWG_I4,
         "I5": AWG_I5,
     }
+    normalized = {k: str(v).strip() for k, v in settings.items() if str(v).strip()}
+    if not normalized.get("I1"):
+        for key in ("I2", "I3", "I4", "I5"):
+            normalized.pop(key, None)
+    return normalized
 
 
 def build_client_config(private_key: str, ip: str, psk_key: str) -> str:
@@ -389,6 +394,41 @@ async def _get_quarantined_public_keys() -> set[str]:
     return {row[0].strip() for row in rows if row and row[0]}
 
 
+def _list_orphan_delete_candidates_force(
+    *,
+    awg_peers: list[dict[str, str | None]],
+    db_keys: set[str],
+    quarantined: set[str],
+) -> list[dict[str, str | None]]:
+    candidates: list[dict[str, str | None]] = []
+    for peer in awg_peers:
+        public_key = (peer.get("public_key") or "").strip()
+        peer_ip = peer.get("ip")
+        if not public_key:
+            continue
+        if public_key not in quarantined:
+            continue
+        if public_key in db_keys:
+            continue
+        if public_key in IGNORE_PEERS:
+            continue
+        if not _is_managed_client_ip(peer_ip):
+            continue
+        candidates.append({"public_key": public_key, "ip": peer_ip})
+    return candidates
+
+
+async def list_orphan_delete_candidates_force() -> list[dict[str, str | None]]:
+    awg_peers = await get_awg_peers()
+    db_keys = await get_valid_db_public_keys()
+    quarantined = await _get_quarantined_public_keys()
+    return _list_orphan_delete_candidates_force(
+        awg_peers=awg_peers,
+        db_keys=db_keys,
+        quarantined=quarantined,
+    )
+
+
 async def get_orphan_awg_peers() -> list[dict[str, str | None]]:
     awg_peers = await get_awg_peers()
     if not awg_peers:
@@ -408,29 +448,20 @@ async def clean_orphan_awg_peers(force: bool = False) -> int:
         )
 
     if force:
-        awg_peers = await get_awg_peers()
         quarantined = await _get_quarantined_public_keys()
-        protected = await get_protected_public_keys()
-        allowed_force = quarantined | ({peer_key for peer_key in db_keys if peer_key in quarantined})
-        protected_non_quarantine = protected - quarantined
-        orphans = [
-            peer for peer in awg_peers
-            if (
-                (peer.get("public_key") in quarantined)
-                or (
-                    peer.get("public_key") not in db_keys
-                    and peer.get("public_key") not in protected_non_quarantine
-                    and peer.get("public_key") not in IGNORE_PEERS
-                )
-            )
-        ]
+        if not quarantined:
+            logger.info("Force orphan cleanup: nothing to delete (quarantine is empty)")
+            return 0
+        orphans = await list_orphan_delete_candidates_force()
+        if not orphans:
+            logger.info("Force orphan cleanup: nothing to delete (0 candidates)")
+            return 0
     else:
         orphans = await get_orphan_awg_peers()
 
     removed = 0
     protected = await get_protected_public_keys()
     protected.update(IGNORE_PEERS)
-    quarantined = await _get_quarantined_public_keys()
     for peer in orphans:
         public_key = peer.get("public_key")
         if not public_key:

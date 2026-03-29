@@ -8,7 +8,7 @@ from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
     clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
-    get_orphan_awg_peers, issue_subscription, revoke_user_access,
+    get_orphan_awg_peers, issue_subscription, list_orphan_delete_candidates_force, revoke_user_access,
 )
 from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, BACKUP_ENCRYPTION_KEY, BACKUP_SECURE_MODE, logger
 from database import (
@@ -18,7 +18,7 @@ from database import (
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
-from keyboards import get_admin_confirm_kb, get_admin_inline_kb, get_broadcast_confirm_kb
+from keyboards import get_admin_confirm_kb, get_admin_force_confirm_kb, get_admin_inline_kb, get_broadcast_confirm_kb
 from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
@@ -659,8 +659,75 @@ async def clean_orphans_cmd(message: types.Message):
 @router.message(Command("clean_orphans_force"), IsAdmin())
 async def clean_orphans_force_cmd(message: types.Message):
     try:
+        candidates = await list_orphan_delete_candidates_force()
+        preview_keys = [item.get("public_key") for item in candidates[:10] if item.get("public_key")]
+        await set_pending_admin_action(
+            ADMIN_ID,
+            "clean_orphans_force",
+            {
+                "action": "clean_orphans_force",
+                "candidate_count": len(candidates),
+                "preview": preview_keys,
+                "confirmed": False,
+            },
+        )
+        preview_text = "\n".join(f"• <code>{key}</code>" for key in preview_keys) or "—"
+        await message.answer(
+            (
+                "🧨 <b>Force-cleanup (предпросмотр)</b>\n\n"
+                f"Кандидатов на удаление: <b>{len(candidates)}</b>\n"
+                "Будут удалены только quarantined+managed peer, которые всё ещё отсутствуют в БД.\n\n"
+                f"Первые ключи:\n{preview_text}\n\n"
+                "Нажмите подтверждение ниже, затем введите: <code>/force_delete FORCE</code> или <code>/force_delete DELETE</code>."
+            ),
+            parse_mode="HTML",
+            reply_markup=get_admin_force_confirm_kb(),
+        )
+    except Exception as e:
+        logger.exception("Ошибка /clean_orphans_force: %s", e)
+        await message.answer("❌ Не удалось подготовить принудительную очистку потерянных peer.")
+
+
+@router.callback_query(F.data == "confirm_clean_orphans_force")
+async def confirm_clean_orphans_force(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    action = await pop_pending_admin_action(ADMIN_ID, "clean_orphans_force")
+    if not action or action.get("action") != "clean_orphans_force":
+        await cb.answer("Нет ожидающего действия", show_alert=True)
+        return
+    action["confirmed"] = True
+    await set_pending_admin_action(ADMIN_ID, "clean_orphans_force_word", action)
+    await cb.message.answer(
+        "🛡 Дополнительное подтверждение: введите <code>/force_delete FORCE</code> или <code>/force_delete DELETE</code>.",
+        parse_mode="HTML",
+    )
+    await cb.answer("Ожидаю кодовое слово")
+
+
+@router.callback_query(F.data == "cancel_clean_orphans_force")
+async def cancel_clean_orphans_force(cb: types.CallbackQuery):
+    await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force")
+    await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force_word")
+    await cb.message.answer("❌ Force-очистка потерянных peer отменена")
+    await cb.answer()
+
+
+@router.message(Command("force_delete"), IsAdmin())
+async def force_delete_cmd(message: types.Message, command: CommandObject):
+    action = await pop_pending_admin_action(ADMIN_ID, "clean_orphans_force_word")
+    if not action or action.get("action") != "clean_orphans_force" or not action.get("confirmed"):
+        await message.answer("Нет подтверждённого force-действия. Сначала выполните /clean_orphans_force.")
+        return
+    word = (command.args or "").strip().upper()
+    if word not in {"FORCE", "DELETE"}:
+        await set_pending_admin_action(ADMIN_ID, "clean_orphans_force_word", action)
+        await message.answer("❌ Неверное кодовое слово. Введите /force_delete FORCE или /force_delete DELETE.")
+        return
+    try:
         removed = await clean_orphan_awg_peers(force=True)
-        await write_audit_log(ADMIN_ID, "clean_orphans_force", f"removed={removed}")
+        await write_audit_log(ADMIN_ID, "clean_orphans_force", f"removed={removed} confirm_word={word}")
         await message.answer(
             (
                 "🧨 <b>Force-cleanup завершён</b>\n\n"
@@ -669,7 +736,7 @@ async def clean_orphans_force_cmd(message: types.Message):
             parse_mode="HTML",
         )
     except Exception as e:
-        logger.exception("Ошибка /clean_orphans_force: %s", e)
+        logger.exception("Ошибка /force_delete: %s", e)
         await message.answer("❌ Не удалось выполнить принудительную очистку потерянных peer.")
 
 

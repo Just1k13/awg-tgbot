@@ -100,6 +100,7 @@ async def init_db() -> None:
         await ensure_column(db, "keys", "psk_key", "TEXT")
         await ensure_column(db, "keys", "vpn_key", "TEXT")
         await ensure_column(db, "keys", "client_private_key", "TEXT")
+        await ensure_column(db, "keys", "bot_managed", "INTEGER NOT NULL DEFAULT 1")
         await ensure_column(db, "keys", "state", "TEXT NOT NULL DEFAULT 'active'")
         await ensure_column(db, "keys", "state_updated_at", "TEXT")
         await ensure_column(db, "keys", "delete_reason", "TEXT")
@@ -1083,6 +1084,20 @@ async def get_valid_db_public_keys() -> set[str]:
           AND public_key NOT LIKE 'pending:%'
           AND ip IS NOT NULL
           AND TRIM(ip) != ''
+        """
+    )
+    return {row[0].strip() for row in rows if row[0]}
+
+
+async def get_bot_managed_known_public_keys() -> set[str]:
+    rows = await fetchall(
+        """
+        SELECT public_key
+        FROM keys
+        WHERE public_key IS NOT NULL
+          AND TRIM(public_key) != ''
+          AND public_key NOT LIKE 'pending:%'
+          AND bot_managed = 1
         """
     )
     return {row[0].strip() for row in rows if row[0]}

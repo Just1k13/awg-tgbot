@@ -20,6 +20,7 @@ SERVICE_NAME="vpn-bot.service"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
 BOT_USER="awg-bot"
 VERSION_FILE="${STATE_DIR}/release_sha"
+UPDATE_REF_FILE="${STATE_DIR}/update_ref"
 INSTALL_LOG="/var/log/awg-tgbot-install.log"
 APP_LOG_DIR="/var/log/awg-tgbot"
 APP_LOG_FILE="${APP_LOG_DIR}/bot.log"
@@ -76,6 +77,7 @@ UPDATE_LOCAL_SHA=""
 UPDATE_CHECK_TS=0
 UPDATE_CACHE_TTL=15
 UPDATE_CACHE_BRANCH=""
+UPDATE_REF="${REPO_UPDATE_REF:-$(cat "$UPDATE_REF_FILE" 2>/dev/null | tr -d '\r\n' || true)}"
 
 print_line() { printf '%s\n' "------------------------------------------------------------"; }
 info() { printf '[*] %s\n' "$*" >&2; }
@@ -258,6 +260,17 @@ persist_repo_branch() {
   mkdir -p "$STATE_DIR"
   printf '%s\n' "$REPO_BRANCH" > "$REPO_BRANCH_FILE"
   return 0
+}
+
+persist_update_ref() {
+  local ref="$1"
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$ref" > "$UPDATE_REF_FILE"
+  return 0
+}
+
+is_full_sha() {
+  [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
 }
 
 set_repo_branch() {
@@ -960,10 +973,11 @@ print_startup_summary() {
 }
 
 download_repo() {
-  local tmp_dir src_dir
+  local tmp_dir src_dir download_url ref="${1:-$REPO_BRANCH}"
   tmp_dir="$(mktemp -d)"
-  info "Скачиваю код из ${REPO_URL} (${REPO_BRANCH})..."
-  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
+  download_url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/${ref}"
+  info "Скачиваю код из ${REPO_URL} (ref=${ref})..."
+  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 1 "$download_url" -o "$tmp_dir/repo.tar.gz"
   tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
   src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
@@ -1296,6 +1310,12 @@ check_updates() {
   refresh_update_status_quiet
   print_line
   echo "Ветка : ${REPO_BRANCH}"
+  if ! is_full_sha "$UPDATE_REF"; then
+    warn "Проверка обновлений отключена: не задан pinned commit SHA (REPO_UPDATE_REF)."
+    warn "Без pinned SHA update заблокирован ради безопасности."
+    print_line
+    return 0
+  fi
   echo "Remote: ${UPDATE_REMOTE_SHA:-не удалось получить}"
   echo "Local : ${UPDATE_LOCAL_SHA:-нет локальной версии}"
   case "$UPDATE_STATUS" in
@@ -1405,6 +1425,9 @@ install_or_reinstall_flow() {
   write_service || die "Не удалось создать systemd сервис."
   persist_repo_branch
   persist_remote_sha
+  if [[ -f "$VERSION_FILE" ]]; then
+    persist_update_ref "$(cat "$VERSION_FILE" | tr -d '\r\n')"
+  fi
   start_service || die "Не удалось запустить сервис."
   ok "Готово. Бот установлен/переустановлен."
   show_status
@@ -1434,6 +1457,15 @@ update_bot() {
     return 0
   fi
 
+  if ! is_full_sha "$UPDATE_REF"; then
+    print_line
+    warn "Безопасное обновление требует pinned commit SHA."
+    warn "Задай REPO_UPDATE_REF=<40-hex-commit>, затем повтори update."
+    warn "Небезопасный update по mutable ветке отключён."
+    print_line
+    return 1
+  fi
+
   refresh_update_status_quiet
   if [[ "$UPDATE_STATUS" == "current" ]]; then
     print_line
@@ -1453,7 +1485,7 @@ update_bot() {
   ensure_packages || die "Не удалось обновить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
 
-  tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
+  tmp_dir="$(download_repo "$UPDATE_REF")" || die "Не удалось скачать код проекта из GitHub."
   stop_service_if_exists
   deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; die "Не удалось развернуть обновление."; }
   rm -rf "$tmp_dir"
@@ -1474,6 +1506,7 @@ update_bot() {
   install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось обновить systemd сервис."
   persist_repo_branch
+  persist_update_ref "$UPDATE_REF"
   persist_remote_sha
   start_service || die "Не удалось перезапустить сервис."
   ok "Обновление завершено."
@@ -1520,6 +1553,9 @@ try:
         "TRIM(public_key) != ''",
         "public_key NOT LIKE 'pending:%'",
     ]
+    if "bot_managed" not in cols:
+        raise SystemExit(0)
+    where.append("bot_managed = 1")
     if "state" in cols:
         where.append("(state IS NULL OR state != 'deleted')")
 

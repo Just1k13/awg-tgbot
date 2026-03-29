@@ -2,12 +2,15 @@ import ipaddress
 import os
 import subprocess
 import logging
+import shutil
 
 logger = logging.getLogger(__name__)
 
 
 def command_exists(name: str) -> bool:
-    return subprocess.run(['bash', '-lc', f'command -v {name} >/dev/null 2>&1'], check=False).returncode == 0
+    # Avoid shell interpolation: name may come from runtime/env and must never be
+    # evaluated by a shell command.
+    return shutil.which(name) is not None
 
 
 def run_local_command(args: list[str], timeout: int = 10) -> str:

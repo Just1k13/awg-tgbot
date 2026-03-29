@@ -652,6 +652,64 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertNotIn("container", arg_dests)
         self.assertNotIn("interface", arg_dests)
 
+    def test_helper_public_key_validation_requires_real_base64_wireguard_key(self):
+        import awg_helper
+
+        valid = base64.b64encode(b"k" * 32).decode("ascii")
+        self.assertEqual(awg_helper._safe_public_key(valid), valid)
+        with self.assertRaises(ValueError):
+            awg_helper._safe_public_key("A" * 44)
+        with self.assertRaises(ValueError):
+            awg_helper._safe_public_key("AA==")
+
+    def test_command_exists_does_not_invoke_shell(self):
+        import config_detect
+
+        with patch.object(config_detect.shutil, "which", return_value=None) as mock_which:
+            result = config_detect.command_exists("docker;rm -rf /")
+        self.assertFalse(result)
+        mock_which.assert_called_once_with("docker;rm -rf /")
+
+    def test_awg_settings_validation_rejects_invalid_numeric_ranges(self):
+        import config_validate
+
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_awg_obfuscation_settings(
+                awg_jc="5",
+                awg_jmin="800",
+                awg_jmax="200",
+                awg_i1="",
+                awg_i2="112233",
+                awg_i3="",
+                awg_i4="",
+                awg_i5="",
+            )
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_awg_obfuscation_settings(
+                awg_jc="x",
+                awg_jmin="0",
+                awg_jmax="0",
+                awg_i1="",
+                awg_i2="",
+                awg_i3="",
+                awg_i4="",
+                awg_i5="",
+            )
+
+    def test_awg_settings_validation_allows_i2_without_i1(self):
+        import config_validate
+
+        config_validate.validate_awg_obfuscation_settings(
+            awg_jc="6",
+            awg_jmin="10",
+            awg_jmax="50",
+            awg_i1="",
+            awg_i2="112233",
+            awg_i3="",
+            awg_i4="",
+            awg_i5="",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

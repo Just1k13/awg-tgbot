@@ -718,6 +718,39 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     awg_helper._load_policy()
 
+    def test_helper_rejects_symlink_policy(self):
+        import awg_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target.json"
+            policy_path = Path(tmp) / "policy.json"
+            target.write_text(json.dumps({"container": "allowed-c", "interface": "awg0"}), encoding="utf-8")
+            policy_path.symlink_to(target)
+            with patch.object(awg_helper, "POLICY_PATH", policy_path):
+                with self.assertRaises(RuntimeError):
+                    awg_helper._load_policy()
+
+    def test_validate_helper_policy_mismatch_is_hard_failure(self):
+        import config_validate
+
+        class DummyLogger:
+            def error(self, *_args, **_kwargs):
+                return None
+
+            def warning(self, *_args, **_kwargs):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"container": "amnezia-awg2", "interface": "awg0"}), encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                config_validate.validate_helper_policy(
+                    policy_path=str(policy_path),
+                    docker_container="different-container",
+                    wg_interface="awg0",
+                    logger=DummyLogger(),
+                )
+
     def test_helper_parser_has_no_external_target_args(self):
         import awg_helper
 
@@ -726,6 +759,10 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         arg_dests = {action.dest for action in add_peer._actions}
         self.assertNotIn("container", arg_dests)
         self.assertNotIn("interface", arg_dests)
+        self.assertIn("qos-set", parser._subparsers._group_actions[0].choices)
+        self.assertIn("qos-clear", parser._subparsers._group_actions[0].choices)
+        self.assertIn("qos-sync", parser._subparsers._group_actions[0].choices)
+        self.assertIn("denylist-sync", parser._subparsers._group_actions[0].choices)
 
     def test_helper_public_key_validation_requires_real_base64_wireguard_key(self):
         import awg_helper
@@ -744,6 +781,76 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
             result = config_detect.command_exists("docker;rm -rf /")
         self.assertFalse(result)
         mock_which.assert_called_once_with("docker;rm -rf /")
+
+    def test_content_settings_placeholder_validation(self):
+        import asyncio
+        from content_settings import validate_text_template
+
+        ok, err = asyncio.run(validate_text_template("support_contact", "Contact: {support_username}"))
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+        ok2, err2 = asyncio.run(validate_text_template("support_contact", "Contact: nope"))
+        self.assertFalse(ok2)
+        self.assertIn("missing placeholders", err2)
+
+    def test_network_policy_parsing(self):
+        from network_policy import parse_cidrs
+
+        parsed = parse_cidrs("10.0.0.1/32, 10.10.0.0/16")
+        self.assertEqual(parsed, ["10.0.0.1/32", "10.10.0.0/16"])
+
+    def test_denylist_soft_mode_does_not_raise(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "soft",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "10.10.0.0/16",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("nft fail")
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            asyncio.run(network_policy.denylist_sync(fail_run))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
+
+    def test_denylist_strict_mode_raises(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "strict",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "10.10.0.0/16",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("nft fail")
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(network_policy.denylist_sync(fail_run))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
 
     def test_awg_settings_validation_rejects_invalid_numeric_ranges(self):
         import config_validate

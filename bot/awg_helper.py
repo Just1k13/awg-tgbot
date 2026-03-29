@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Restricted AWG helper")
     sub = parser.add_subparsers(dest="op", required=True)
 
-    for op_name in ("check-awg", "show", "genkey", "pubkey", "genpsk"):
+    for op_name in ("check-awg", "show", "genkey", "pubkey", "genpsk", "qos-check", "qos-sync", "denylist-check", "denylist-sync", "denylist-clear"):
         sub.add_parser(op_name)
 
     p_add = sub.add_parser("add-peer")
@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_del = sub.add_parser("remove-peer")
     p_del.add_argument("--public-key", required=True)
+    p_qos_set = sub.add_parser("qos-set")
+    p_qos_set.add_argument("--ip", required=True)
+    p_qos_set.add_argument("--rate-mbit", required=True)
+    p_qos_clear = sub.add_parser("qos-clear")
+    p_qos_clear.add_argument("--ip", required=True)
     return parser
 
 
@@ -146,6 +151,54 @@ def main() -> int:
         if args.op == "remove-peer":
             public_key = _safe_public_key(args.public_key.strip())
             print(_docker_exec(container, ["awg", "set", interface, "peer", public_key, "remove"]))
+            return 0
+        if args.op == "qos-check":
+            print(_run(["tc", "qdisc", "show", "dev", interface]))
+            return 0
+        if args.op == "qos-set":
+            ip = _safe_ipv4(args.ip.strip())
+            rate_mbit = int(str(args.rate_mbit).strip())
+            if rate_mbit <= 0 or rate_mbit > 10000:
+                raise RuntimeError("invalid rate-mbit")
+            classid_suffix = ip.split(".")[-1]
+            _run(["tc", "qdisc", "replace", "dev", interface, "root", "handle", "1:", "htb", "default", "9999"])
+            _run(["tc", "class", "replace", "dev", interface, "parent", "1:", "classid", f"1:{classid_suffix}", "htb", "rate", f"{rate_mbit}mbit", "ceil", f"{rate_mbit}mbit"])
+            _run(["tc", "filter", "replace", "dev", interface, "protocol", "ip", "parent", "1:0", "prio", "1", "u32", "match", "ip", "dst", f"{ip}/32", "flowid", f"1:{classid_suffix}"])
+            print(f"qos set {ip} {rate_mbit}mbit")
+            return 0
+        if args.op == "qos-clear":
+            ip = _safe_ipv4(args.ip.strip())
+            classid_suffix = ip.split(".")[-1]
+            _run(["tc", "filter", "delete", "dev", interface, "protocol", "ip", "parent", "1:0", "prio", "1", "u32", "match", "ip", "dst", f"{ip}/32"], stdin_text=None)
+            _run(["tc", "class", "delete", "dev", interface, "classid", f"1:{classid_suffix}"])
+            print(f"qos clear {ip}")
+            return 0
+        if args.op == "qos-sync":
+            payload = [line.strip() for line in sys.stdin.read().splitlines() if line.strip()]
+            _run(["tc", "qdisc", "replace", "dev", interface, "root", "handle", "1:", "htb", "default", "9999"])
+            for line in payload:
+                ip_raw, rate_raw = line.split(",", 1)
+                ip = _safe_ipv4(ip_raw.strip())
+                rate_mbit = int(rate_raw.strip())
+                classid_suffix = ip.split(".")[-1]
+                _run(["tc", "class", "replace", "dev", interface, "parent", "1:", "classid", f"1:{classid_suffix}", "htb", "rate", f"{rate_mbit}mbit", "ceil", f"{rate_mbit}mbit"])
+                _run(["tc", "filter", "replace", "dev", interface, "protocol", "ip", "parent", "1:0", "prio", "1", "u32", "match", "ip", "dst", f"{ip}/32", "flowid", f"1:{classid_suffix}"])
+            print(f"qos synced {len(payload)}")
+            return 0
+        if args.op == "denylist-check":
+            print(_run(["nft", "list", "set", "inet", "filter", "awg_denylist"]))
+            return 0
+        if args.op == "denylist-clear":
+            _run(["nft", "delete", "set", "inet", "filter", "awg_denylist"])
+            print("denylist cleared")
+            return 0
+        if args.op == "denylist-sync":
+            cidrs = [line.strip() for line in sys.stdin.read().splitlines() if line.strip()]
+            _run(["nft", "add", "table", "inet", "filter"])
+            _run(["nft", "add", "set", "inet", "filter", "awg_denylist", "{", "type", "ipv4_addr", ";", "}"])
+            for cidr in cidrs:
+                _run(["nft", "add", "element", "inet", "filter", "awg_denylist", "{", cidr, "}"])
+            print(f"denylist synced {len(cidrs)}")
             return 0
     except Exception as e:
         print(str(e), file=sys.stderr)

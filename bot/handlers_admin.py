@@ -8,13 +8,23 @@ from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
     clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
-    get_orphan_awg_peers, issue_subscription, list_orphan_delete_candidates_force, revoke_user_access,
+    get_orphan_awg_peers, issue_subscription, list_orphan_delete_candidates_force, revoke_user_access, run_docker, sync_qos_state,
 )
-from config import ADMIN_COMMAND_COOLDOWN_SECONDS, ADMIN_ID, BACKUP_ENCRYPTION_KEY, BACKUP_SECURE_MODE, logger
+from config import (
+    ADMIN_COMMAND_COOLDOWN_SECONDS,
+    ADMIN_ID,
+    BACKUP_ALLOW_INSECURE_SEND,
+    BACKUP_ENCRYPTION_KEY,
+    BACKUP_SECURE_MODE,
+    logger,
+)
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone,
+    get_app_setting,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
-    get_pending_broadcast, get_recent_audit, get_user_meta, pop_pending_admin_action,
+    get_pending_broadcast, get_recent_audit, get_referral_summary, get_text_override, get_user_meta, list_app_settings,
+    list_text_overrides, pop_pending_admin_action, reset_text_override,
+    set_app_setting, set_text_override,
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
@@ -23,6 +33,8 @@ from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
 )
+from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
+from network_policy import denylist_sync, policy_metrics
 
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
@@ -203,6 +215,8 @@ async def admin_sync_awg(cb: types.CallbackQuery):
         await cb.answer("Нет доступа", show_alert=True)
         return
     try:
+        await sync_qos_state()
+        await denylist_sync(run_docker)
         await cb.message.answer(await build_awg_sync_text(), parse_mode="HTML")
         await cb.answer("Синхронизация проверена")
     except Exception as e:
@@ -626,6 +640,8 @@ async def audit_cmd(message: types.Message, command: CommandObject):
 @router.message(Command("sync_awg"), IsAdmin())
 async def sync_awg_cmd(message: types.Message):
     try:
+        await sync_qos_state()
+        await denylist_sync(run_docker)
         await message.answer(await build_awg_sync_text(), parse_mode="HTML")
     except Exception as e:
         logger.exception("Ошибка /sync_awg: %s", e)
@@ -775,6 +791,12 @@ async def backup_db(message: types.Message):
             payload = Fernet(BACKUP_ENCRYPTION_KEY.encode("utf-8")).encrypt(payload)
             filename = f"{filename}.enc"
             caption += "\n🔐 Secure mode: backup зашифрован (Fernet)."
+        elif not BACKUP_ALLOW_INSECURE_SEND:
+            redacted.unlink(missing_ok=True)
+            await message.answer("❌ Небезопасная отправка backup отключена. Включите BACKUP_SECURE_MODE=1 или явно задайте BACKUP_ALLOW_INSECURE_SEND=1.")
+            return
+        else:
+            caption += "\n⚠️ Insecure mode: файл отправлен без шифрования (явный opt-in)."
         await message.answer_document(
             types.BufferedInputFile(payload, filename=filename),
             caption=caption,
@@ -809,6 +831,7 @@ async def health_cmd(message: types.Message):
     stats = await get_pending_jobs_stats()
     lag = await get_recovery_lag_seconds()
     helper_failures = await get_metric("awg_helper_failures")
+    policy_stats = await policy_metrics()
     await message.answer(
         (
             "🩺 <b>Отчёт о состоянии</b>\n\n"
@@ -817,7 +840,98 @@ async def health_cmd(message: types.Message):
             f"jobs.needs_repair=<b>{stats['needs_repair']}</b>\n"
             f"jobs.stuck_manual=<b>{stats['stuck_manual']}</b>\n"
             f"recovery_lag_sec=<b>{lag}</b>\n"
-            f"awg_helper_failures=<b>{helper_failures}</b>"
+            f"awg_helper_failures=<b>{helper_failures}</b>\n"
+            f"qos_errors=<b>{policy_stats['qos_errors']}</b>\n"
+            f"denylist_errors=<b>{policy_stats['denylist_errors']}</b>"
         ),
         parse_mode="HTML",
+    )
+
+
+@router.message(Command("text_list"), IsAdmin())
+async def text_list_cmd(message: types.Message):
+    rows = await list_text_overrides()
+    defaults = ", ".join(sorted(TEXT_DEFAULTS.keys()))
+    custom = ", ".join([row[0] for row in rows]) or "—"
+    await message.answer(f"TEXT_DEFAULTS: {defaults}\nCUSTOM: {custom}")
+
+
+@router.message(Command("text_get"), IsAdmin())
+async def text_get_cmd(message: types.Message, command: CommandObject):
+    key = (command.args or "").strip()
+    if not key:
+        await message.answer("Использование: /text_get <key>")
+        return
+    value = await get_text_override(key) or TEXT_DEFAULTS.get(key)
+    await message.answer(f"{key}:\n\n{escape_html(str(value or ''))}", parse_mode="HTML")
+
+
+@router.message(Command("text_set"), IsAdmin())
+async def text_set_cmd(message: types.Message, command: CommandObject):
+    raw = (command.args or "").strip()
+    if " " not in raw:
+        await message.answer("Использование: /text_set <key> <value>")
+        return
+    key, value = raw.split(" ", 1)
+    valid, err = await validate_text_template(key, value)
+    if not valid:
+        await message.answer(f"❌ {err}")
+        return
+    await set_text_override(key, value, updated_by=message.from_user.id)
+    await write_audit_log(message.from_user.id, "text_set", f"key={key}")
+    await message.answer("✅ Текст обновлён.")
+
+
+@router.message(Command("text_reset"), IsAdmin())
+async def text_reset_cmd(message: types.Message, command: CommandObject):
+    key = (command.args or "").strip()
+    if not key:
+        await message.answer("Использование: /text_reset <key>")
+        return
+    await reset_text_override(key)
+    await write_audit_log(message.from_user.id, "text_reset", f"key={key}")
+    await message.answer("✅ Override удалён.")
+
+
+@router.message(Command("setting_list"), IsAdmin())
+async def setting_list_cmd(message: types.Message):
+    rows = await list_app_settings()
+    defaults = ", ".join(sorted(SETTING_DEFAULTS.keys()))
+    custom = ", ".join([row[0] for row in rows]) or "—"
+    await message.answer(f"SETTING_DEFAULTS: {defaults}\nCUSTOM: {custom}")
+
+
+@router.message(Command("setting_get"), IsAdmin())
+async def setting_get_cmd(message: types.Message, command: CommandObject):
+    key = (command.args or "").strip()
+    if not key:
+        await message.answer("Использование: /setting_get <key>")
+        return
+    value = await get_app_setting(key)
+    if value is None:
+        value = SETTING_DEFAULTS.get(key)
+    await message.answer(f"{key}={value}")
+
+
+@router.message(Command("setting_set"), IsAdmin())
+async def setting_set_cmd(message: types.Message, command: CommandObject):
+    raw = (command.args or "").strip()
+    if " " not in raw:
+        await message.answer("Использование: /setting_set <key> <value>")
+        return
+    key, value = raw.split(" ", 1)
+    await set_app_setting(key, value, updated_by=message.from_user.id)
+    await write_audit_log(message.from_user.id, "setting_set", f"key={key}; value={value[:120]}")
+    await message.answer("✅ Настройка сохранена.")
+
+
+@router.message(Command("ref_stats"), IsAdmin())
+async def ref_stats_cmd(message: types.Message):
+    summary = await get_referral_summary(message.from_user.id)
+    await message.answer(
+        (
+            "🎁 Referral summary (admin snapshot)\n"
+            f"invited_by_admin={summary['invited_count']}\n"
+            f"admin_bonus_days={summary['inviter_bonus_days'] + summary['invitee_bonus_days']}"
+        )
     )

@@ -91,12 +91,63 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
                 self.currency = currency
 
         bot = DummyBot()
-        await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS + 1, "XTR"), bot)
-        self.assertEqual(bot.calls[-1][1], False)
-        await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "USD"), bot)
-        self.assertEqual(bot.calls[-1][1], False)
-        await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "XTR"), bot)
-        self.assertEqual(bot.calls[-1][1], True)
+        original_readiness = payments.checkout_readiness
+        payments.checkout_readiness = lambda: asyncio.sleep(0, result=(True, ""))  # type: ignore[assignment]
+        try:
+            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS + 1, "XTR"), bot)
+            self.assertEqual(bot.calls[-1][1], False)
+            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "USD"), bot)
+            self.assertEqual(bot.calls[-1][1], False)
+            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "XTR"), bot)
+            self.assertEqual(bot.calls[-1][1], True)
+        finally:
+            payments.checkout_readiness = original_readiness
+
+    async def test_pre_checkout_rejects_unknown_payload(self):
+        import payments
+
+        class DummyBot:
+            def __init__(self):
+                self.calls = []
+
+            async def answer_pre_checkout_query(self, qid, ok, error_message=None):
+                self.calls.append((qid, ok, error_message))
+
+        class DummyQuery:
+            id = "q-unknown"
+            invoice_payload = "sub_999"
+            total_amount = payments.STARS_PRICE_7_DAYS
+            currency = "XTR"
+
+        bot = DummyBot()
+        await payments.pre_checkout(DummyQuery(), bot)
+        self.assertFalse(bot.calls[-1][1])
+
+    async def test_pre_checkout_rejects_when_readiness_degraded(self):
+        import payments
+
+        class DummyBot:
+            def __init__(self):
+                self.calls = []
+
+            async def answer_pre_checkout_query(self, qid, ok, error_message=None):
+                self.calls.append((qid, ok, error_message))
+
+        class DummyQuery:
+            id = "q-degraded"
+            invoice_payload = "sub_7"
+            total_amount = payments.STARS_PRICE_7_DAYS
+            currency = "XTR"
+
+        bot = DummyBot()
+        original_readiness = payments.checkout_readiness
+        payments.checkout_readiness = lambda: asyncio.sleep(0, result=(False, "db down"))  # type: ignore[assignment]
+        try:
+            await payments.pre_checkout(DummyQuery(), bot)
+        finally:
+            payments.checkout_readiness = original_readiness
+        self.assertFalse(bot.calls[-1][1])
+        self.assertIn("временно", bot.calls[-1][2])
 
     async def test_retries_stop_at_max_attempts_and_mark_stuck(self):
         import database
@@ -361,6 +412,93 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         await database.ensure_user_exists(12)
         recipients = await database.get_broadcast_recipients(job_id, 0, 50)
         self.assertEqual(recipients, [10, 11])
+
+    async def test_backup_requires_explicit_opt_in_for_insecure_send(self):
+        import config
+        import handlers_admin
+
+        class DummyMessage:
+            def __init__(self):
+                self.answers = []
+                self.documents = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+            async def answer_document(self, document, caption=None, **kwargs):
+                self.documents.append((document, caption))
+
+        original_secure = handlers_admin.BACKUP_SECURE_MODE
+        original_allow = handlers_admin.BACKUP_ALLOW_INSECURE_SEND
+        handlers_admin.BACKUP_SECURE_MODE = False
+        handlers_admin.BACKUP_ALLOW_INSECURE_SEND = False
+        original_config_db_path = config.DB_PATH
+        config.DB_PATH = self.db_path
+        try:
+            msg = DummyMessage()
+            await handlers_admin.backup_db(msg)  # type: ignore[arg-type]
+            self.assertTrue(any("Небезопасная отправка backup отключена" in text for text in msg.answers))
+            self.assertEqual(msg.documents, [])
+        finally:
+            handlers_admin.BACKUP_SECURE_MODE = original_secure
+            handlers_admin.BACKUP_ALLOW_INSECURE_SEND = original_allow
+            config.DB_PATH = original_config_db_path
+
+    async def test_unknown_slash_command_gets_user_feedback(self):
+        import handlers_user
+
+        class DummyMessage:
+            def __init__(self):
+                self.text = "/unknown"
+                self.from_user = type("U", (), {"id": 101})()
+                self.answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        message = DummyMessage()
+        await handlers_user.fallback_message(message)  # type: ignore[arg-type]
+        self.assertTrue(message.answers)
+        self.assertIn("Неизвестная команда", message.answers[-1])
+
+    async def test_recovery_ready_notification_is_idempotent(self):
+        import database
+        import payments
+
+        await database.save_payment(
+            telegram_payment_charge_id="tg_notify",
+            provider_payment_charge_id="prov_notify",
+            user_id=555,
+            payload="sub_7",
+            amount=payments.STARS_PRICE_7_DAYS,
+            currency="XTR",
+            payment_method="stars",
+            status="needs_repair",
+            raw_payload_json="{}",
+        )
+        await database.execute("UPDATE provisioning_jobs SET status='needs_repair', next_retry_at=NULL WHERE payment_id='tg_notify'")
+
+        async def fake_process(payment_id, user_id, payload, days):
+            await database.update_payment_status(payment_id, "applied")
+            return True
+
+        class DummyBot:
+            def __init__(self):
+                self.sent = []
+
+            async def send_message(self, user_id, text, **kwargs):
+                self.sent.append((user_id, text))
+
+        bot = DummyBot()
+        original_process = payments.process_payment_provisioning
+        payments.process_payment_provisioning = fake_process
+        try:
+            await payments.payment_recovery_worker(bot)  # type: ignore[arg-type]
+            await payments.payment_recovery_worker(bot)  # type: ignore[arg-type]
+        finally:
+            payments.process_payment_provisioning = original_process
+
+        self.assertEqual(len(bot.sent), 1)
 
 
 if __name__ == "__main__":

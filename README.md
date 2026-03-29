@@ -278,6 +278,8 @@ tail -f /var/log/awg-tgbot/bot.log
 - рассылку;
 - безопасный backup базы без секретов.
 
+> Rollout policy: все рискованные изменения сначала выкатываются в `beta`, проходят smoke-check, и только потом промоутятся в `main`.
+
 ### Основные админ-команды
 
 ```text
@@ -305,6 +307,8 @@ tail -f /var/log/awg-tgbot/bot.log
 - `/clean_orphans` — quarantine-этап только для `bot_managed` peer, без физического удаления;
 - `/clean_orphans_force` — физическое удаление только `bot_managed` peer после двойного подтверждения;
 - `/backup` — резервная копия БД без секретных данных;
+  - по умолчанию в secure mode (шифрование Fernet);
+  - insecure-отправка разрешается только при явном `BACKUP_ALLOW_INSECURE_SEND=1`.
 - `/send` — массовая рассылка.
 
 ---
@@ -497,6 +501,16 @@ sudo REPO_BRANCH=main awg-tgbot
 ```bash
 sudo REPO_BRANCH=beta awg-tgbot
 ```
+
+### Обязательный smoke-check перед merge `beta -> main`
+Минимум проверьте:
+1. новая покупка (получение доступа и конфигов);
+2. продление активной подписки;
+3. повторная доставка `successful_payment` (идемпотентность);
+4. degraded readiness => `pre_checkout` reject;
+5. unknown slash command даёт понятный ответ;
+6. `/backup` в secure mode и explicit insecure режиме;
+7. helper policy mismatch даёт корректную ошибку и блокирует опасные операции.
 
 ---
 

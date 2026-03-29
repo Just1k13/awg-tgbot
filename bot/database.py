@@ -126,6 +126,8 @@ async def init_db() -> None:
         await ensure_column(db, "payments", "updated_at", "TEXT")
         await ensure_column(db, "payments", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
         await ensure_column(db, "payments", "last_attempt_at", "TEXT")
+        await ensure_column(db, "payments", "last_provision_status", "TEXT NOT NULL DEFAULT 'payment_received'")
+        await ensure_column(db, "payments", "user_notified_ready_at", "TEXT")
 
         await db.execute(
             """
@@ -468,6 +470,69 @@ async def get_payment_status(payment_id: str) -> str | None:
     return row[0] if row else None
 
 
+async def get_payment_activation_snapshot(payment_id: str) -> tuple[str, str | None] | None:
+    row = await fetchone(
+        "SELECT last_provision_status, provisioned_until FROM payments WHERE telegram_payment_charge_id = ?",
+        (payment_id,),
+    )
+    return (row[0], row[1]) if row else None
+
+
+async def get_latest_user_payment_summary(user_id: int) -> dict[str, Any] | None:
+    row = await fetchone(
+        """
+        SELECT telegram_payment_charge_id, status, amount, currency, created_at, updated_at, provisioned_until, last_provision_status
+        FROM payments
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    )
+    if not row:
+        return None
+    return {
+        "payment_id": row[0],
+        "status": row[1],
+        "amount": row[2],
+        "currency": row[3],
+        "created_at": row[4],
+        "updated_at": row[5],
+        "provisioned_until": row[6],
+        "last_provision_status": row[7],
+    }
+
+
+async def update_last_provision_status(payment_id: str, status: str) -> None:
+    await execute(
+        """
+        UPDATE payments
+        SET last_provision_status = ?, updated_at = ?
+        WHERE telegram_payment_charge_id = ?
+        """,
+        (status, utc_now_naive().isoformat(), payment_id),
+    )
+
+
+async def mark_ready_notification_sent(payment_id: str) -> bool:
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        cur = await db.execute(
+            """
+            UPDATE payments
+            SET user_notified_ready_at = ?, updated_at = ?
+            WHERE telegram_payment_charge_id = ?
+              AND user_notified_ready_at IS NULL
+            """,
+            (now_iso, now_iso, payment_id),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) == 1
+    finally:
+        await db.close()
+
+
 async def payment_already_processed(payment_id: str) -> bool:
     status = await get_payment_status(payment_id)
     return status == "applied"
@@ -499,10 +564,11 @@ async def save_payment(
                 currency,
                 payment_method,
                 status,
+                last_provision_status,
                 raw_payload_json,
                 created_at,
                 updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'payment_received', ?, ?, ?)
             ON CONFLICT(telegram_payment_charge_id) DO UPDATE SET
                 provider_payment_charge_id = COALESCE(excluded.provider_payment_charge_id, provider_payment_charge_id),
                 raw_payload_json = COALESCE(excluded.raw_payload_json, raw_payload_json),

@@ -8,10 +8,11 @@ from config import (
     SERVER_NAME,
     STARS_PRICE_7_DAYS,
     STARS_PRICE_30_DAYS,
+    logger,
     get_support_username,
     maybe_set_support_username,
 )
-from database import ensure_user_exists, get_user_keys, get_user_subscription
+from database import ensure_user_exists, get_latest_user_payment_summary, get_user_keys, get_user_subscription
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active
 from keyboards import (
     get_buy_inline_kb,
@@ -28,6 +29,7 @@ from ui_constants import (
     BTN_GUIDE,
     BTN_PROFILE,
     BTN_SUPPORT,
+    CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX,
     CB_CONFIG_DEVICE_PREFIX,
     CB_OPEN_CONFIGS,
@@ -56,7 +58,7 @@ async def _send_buy_menu(target, user_id: int):
                 "🔄 <b>У вас уже есть активная подписка</b>\n"
                 f"⏳ Осталось: <b>{remaining}</b>\n\n"
                 "💡 Вы можете продлить её заранее. Новые дни добавятся к текущему сроку.\n\n"
-                "В подписку входит доступ до <b>2 устройств</b>.\n\n"
+                "В подписку входит доступ до <b>2 устройств</b> и быстрый импорт в Amnezia.\n\n"
                 + "\n".join(price_lines)
             ),
             parse_mode="HTML",
@@ -65,7 +67,7 @@ async def _send_buy_menu(target, user_id: int):
         return
     await target.answer(
         "💳 <b>Выберите срок доступа</b>\n\n"
-        "В подписку входит доступ до <b>2 устройств</b>.\n\n"
+        "В подписку входит доступ до <b>2 устройств</b> и быстрый импорт в Amnezia.\n\n"
         + "\n".join(price_lines),
         parse_mode="HTML",
         reply_markup=get_buy_inline_kb(),
@@ -143,6 +145,13 @@ async def profile(message: types.Message):
     first_name = escape_html(message.from_user.first_name)
     is_active = subscription_is_active(sub_until)
     remaining = format_remaining_time(sub_until) if is_active else "—"
+    payment_summary = await get_latest_user_payment_summary(message.from_user.id)
+    payment_line = "нет данных"
+    activation_line = "нет данных"
+    if payment_summary:
+        created_at = str(payment_summary["created_at"]).replace("T", " ")[:16]
+        payment_line = f"{payment_summary['amount']} {payment_summary['currency']} ({created_at})"
+        activation_line = payment_summary["last_provision_status"] or payment_summary["status"]
     await message.answer(
         (
             "👤 <b>Профиль</b>\n\n"
@@ -151,7 +160,9 @@ async def profile(message: types.Message):
             f"✈️ <b>Telegram:</b> {escape_html(tg_username)}\n"
             f"📌 <b>Подписка:</b> {status_text}\n"
             f"📅 <b>Действует до:</b> {until_text}\n"
-            f"⏳ <b>Осталось:</b> {remaining}\n\n"
+            f"⏳ <b>Осталось:</b> {remaining}\n"
+            f"💸 <b>Последний платёж:</b> {payment_line}\n"
+            f"🚦 <b>Последняя активация:</b> {activation_line}\n\n"
             "⬇️ Ниже — быстрые действия."
         ),
         parse_mode="HTML",
@@ -258,10 +269,29 @@ async def guide(message: types.Message):
 
 @router.message(F.text == BTN_SUPPORT)
 async def support(message: types.Message):
-    await message.answer(
-        f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(get_support_username())}</b>",
-        parse_mode="HTML",
-    )
+    support_username = get_support_username()
+    if not support_username:
+        logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
+        await message.answer("🆘 Поддержка временно не настроена. Попробуйте позже или напишите администратору сервиса.")
+        return
+    await message.answer(f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(support_username)}</b>", parse_mode="HTML")
+
+
+@router.callback_query(F.data == CB_CHECK_ACTIVATION_STATUS)
+async def check_activation_status(cb: types.CallbackQuery):
+    await cb.answer()
+    payment_summary = await get_latest_user_payment_summary(cb.from_user.id)
+    if not payment_summary:
+        await cb.message.answer("Платежей пока нет. Нажмите «💳 Оплатить доступ», чтобы начать.")
+        return
+    status = payment_summary["last_provision_status"] or payment_summary["status"]
+    if status == "ready":
+        await cb.message.answer("✅ Оплата получена → доступ выпускается → доступ готов. Откройте «🔑 Подключение».")
+        return
+    if status in {"provisioning", "payment_received"}:
+        await cb.message.answer("⏳ Оплата получена. Доступ выпускается. Обычно это занимает до минуты.")
+        return
+    await cb.message.answer("⚠️ Активация задержалась. Проверьте статус позже или напишите в поддержку.")
 
 
 @router.message(F.text == BTN_BUY)
@@ -292,6 +322,7 @@ async def show_instruction_callback(cb: types.CallbackQuery):
 @router.message()
 async def fallback_message(message: types.Message):
     if message.text and message.text.startswith("/"):
+        await message.answer("Неизвестная команда. Используйте кнопки меню или /start.")
         return
     await message.answer(
         "Не понял сообщение. Используйте кнопки меню ниже.",

@@ -55,7 +55,10 @@ def validate_helper_policy(*, policy_path: str, docker_container: str, wg_interf
     policy_container, policy_interface, policy_error = read_helper_policy(Path(policy_path))
     if policy_error:
         if policy_error.startswith('helper policy unreadable by runtime user:'):
-            logger.info('AWG helper policy status: %s', policy_error)
+            logger.error('AWG helper policy status: %s', policy_error)
+            raise RuntimeError(
+                'исправьте права на /etc/awg-bot-helper.json или выполните sudo awg-tgbot sync-helper-policy'
+            )
         else:
             logger.warning('AWG helper policy status: %s', policy_error)
     elif policy_container != docker_container or policy_interface != wg_interface:

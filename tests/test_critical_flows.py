@@ -455,6 +455,100 @@ peer: PUBKEY2
         self.assertEqual(peers[1]["public_key"], "PUBKEY2")
         self.assertEqual(peers[1]["ip"], "10.8.1.12")
 
+    async def test_build_client_config_omits_empty_i2_i5(self):
+        import awg_backend
+
+        original_values = (
+            awg_backend.AWG_I1,
+            awg_backend.AWG_I2,
+            awg_backend.AWG_I3,
+            awg_backend.AWG_I4,
+            awg_backend.AWG_I5,
+        )
+        awg_backend.AWG_I1 = ""
+        awg_backend.AWG_I2 = "should-not-appear"
+        awg_backend.AWG_I3 = "should-not-appear"
+        awg_backend.AWG_I4 = "should-not-appear"
+        awg_backend.AWG_I5 = "should-not-appear"
+        try:
+            cfg = awg_backend.build_client_config("priv", "10.8.1.10", "psk")
+        finally:
+            (
+                awg_backend.AWG_I1,
+                awg_backend.AWG_I2,
+                awg_backend.AWG_I3,
+                awg_backend.AWG_I4,
+                awg_backend.AWG_I5,
+            ) = original_values
+        self.assertNotIn("I1 =", cfg)
+        self.assertNotIn("I2 =", cfg)
+        self.assertNotIn("I3 =", cfg)
+        self.assertNotIn("I4 =", cfg)
+        self.assertNotIn("I5 =", cfg)
+
+    async def test_force_cleanup_candidates_limited_to_quarantine_managed_not_in_db(self):
+        import awg_backend
+
+        async def fake_get_awg_peers():
+            return [
+                {"public_key": "candidate-ok", "ip": "10.8.1.10"},
+                {"public_key": "in-db", "ip": "10.8.1.11"},
+                {"public_key": "missing-ip", "ip": None},
+                {"public_key": "outside-range", "ip": "192.168.1.10"},
+                {"public_key": "not-quarantined", "ip": "10.8.1.12"},
+                {"public_key": "ignored", "ip": "10.8.1.13"},
+            ]
+
+        async def fake_db_keys():
+            return {"in-db"}
+
+        async def fake_quarantined():
+            return {"candidate-ok", "in-db", "missing-ip", "outside-range", "ignored"}
+
+        original_get = awg_backend.get_awg_peers
+        original_db = awg_backend.get_valid_db_public_keys
+        original_quarantined = awg_backend._get_quarantined_public_keys
+        original_ignore = awg_backend.IGNORE_PEERS
+        awg_backend.get_awg_peers = fake_get_awg_peers
+        awg_backend.get_valid_db_public_keys = fake_db_keys
+        awg_backend._get_quarantined_public_keys = fake_quarantined
+        awg_backend.IGNORE_PEERS = set(original_ignore) | {"ignored"}
+        try:
+            candidates = await awg_backend.list_orphan_delete_candidates_force()
+        finally:
+            awg_backend.get_awg_peers = original_get
+            awg_backend.get_valid_db_public_keys = original_db
+            awg_backend._get_quarantined_public_keys = original_quarantined
+            awg_backend.IGNORE_PEERS = original_ignore
+        self.assertEqual(candidates, [{"public_key": "candidate-ok", "ip": "10.8.1.10"}])
+
+    async def test_validate_helper_policy_fails_on_permission_error(self):
+        import config_validate
+
+        class DummyLogger:
+            def __init__(self):
+                self.messages = []
+
+            def error(self, msg, *args):
+                self.messages.append(msg % args if args else msg)
+
+            def warning(self, msg, *args):
+                self.messages.append(msg % args if args else msg)
+
+        logger = DummyLogger()
+        with (
+            patch.object(config_validate.Path, "exists", return_value=True),
+            patch.object(config_validate.Path, "is_symlink", return_value=False),
+            patch.object(config_validate.Path, "read_text", side_effect=PermissionError("denied")),
+        ):
+            with self.assertRaises(RuntimeError):
+                config_validate.validate_helper_policy(
+                    policy_path="/etc/awg-bot-helper.json",
+                    docker_container="amnezia-awg",
+                    wg_interface="awg0",
+                    logger=logger,
+                )
+
 
 class InstallerAndHelperHardeningTests(unittest.TestCase):
     def test_installer_menu_safe_fails_without_tty(self):
@@ -512,6 +606,7 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
         self.assertIn('gpasswd -d "$BOT_USER" docker', script)
         self.assertIn('не в группе docker', script)
+        self.assertIn('install -o root -g "$BOT_USER" -m 640 "$tmp" "$AWG_HELPER_POLICY"', script)
 
     def test_installer_preserves_existing_db_path_on_update(self):
         script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")

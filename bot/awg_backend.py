@@ -17,7 +17,8 @@ from config import (
 )
 from database import (
     add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall,
-    get_protected_public_keys, get_reserved_ips_from_db, get_reserved_ips_from_db_conn, get_valid_db_public_keys,
+    get_bot_managed_known_public_keys, get_protected_public_keys, get_reserved_ips_from_db, get_reserved_ips_from_db_conn,
+    get_valid_db_public_keys,
     increment_metric, open_db, write_audit_log,
 )
 from helpers import is_valid_awg_public_key, parse_server_host_port, utc_now_naive
@@ -220,11 +221,7 @@ def _awg_settings() -> dict[str, str]:
         "I4": AWG_I4,
         "I5": AWG_I5,
     }
-    normalized = {k: str(v).strip() for k, v in settings.items() if str(v).strip()}
-    if not normalized.get("I1"):
-        for key in ("I2", "I3", "I4", "I5"):
-            normalized.pop(key, None)
-    return normalized
+    return {k: str(v).strip() for k, v in settings.items() if str(v).strip()}
 
 
 def build_client_config(private_key: str, ip: str, psk_key: str) -> str:
@@ -398,6 +395,7 @@ def _list_orphan_delete_candidates_force(
     *,
     awg_peers: list[dict[str, str | None]],
     db_keys: set[str],
+    bot_managed_keys: set[str],
     quarantined: set[str],
 ) -> list[dict[str, str | None]]:
     candidates: list[dict[str, str | None]] = []
@@ -410,6 +408,8 @@ def _list_orphan_delete_candidates_force(
             continue
         if public_key in db_keys:
             continue
+        if public_key not in bot_managed_keys:
+            continue
         if public_key in IGNORE_PEERS:
             continue
         if not _is_managed_client_ip(peer_ip):
@@ -421,10 +421,12 @@ def _list_orphan_delete_candidates_force(
 async def list_orphan_delete_candidates_force() -> list[dict[str, str | None]]:
     awg_peers = await get_awg_peers()
     db_keys = await get_valid_db_public_keys()
+    bot_managed_keys = await get_bot_managed_known_public_keys()
     quarantined = await _get_quarantined_public_keys()
     return _list_orphan_delete_candidates_force(
         awg_peers=awg_peers,
         db_keys=db_keys,
+        bot_managed_keys=bot_managed_keys,
         quarantined=quarantined,
     )
 
@@ -434,9 +436,16 @@ async def get_orphan_awg_peers() -> list[dict[str, str | None]]:
     if not awg_peers:
         return []
     db_keys = await get_valid_db_public_keys()
+    bot_managed_keys = await get_bot_managed_known_public_keys()
     protected = await get_protected_public_keys()
     protected.update(IGNORE_PEERS)
-    return [peer for peer in awg_peers if peer["public_key"] not in db_keys and peer["public_key"] not in protected]
+    return [
+        peer
+        for peer in awg_peers
+        if peer["public_key"] not in db_keys
+        and peer["public_key"] in bot_managed_keys
+        and peer["public_key"] not in protected
+    ]
 
 
 async def clean_orphan_awg_peers(force: bool = False) -> int:
@@ -664,6 +673,7 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                             psk_key = NULL,
                             vpn_key = NULL,
                             delete_reason = NULL,
+                            bot_managed = 1,
                             state = 'pending',
                             state_updated_at = ?
                         WHERE user_id = ?
@@ -690,8 +700,8 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
                 if insert_rows:
                     await db.executemany(
                         """
-                        INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, bot_managed)
+                        VALUES (?, ?, ?, ?, ?, ?, 1)
                         """,
                         insert_rows,
                     )

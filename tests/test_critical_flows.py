@@ -455,7 +455,7 @@ peer: PUBKEY2
         self.assertEqual(peers[1]["public_key"], "PUBKEY2")
         self.assertEqual(peers[1]["ip"], "10.8.1.12")
 
-    async def test_build_client_config_omits_empty_i2_i5(self):
+    async def test_build_client_config_keeps_i2_i5_even_without_i1(self):
         import awg_backend
 
         original_values = (
@@ -466,10 +466,10 @@ peer: PUBKEY2
             awg_backend.AWG_I5,
         )
         awg_backend.AWG_I1 = ""
-        awg_backend.AWG_I2 = "should-not-appear"
-        awg_backend.AWG_I3 = "should-not-appear"
-        awg_backend.AWG_I4 = "should-not-appear"
-        awg_backend.AWG_I5 = "should-not-appear"
+        awg_backend.AWG_I2 = "should-appear-2"
+        awg_backend.AWG_I3 = "should-appear-3"
+        awg_backend.AWG_I4 = "should-appear-4"
+        awg_backend.AWG_I5 = "should-appear-5"
         try:
             cfg = awg_backend.build_client_config("priv", "10.8.1.10", "psk")
         finally:
@@ -481,10 +481,10 @@ peer: PUBKEY2
                 awg_backend.AWG_I5,
             ) = original_values
         self.assertNotIn("I1 =", cfg)
-        self.assertNotIn("I2 =", cfg)
-        self.assertNotIn("I3 =", cfg)
-        self.assertNotIn("I4 =", cfg)
-        self.assertNotIn("I5 =", cfg)
+        self.assertIn("I2 = should-appear-2", cfg)
+        self.assertIn("I3 = should-appear-3", cfg)
+        self.assertIn("I4 = should-appear-4", cfg)
+        self.assertIn("I5 = should-appear-5", cfg)
 
     async def test_force_cleanup_candidates_limited_to_quarantine_managed_not_in_db(self):
         import awg_backend
@@ -493,6 +493,7 @@ peer: PUBKEY2
             return [
                 {"public_key": "candidate-ok", "ip": "10.8.1.10"},
                 {"public_key": "in-db", "ip": "10.8.1.11"},
+                {"public_key": "not-owned", "ip": "10.8.1.14"},
                 {"public_key": "missing-ip", "ip": None},
                 {"public_key": "outside-range", "ip": "192.168.1.10"},
                 {"public_key": "not-quarantined", "ip": "10.8.1.12"},
@@ -502,15 +503,20 @@ peer: PUBKEY2
         async def fake_db_keys():
             return {"in-db"}
 
-        async def fake_quarantined():
+        async def fake_bot_managed_keys():
             return {"candidate-ok", "in-db", "missing-ip", "outside-range", "ignored"}
+
+        async def fake_quarantined():
+            return {"candidate-ok", "in-db", "missing-ip", "outside-range", "ignored", "not-owned"}
 
         original_get = awg_backend.get_awg_peers
         original_db = awg_backend.get_valid_db_public_keys
+        original_bot_managed = awg_backend.get_bot_managed_known_public_keys
         original_quarantined = awg_backend._get_quarantined_public_keys
         original_ignore = awg_backend.IGNORE_PEERS
         awg_backend.get_awg_peers = fake_get_awg_peers
         awg_backend.get_valid_db_public_keys = fake_db_keys
+        awg_backend.get_bot_managed_known_public_keys = fake_bot_managed_keys
         awg_backend._get_quarantined_public_keys = fake_quarantined
         awg_backend.IGNORE_PEERS = set(original_ignore) | {"ignored"}
         try:
@@ -518,9 +524,36 @@ peer: PUBKEY2
         finally:
             awg_backend.get_awg_peers = original_get
             awg_backend.get_valid_db_public_keys = original_db
+            awg_backend.get_bot_managed_known_public_keys = original_bot_managed
             awg_backend._get_quarantined_public_keys = original_quarantined
             awg_backend.IGNORE_PEERS = original_ignore
         self.assertEqual(candidates, [{"public_key": "candidate-ok", "ip": "10.8.1.10"}])
+
+    async def test_get_orphan_awg_peers_requires_bot_managed_ownership(self):
+        import awg_backend
+
+        async def fake_get_awg_peers():
+            return [
+                {"public_key": "managed-orphan", "ip": "10.8.1.30"},
+                {"public_key": "foreign-orphan", "ip": "10.8.1.31"},
+            ]
+
+        original_get = awg_backend.get_awg_peers
+        original_db = awg_backend.get_valid_db_public_keys
+        original_bot_managed = awg_backend.get_bot_managed_known_public_keys
+        original_protected = awg_backend.get_protected_public_keys
+        awg_backend.get_awg_peers = fake_get_awg_peers
+        awg_backend.get_valid_db_public_keys = lambda: asyncio.sleep(0, result=set())  # type: ignore[assignment]
+        awg_backend.get_bot_managed_known_public_keys = lambda: asyncio.sleep(0, result={"managed-orphan"})  # type: ignore[assignment]
+        awg_backend.get_protected_public_keys = lambda: asyncio.sleep(0, result=set())  # type: ignore[assignment]
+        try:
+            orphans = await awg_backend.get_orphan_awg_peers()
+        finally:
+            awg_backend.get_awg_peers = original_get
+            awg_backend.get_valid_db_public_keys = original_db
+            awg_backend.get_bot_managed_known_public_keys = original_bot_managed
+            awg_backend.get_protected_public_keys = original_protected
+        self.assertEqual(orphans, [{"public_key": "managed-orphan", "ip": "10.8.1.30"}])
 
     async def test_validate_helper_policy_fails_on_permission_error(self):
         import config_validate
@@ -551,6 +584,14 @@ peer: PUBKEY2
 
 
 class InstallerAndHelperHardeningTests(unittest.TestCase):
+    def _extract_shell_function(self, script: str, fn_name: str) -> str:
+        marker = f"{fn_name}() {{"
+        start = script.find(marker)
+        self.assertNotEqual(start, -1, f"function {fn_name} not found")
+        end = script.find("\n}\n", start)
+        self.assertNotEqual(end, -1, f"function {fn_name} end not found")
+        return script[start:end]
+
     def test_installer_menu_safe_fails_without_tty(self):
         if os.geteuid() != 0:
             self.skipTest("requires root to pass installer preflight")
@@ -613,6 +654,32 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertIn('db_path="$(get_env_value DB_PATH)"', script)
         self.assertIn('if [[ -n "$db_path" ]]; then', script)
         self.assertIn('set_env_value DB_PATH "$db_path"', script)
+
+    def test_installer_update_requires_pinned_sha(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn('Безопасное обновление требует pinned commit SHA', script)
+        self.assertIn('Небезопасный update по mutable ветке отключён', script)
+        self.assertIn('requested_ref="${REPO_UPDATE_REF:-}"', script)
+        self.assertIn('if ! is_full_sha "$requested_ref"; then', script)
+        self.assertIn('tmp_dir="$(download_repo "$requested_ref")"', script)
+
+    def test_installer_update_has_no_implicit_target_fallback_from_state(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertNotIn("UPDATE_REF_FILE=", script)
+        self.assertNotIn('UPDATE_REF="${REPO_UPDATE_REF:-$(cat', script)
+        self.assertIn('printf \'%s\\n\' "$requested_ref" > "$VERSION_FILE"', script)
+
+    def test_installer_update_explicit_noop_when_target_equals_current(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', script)
+        self.assertIn('Запрошенный SHA уже установлен', script)
+
+    def test_installer_update_does_not_gate_explicit_requested_sha_by_branch_status(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        update_body = self._extract_shell_function(script, "update_bot")
+        self.assertIn('requested_ref="${REPO_UPDATE_REF:-}"', update_body)
+        self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', update_body)
+        self.assertNotIn('if [[ "$UPDATE_STATUS" == "current" ]]; then', update_body)
 
     def test_clean_orphans_command_does_not_promise_physical_delete(self):
         admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")
@@ -709,6 +776,26 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
             awg_i4="",
             awg_i5="",
         )
+
+    def test_keepalive_validation(self):
+        import config_validate
+
+        self.assertEqual(config_validate.validate_persistent_keepalive("off"), "0")
+        self.assertEqual(config_validate.validate_persistent_keepalive("25"), "25")
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_persistent_keepalive("-1")
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_persistent_keepalive("70000")
+
+    def test_client_allowed_ips_validation(self):
+        import config_validate
+
+        self.assertEqual(
+            config_validate.validate_client_allowed_ips("0.0.0.0/0, ::/0"),
+            "0.0.0.0/0, ::/0",
+        )
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_client_allowed_ips("not-a-cidr")
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@
 - отзыв доступа;
 - полное удаление пользователя;
 - проверку синхронизации **AWG ↔ БД**;
-- поиск orphan peer и аккуратную очистку;
+- безопасную работу с orphan peer только в домене ключей, созданных ботом;
 - журнал действий (`audit_log`);
 - массовую рассылку;
 - резервную копию БД **без секретов**.
@@ -43,7 +43,7 @@
 - `systemd`-сервис для автозапуска;
 - запуск бота от отдельного системного пользователя;
 - работу с AWG через ограниченный helper, без добавления бота в `docker` group;
-- хранение текущей ветки (`main` или `beta`) и обновление по ней.
+- хранение текущей ветки (`main` или `beta`) и безопасный update только по pinned commit SHA.
 
 ---
 
@@ -153,10 +153,10 @@ curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.s
 /opt/amnezia/bot/.state/repo_branch
 ```
 
-Дальше обновляться можно уже обычной командой:
+Дальше обновление выполняется только с явным pinned SHA:
 
 ```bash
-sudo awg-tgbot update
+sudo REPO_UPDATE_REF=<40-hex-commit-sha> awg-tgbot update
 ```
 
 ---
@@ -166,16 +166,16 @@ sudo awg-tgbot update
 Перейти с `beta` на `main`:
 
 ```bash
-sudo REPO_BRANCH=main awg-tgbot update
+sudo REPO_BRANCH=main awg-tgbot
 ```
 
 Вернуться с `main` на `beta`:
 
 ```bash
-sudo REPO_BRANCH=beta awg-tgbot update
+sudo REPO_BRANCH=beta awg-tgbot
 ```
 
-После обновления новая ветка тоже будет сохранена автоматически.
+После переключения ветка сохраняется в state и далее используется для `check-updates`.
 
 ---
 
@@ -209,7 +209,7 @@ systemctl status vpn-bot.service --no-pager -l
 | `sudo awg-tgbot detect-install-state` | то же самое, альтернативное имя команды |
 | `sudo awg-tgbot status` | показывает статус установки, сервиса, ветки, логов и AWG target |
 | `sudo awg-tgbot check-updates` | проверяет, есть ли обновление для текущей ветки |
-| `sudo awg-tgbot update` | обновляет установленную ветку |
+| `sudo REPO_UPDATE_REF=<40-hex-sha> awg-tgbot update` | обновляет на явно заданный immutable commit |
 | `sudo awg-tgbot reinstall` | запускает переустановку |
 | `sudo awg-tgbot remove` | открывает меню удаления |
 | `sudo awg-tgbot sync-helper-policy` | синхронизирует helper policy после ручных правок `.env` |
@@ -302,8 +302,8 @@ tail -f /var/log/awg-tgbot/bot.log
 - `/orphans` — посмотреть orphan peer;
 - `/audit` — журнал действий;
 - `/sync_awg` — быстрая проверка AWG ↔ БД;
-- `/clean_orphans` — quarantine-этап (помечает orphan peer, без физического удаления);
-- `/clean_orphans_force` — физическое удаление orphan peer (использовать после проверки);
+- `/clean_orphans` — quarantine-этап только для `bot_managed` peer, без физического удаления;
+- `/clean_orphans_force` — физическое удаление только `bot_managed` peer после двойного подтверждения;
 - `/backup` — резервная копия БД без секретных данных;
 - `/send` — массовая рассылка.
 
@@ -337,6 +337,25 @@ sudo awg-tgbot
 ```text
 IPv4:port
 ```
+
+### 3) Fail-fast валидация критичных сетевых настроек
+Бот больше не стартует с «мусорными» значениями:
+- `PERSISTENT_KEEPALIVE`: только `0`/`off` или диапазон `1..65535`;
+- `CLIENT_ALLOWED_IPS`: только список CIDR через запятую (`0.0.0.0/0, ::/0` и т.п.);
+- `SERVER_IP` / `PUBLIC_HOST`: только валидный публичный IPv4 (для `SERVER_IP` — с портом).
+
+Если значение некорректно — запуск завершается сразу с понятной ошибкой.
+
+### 4) Безопасный update flow
+Обновление по mutable ветке без фиксации версии больше не выполняется.
+
+Команда `sudo awg-tgbot update` теперь требует pinned commit SHA:
+
+```bash
+sudo REPO_UPDATE_REF=<40-hex-commit-sha> awg-tgbot update
+```
+
+Если `REPO_UPDATE_REF` не задан — update будет остановлен. Это сделано специально, чтобы не было «слепого» деплоя tarball ветки под root.
 
 ---
 
@@ -470,13 +489,13 @@ journalctl -u vpn-bot.service -n 50 --no-pager
 На `main`:
 
 ```bash
-sudo REPO_BRANCH=main awg-tgbot update
+sudo REPO_BRANCH=main awg-tgbot
 ```
 
 На `beta`:
 
 ```bash
-sudo REPO_BRANCH=beta awg-tgbot update
+sudo REPO_BRANCH=beta awg-tgbot
 ```
 
 ---

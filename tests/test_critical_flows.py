@@ -670,7 +670,7 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertFalse(result)
         mock_which.assert_called_once_with("docker;rm -rf /")
 
-    def test_awg_settings_validation_rejects_invalid_ranges_and_i_chain(self):
+    def test_awg_settings_validation_rejects_invalid_numeric_ranges(self):
         import config_validate
 
         with self.assertRaises(RuntimeError):
@@ -695,6 +695,20 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 awg_i4="",
                 awg_i5="",
             )
+
+    def test_awg_settings_validation_allows_i2_without_i1(self):
+        import config_validate
+
+        config_validate.validate_awg_obfuscation_settings(
+            awg_jc="6",
+            awg_jmin="10",
+            awg_jmax="50",
+            awg_i1="",
+            awg_i2="112233",
+            awg_i3="",
+            awg_i4="",
+            awg_i5="",
+        )
 
 
 if __name__ == "__main__":

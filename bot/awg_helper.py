@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import ipaddress
 import json
 import re
@@ -11,7 +12,6 @@ import sys
 from pathlib import Path
 
 SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
-SAFE_PUBKEY_RE = re.compile(r"^[A-Za-z0-9+/=]{40,64}$")
 POLICY_PATH = Path("/etc/awg-bot-helper.json")
 
 
@@ -22,7 +22,13 @@ def _safe_name(value: str, field: str) -> str:
 
 
 def _safe_public_key(value: str) -> str:
-    if not value or not SAFE_PUBKEY_RE.fullmatch(value):
+    if not value:
+        raise ValueError("invalid public key")
+    try:
+        raw = base64.b64decode(value, validate=True)
+    except Exception as e:
+        raise ValueError("invalid public key") from e
+    if len(raw) != 32:
         raise ValueError("invalid public key")
     return value
 

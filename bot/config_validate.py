@@ -67,3 +67,30 @@ def validate_helper_policy(*, policy_path: str, docker_container: str, wg_interf
             f'env={docker_container}/{wg_interface} policy={policy_container}/{policy_interface}. '
             'Выполни sync-helper-policy в installer.'
         )
+
+
+def _parse_non_negative_int(value: str, field: str) -> int:
+    raw = str(value).strip()
+    if not raw:
+        return 0
+    if not raw.isdigit():
+        raise RuntimeError(f'{field} должен быть целым числом >= 0')
+    return int(raw)
+
+
+def validate_awg_obfuscation_settings(*, awg_jc: str, awg_jmin: str, awg_jmax: str, awg_i1: str, awg_i2: str, awg_i3: str, awg_i4: str, awg_i5: str) -> None:
+    """
+    Fail fast for obviously broken obfuscation settings.
+    Official amneziawg-go docs require Jmin <= Jmax when set and
+    custom signature packets are applied in strict order I1..I5.
+    """
+    jmin = _parse_non_negative_int(awg_jmin, 'AWG_JMIN')
+    jmax = _parse_non_negative_int(awg_jmax, 'AWG_JMAX')
+    _parse_non_negative_int(awg_jc, 'AWG_JC')
+    if jmin > jmax:
+        raise RuntimeError('AWG_JMIN не может быть больше AWG_JMAX')
+
+    i1 = str(awg_i1).strip()
+    tail = [str(v).strip() for v in (awg_i2, awg_i3, awg_i4, awg_i5)]
+    if not i1 and any(tail):
+        raise RuntimeError('Поля AWG_I2..AWG_I5 нельзя задавать без AWG_I1')

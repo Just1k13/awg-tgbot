@@ -10,6 +10,7 @@ from config_detect import (
 )
 from config_env import env_float, env_int, env_with_runtime_default, save_env_value_raw
 from config_validate import read_helper_policy, validate_helper_policy, validate_required_env
+from config_validate import validate_awg_obfuscation_settings
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
@@ -186,4 +187,15 @@ validate_helper_policy(
     docker_container=DOCKER_CONTAINER,
     wg_interface=WG_INTERFACE,
     logger=logger,
+)
+
+validate_awg_obfuscation_settings(
+    awg_jc=AWG_JC,
+    awg_jmin=AWG_JMIN,
+    awg_jmax=AWG_JMAX,
+    awg_i1=AWG_I1,
+    awg_i2=AWG_I2,
+    awg_i3=AWG_I3,
+    awg_i4=AWG_I4,
+    awg_i5=AWG_I5,
 )

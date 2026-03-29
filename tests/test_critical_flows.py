@@ -651,7 +651,20 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
         self.assertIn('Безопасное обновление требует pinned commit SHA', script)
         self.assertIn('Небезопасный update по mutable ветке отключён', script)
-        self.assertIn('REPO_UPDATE_REF', script)
+        self.assertIn('requested_ref="${REPO_UPDATE_REF:-}"', script)
+        self.assertIn('if ! is_full_sha "$requested_ref"; then', script)
+        self.assertIn('tmp_dir="$(download_repo "$requested_ref")"', script)
+
+    def test_installer_update_has_no_implicit_target_fallback_from_state(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertNotIn("UPDATE_REF_FILE=", script)
+        self.assertNotIn('UPDATE_REF="${REPO_UPDATE_REF:-$(cat', script)
+        self.assertIn('printf \'%s\\n\' "$requested_ref" > "$VERSION_FILE"', script)
+
+    def test_installer_update_explicit_noop_when_target_equals_current(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', script)
+        self.assertIn('Запрошенный SHA уже установлен', script)
 
     def test_clean_orphans_command_does_not_promise_physical_delete(self):
         admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")

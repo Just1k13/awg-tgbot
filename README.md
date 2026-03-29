@@ -153,10 +153,10 @@ curl -fsSL https://raw.githubusercontent.com/Just1k13/awg-tgbot/beta/awg-tgbot.s
 /opt/amnezia/bot/.state/repo_branch
 ```
 
-Дальше обновляться можно уже обычной командой:
+Дальше обновление выполняется только с явным pinned SHA:
 
 ```bash
-sudo awg-tgbot update
+sudo REPO_UPDATE_REF=<40-hex-commit-sha> awg-tgbot update
 ```
 
 ---
@@ -166,16 +166,16 @@ sudo awg-tgbot update
 Перейти с `beta` на `main`:
 
 ```bash
-sudo REPO_BRANCH=main awg-tgbot update
+sudo REPO_BRANCH=main awg-tgbot
 ```
 
 Вернуться с `main` на `beta`:
 
 ```bash
-sudo REPO_BRANCH=beta awg-tgbot update
+sudo REPO_BRANCH=beta awg-tgbot
 ```
 
-После обновления новая ветка тоже будет сохранена автоматически.
+После переключения ветка сохраняется в state и далее используется для `check-updates`.
 
 ---
 
@@ -209,7 +209,7 @@ systemctl status vpn-bot.service --no-pager -l
 | `sudo awg-tgbot detect-install-state` | то же самое, альтернативное имя команды |
 | `sudo awg-tgbot status` | показывает статус установки, сервиса, ветки, логов и AWG target |
 | `sudo awg-tgbot check-updates` | проверяет, есть ли обновление для текущей ветки |
-| `sudo awg-tgbot update` | обновляет установленную ветку |
+| `sudo REPO_UPDATE_REF=<40-hex-sha> awg-tgbot update` | обновляет на явно заданный immutable commit |
 | `sudo awg-tgbot reinstall` | запускает переустановку |
 | `sudo awg-tgbot remove` | открывает меню удаления |
 | `sudo awg-tgbot sync-helper-policy` | синхронизирует helper policy после ручных правок `.env` |
@@ -489,13 +489,13 @@ journalctl -u vpn-bot.service -n 50 --no-pager
 На `main`:
 
 ```bash
-sudo REPO_BRANCH=main awg-tgbot update
+sudo REPO_BRANCH=main awg-tgbot
 ```
 
 На `beta`:
 
 ```bash
-sudo REPO_BRANCH=beta awg-tgbot update
+sudo REPO_BRANCH=beta awg-tgbot
 ```
 
 ---

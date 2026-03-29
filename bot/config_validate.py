@@ -1,4 +1,5 @@
 import json
+from ipaddress import ip_network
 from pathlib import Path
 
 
@@ -89,3 +90,28 @@ def validate_awg_obfuscation_settings(*, awg_jc: str, awg_jmin: str, awg_jmax: s
     if jmin > jmax:
         raise RuntimeError('AWG_JMIN не может быть больше AWG_JMAX')
 
+
+def validate_persistent_keepalive(raw_value: str) -> str:
+    value = str(raw_value).strip()
+    if value.lower() in {'off', '0'}:
+        return '0'
+    if not value.isdigit():
+        raise RuntimeError('PERSISTENT_KEEPALIVE должен быть 0/off или целым числом 1..65535')
+    parsed = int(value)
+    if parsed < 1 or parsed > 65535:
+        raise RuntimeError('PERSISTENT_KEEPALIVE должен быть 0/off или целым числом 1..65535')
+    return str(parsed)
+
+
+def validate_client_allowed_ips(raw_value: str) -> str:
+    parts = [item.strip() for item in str(raw_value).split(',') if item.strip()]
+    if not parts:
+        raise RuntimeError('CLIENT_ALLOWED_IPS должен быть непустым списком CIDR через запятую')
+    normalized: list[str] = []
+    for cidr in parts:
+        try:
+            network = ip_network(cidr, strict=False)
+        except ValueError as e:
+            raise RuntimeError(f'CLIENT_ALLOWED_IPS содержит некорректный CIDR: {cidr}') from e
+        normalized.append(str(network))
+    return ', '.join(normalized)

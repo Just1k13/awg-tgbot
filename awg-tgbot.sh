@@ -260,6 +260,10 @@ persist_repo_branch() {
   return 0
 }
 
+is_full_sha() {
+  [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
+}
+
 set_repo_branch() {
   local next_branch="$1"
   [[ -n "$next_branch" ]] || return 1
@@ -960,10 +964,11 @@ print_startup_summary() {
 }
 
 download_repo() {
-  local tmp_dir src_dir
+  local tmp_dir src_dir download_url ref="${1:-$REPO_BRANCH}"
   tmp_dir="$(mktemp -d)"
-  info "Скачиваю код из ${REPO_URL} (${REPO_BRANCH})..."
-  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 1 "$TARBALL_URL" -o "$tmp_dir/repo.tar.gz"
+  download_url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/${ref}"
+  info "Скачиваю код из ${REPO_URL} (ref=${ref})..."
+  curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 1 "$download_url" -o "$tmp_dir/repo.tar.gz"
   tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
   src_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n1 || true)"
   if [[ -z "$src_dir" || ! -d "$src_dir/bot" || ! -f "$src_dir/awg-tgbot.sh" ]]; then
@@ -1427,17 +1432,28 @@ relaunch_installer_menu() {
 }
 
 update_bot() {
-  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret
+  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret requested_ref local_sha
   detect_install_state
   if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
     warn "Бот не установлен."
     return 0
   fi
 
-  refresh_update_status_quiet
-  if [[ "$UPDATE_STATUS" == "current" ]]; then
+  requested_ref="${REPO_UPDATE_REF:-}"
+  if ! is_full_sha "$requested_ref"; then
     print_line
-    ok "Обновления не найдены. Установлена актуальная версия."
+    warn "Безопасное обновление требует pinned commit SHA."
+    warn "Передай REPO_UPDATE_REF=<40-hex-commit> явно в этой же команде update."
+    warn "Небезопасный update по mutable ветке отключён."
+    print_line
+    return 1
+  fi
+
+  refresh_update_status_quiet
+  local_sha="${UPDATE_LOCAL_SHA:-}"
+  if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then
+    print_line
+    ok "Запрошенный SHA уже установлен (${local_sha:0:12}). Обновление не требуется."
     print_line
     return 0
   fi
@@ -1453,7 +1469,7 @@ update_bot() {
   ensure_packages || die "Не удалось обновить системные зависимости."
   ensure_docker_ready || die "Docker недоступен."
 
-  tmp_dir="$(download_repo)" || die "Не удалось скачать код проекта из GitHub."
+  tmp_dir="$(download_repo "$requested_ref")" || die "Не удалось скачать код проекта из GitHub."
   stop_service_if_exists
   deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; die "Не удалось развернуть обновление."; }
   rm -rf "$tmp_dir"
@@ -1474,7 +1490,8 @@ update_bot() {
   install_awg_helper || die "Не удалось установить helper для AWG."
   write_service || die "Не удалось обновить systemd сервис."
   persist_repo_branch
-  persist_remote_sha
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$requested_ref" > "$VERSION_FILE"
   start_service || die "Не удалось перезапустить сервис."
   ok "Обновление завершено."
 
@@ -1520,6 +1537,9 @@ try:
         "TRIM(public_key) != ''",
         "public_key NOT LIKE 'pending:%'",
     ]
+    if "bot_managed" not in cols:
+        raise SystemExit(0)
+    where.append("bot_managed = 1")
     if "state" in cols:
         where.append("(state IS NULL OR state != 'deleted')")
 

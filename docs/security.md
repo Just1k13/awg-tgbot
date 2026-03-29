@@ -31,7 +31,15 @@
 - Orphan cleanup is explicitly two-step:
   - `/clean_orphans` and admin inline cleanup only move orphan peers into quarantine protection;
   - `/clean_orphans_force` performs physical peer deletion.
+- Ownership boundary is explicit: bot destructive paths are restricted to `keys.bot_managed = 1`.
+- If ownership proof is missing, peer is not touched.
 - `revoke`/`delete` flows keep DB states (`revoke_pending` / `delete_pending`) on partial AWG failures to avoid silent data loss.
+
+## Update/deploy safety
+
+- Mutable-branch blind update is blocked.
+- Installer update requires pinned immutable commit SHA via `REPO_UPDATE_REF`.
+- Without `REPO_UPDATE_REF`, `update` command fails fast with explicit warning.
 
 ## Encryption
 

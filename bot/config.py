@@ -10,7 +10,7 @@ from config_detect import (
 )
 from config_env import env_float, env_int, env_with_runtime_default, save_env_value_raw
 from config_validate import read_helper_policy, validate_helper_policy, validate_required_env
-from config_validate import validate_awg_obfuscation_settings
+from config_validate import validate_awg_obfuscation_settings, validate_client_allowed_ips, validate_persistent_keepalive
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
 logger = logging.getLogger(__name__)
@@ -199,3 +199,6 @@ validate_awg_obfuscation_settings(
     awg_i4=AWG_I4,
     awg_i5=AWG_I5,
 )
+
+PERSISTENT_KEEPALIVE = validate_persistent_keepalive(PERSISTENT_KEEPALIVE)
+CLIENT_ALLOWED_IPS = validate_client_allowed_ips(CLIENT_ALLOWED_IPS)

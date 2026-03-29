@@ -58,6 +58,10 @@ def _docker_exec(container: str, cmd: list[str], stdin_text: str | None = None) 
     return _run(["docker", "exec", "-i", container, *cmd], stdin_text=stdin_text)
 
 
+def _run_nft_script(script: str) -> str:
+    return _run(["nft", "-f", "-"], stdin_text=script)
+
+
 def _load_policy(path: Path | None = None) -> tuple[str, str]:
     policy_path = path or POLICY_PATH
     try:
@@ -89,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Restricted AWG helper")
     sub = parser.add_subparsers(dest="op", required=True)
 
-    for op_name in ("check-awg", "show", "genkey", "pubkey", "genpsk", "qos-check", "qos-sync", "denylist-check", "denylist-sync", "denylist-clear"):
+    for op_name in ("check-awg", "show", "genkey", "pubkey", "genpsk", "qos-check", "qos-sync", "denylist-check"):
         sub.add_parser(op_name)
 
     p_add = sub.add_parser("add-peer")
@@ -104,6 +108,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_qos_set.add_argument("--rate-mbit", required=True)
     p_qos_clear = sub.add_parser("qos-clear")
     p_qos_clear.add_argument("--ip", required=True)
+    p_denylist_sync = sub.add_parser("denylist-sync")
+    p_denylist_sync.add_argument("--vpn-subnet", required=True)
+    p_denylist_clear = sub.add_parser("denylist-clear")
+    p_denylist_clear.add_argument("--vpn-subnet", required=True)
     return parser
 
 
@@ -186,18 +194,36 @@ def main() -> int:
             print(f"qos synced {len(payload)}")
             return 0
         if args.op == "denylist-check":
-            print(_run(["nft", "list", "set", "inet", "filter", "awg_denylist"]))
+            print(_run(["nft", "list", "table", "inet", "filter"]))
             return 0
         if args.op == "denylist-clear":
-            _run(["nft", "delete", "set", "inet", "filter", "awg_denylist"])
+            ipaddress.ip_network(args.vpn_subnet.strip(), strict=False)
+            script = (
+                "add table inet filter\n"
+                "add chain inet filter awg_forward { type filter hook forward priority 0; policy accept; }\n"
+                "add set inet filter awg_denylist { type ipv4_addr; flags interval; }\n"
+                "flush chain inet filter awg_forward\n"
+                "flush set inet filter awg_denylist\n"
+            )
+            _run_nft_script(script)
             print("denylist cleared")
             return 0
         if args.op == "denylist-sync":
+            subnet = ipaddress.ip_network(args.vpn_subnet.strip(), strict=False)
             cidrs = [line.strip() for line in sys.stdin.read().splitlines() if line.strip()]
-            _run(["nft", "add", "table", "inet", "filter"])
-            _run(["nft", "add", "set", "inet", "filter", "awg_denylist", "{", "type", "ipv4_addr", ";", "}"])
-            for cidr in cidrs:
-                _run(["nft", "add", "element", "inet", "filter", "awg_denylist", "{", cidr, "}"])
+            validated = [str(ipaddress.ip_network(c, strict=False)) for c in cidrs]
+            elements = ", ".join(validated) if validated else ""
+            script = (
+                "add table inet filter\n"
+                "add chain inet filter awg_forward { type filter hook forward priority 0; policy accept; }\n"
+                "add set inet filter awg_denylist { type ipv4_addr; flags interval; }\n"
+                "flush chain inet filter awg_forward\n"
+                f"flush set inet filter awg_denylist\n"
+            )
+            if elements:
+                script += f"add element inet filter awg_denylist {{ {elements} }}\n"
+            script += f"add rule inet filter awg_forward ip saddr {subnet} ip daddr @awg_denylist drop comment \"awg_denylist\"\n"
+            _run_nft_script(script)
             print(f"denylist synced {len(cidrs)}")
             return 0
     except Exception as e:

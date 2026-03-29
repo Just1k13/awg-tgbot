@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 
 from awg_backend import issue_subscription
-from config import REFERRAL_ENABLED, REFERRAL_INVITEE_BONUS_DAYS, REFERRAL_INVITER_BONUS_DAYS, logger
+from config import logger
+from content_settings import get_setting
 from database import (
     create_referral_reward_once,
     ensure_referral_code,
@@ -32,7 +33,7 @@ async def ensure_user_referral_code(user_id: int) -> str:
 
 
 async def capture_referral_start(invitee_user_id: int, start_arg: str) -> bool:
-    if not REFERRAL_ENABLED:
+    if int(await get_setting("REFERRAL_ENABLED", int) or 0) != 1:
         return False
     if not start_arg.startswith("ref_"):
         return False
@@ -51,27 +52,29 @@ async def capture_referral_start(invitee_user_id: int, start_arg: str) -> bool:
 
 
 async def apply_referral_rewards_on_first_payment(invitee_user_id: int, payment_id: str) -> bool:
-    if not REFERRAL_ENABLED:
+    if int(await get_setting("REFERRAL_ENABLED", int) or 0) != 1:
         return False
     attribution = await get_referral_attribution(invitee_user_id)
     if not attribution:
         return False
     inviter_user_id, code = attribution
+    invitee_days = int(await get_setting("REFERRAL_INVITEE_BONUS_DAYS", int) or 5)
+    inviter_days = int(await get_setting("REFERRAL_INVITER_BONUS_DAYS", int) or 3)
     created = await create_referral_reward_once(
         invitee_user_id=invitee_user_id,
         inviter_user_id=inviter_user_id,
         payment_id=payment_id,
-        invitee_bonus_days=REFERRAL_INVITEE_BONUS_DAYS,
-        inviter_bonus_days=REFERRAL_INVITER_BONUS_DAYS,
+        invitee_bonus_days=invitee_days,
+        inviter_bonus_days=inviter_days,
     )
     if not created:
         return False
-    await issue_subscription(invitee_user_id, REFERRAL_INVITEE_BONUS_DAYS, silent=True, operation_id=f"ref-invitee-{payment_id}")
-    await issue_subscription(inviter_user_id, REFERRAL_INVITER_BONUS_DAYS, silent=True, operation_id=f"ref-inviter-{payment_id}")
+    await issue_subscription(invitee_user_id, invitee_days, silent=True, operation_id=f"ref-invitee-{payment_id}")
+    await issue_subscription(inviter_user_id, inviter_days, silent=True, operation_id=f"ref-inviter-{payment_id}")
     await write_audit_log(
         invitee_user_id,
         "referral_rewards_applied",
-        f"inviter={inviter_user_id}; code={code}; invitee_days={REFERRAL_INVITEE_BONUS_DAYS}; inviter_days={REFERRAL_INVITER_BONUS_DAYS}",
+        f"inviter={inviter_user_id}; code={code}; invitee_days={invitee_days}; inviter_days={inviter_days}",
     )
     logger.info("Referral rewards applied for payment=%s invitee=%s inviter=%s", payment_id, invitee_user_id, inviter_user_id)
     return True
@@ -84,5 +87,6 @@ async def get_referral_screen_data(user_id: int, bot_username: str) -> dict[str,
         "code": code,
         "link": f"https://t.me/{bot_username}?start=ref_{code}",
         "invited_count": summary["invited_count"],
+        "rewarded_count": summary["rewarded_count"],
         "bonus_days": summary["inviter_bonus_days"] + summary["invitee_bonus_days"],
     }

@@ -322,6 +322,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_subscription_operations_status ON subscription_operations(status)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_inviter ON referral_rewards(inviter_user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_invitee ON referral_rewards(invitee_user_id, created_at)")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_reward_once_per_invitee ON referral_rewards(invitee_user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_jobs_status ON broadcast_jobs(status, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_targets_job ON broadcast_job_targets(job_id, user_id)")
 
@@ -925,6 +926,19 @@ async def get_metric(metric_key: str) -> int:
     return int(row[0]) if row else 0
 
 
+async def set_metric(metric_key: str, value: int) -> None:
+    await execute(
+        """
+        INSERT INTO runtime_metrics (metric_key, metric_value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(metric_key) DO UPDATE SET
+            metric_value = excluded.metric_value,
+            updated_at = excluded.updated_at
+        """,
+        (metric_key, int(value), utc_now_naive().isoformat()),
+    )
+
+
 async def set_app_setting(key: str, value: str, updated_by: int | None = None) -> None:
     await execute(
         """
@@ -1052,6 +1066,7 @@ async def create_referral_reward_once(
 
 async def get_referral_summary(user_id: int) -> dict[str, int]:
     invited = await fetchone("SELECT COUNT(*) FROM referral_attributions WHERE inviter_user_id = ?", (user_id,))
+    rewarded = await fetchone("SELECT COUNT(*) FROM referral_rewards WHERE inviter_user_id = ?", (user_id,))
     row = await fetchone(
         """
         SELECT COALESCE(SUM(inviter_bonus_days), 0), COALESCE(SUM(invitee_bonus_days), 0)
@@ -1062,7 +1077,49 @@ async def get_referral_summary(user_id: int) -> dict[str, int]:
     )
     inviter_bonus = int(row[0]) if row else 0
     invitee_bonus = int(row[1]) if row else 0
-    return {"invited_count": int(invited[0]) if invited else 0, "inviter_bonus_days": inviter_bonus, "invitee_bonus_days": invitee_bonus}
+    return {
+        "invited_count": int(invited[0]) if invited else 0,
+        "rewarded_count": int(rewarded[0]) if rewarded else 0,
+        "inviter_bonus_days": inviter_bonus,
+        "invitee_bonus_days": invitee_bonus,
+    }
+
+
+async def get_referral_admin_stats(limit: int = 5) -> dict[str, Any]:
+    pending = await fetchone(
+        """
+        SELECT COUNT(*)
+        FROM referral_attributions a
+        LEFT JOIN referral_rewards r ON r.invitee_user_id = a.invitee_user_id
+        WHERE r.invitee_user_id IS NULL
+        """
+    )
+    rewarded = await fetchone("SELECT COUNT(*) FROM referral_rewards")
+    recent = await fetchall(
+        """
+        SELECT invitee_user_id, inviter_user_id, payment_id, invitee_bonus_days, inviter_bonus_days, created_at
+        FROM referral_rewards
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    top = await fetchall(
+        """
+        SELECT inviter_user_id, COUNT(*) AS cnt
+        FROM referral_rewards
+        GROUP BY inviter_user_id
+        ORDER BY cnt DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return {
+        "pending": int(pending[0]) if pending else 0,
+        "rewarded": int(rewarded[0]) if rewarded else 0,
+        "recent": recent,
+        "top": top,
+    }
 
 
 async def create_broadcast_job(admin_id: int, text: str) -> int:

@@ -22,7 +22,7 @@ from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone,
     get_app_setting,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
-    get_pending_broadcast, get_recent_audit, get_referral_summary, get_text_override, get_user_meta, list_app_settings,
+    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_text_override, get_user_meta, list_app_settings,
     list_text_overrides, pop_pending_admin_action, reset_text_override,
     set_app_setting, set_text_override,
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
@@ -35,6 +35,7 @@ from ui_constants import (
 )
 from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
 from network_policy import denylist_sync, policy_metrics
+from content_settings import get_setting
 
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
@@ -832,6 +833,10 @@ async def health_cmd(message: types.Message):
     lag = await get_recovery_lag_seconds()
     helper_failures = await get_metric("awg_helper_failures")
     policy_stats = await policy_metrics()
+    denylist_enabled = int(await get_setting("EGRESS_DENYLIST_ENABLED", int) or 0)
+    denylist_mode = await get_setting("EGRESS_DENYLIST_MODE", str) or "soft"
+    qos_enabled = int(await get_setting("QOS_ENABLED", int) or 0)
+    qos_strict = int(await get_setting("QOS_STRICT", int) or 0)
     await message.answer(
         (
             "🩺 <b>Отчёт о состоянии</b>\n\n"
@@ -841,8 +846,13 @@ async def health_cmd(message: types.Message):
             f"jobs.stuck_manual=<b>{stats['stuck_manual']}</b>\n"
             f"recovery_lag_sec=<b>{lag}</b>\n"
             f"awg_helper_failures=<b>{helper_failures}</b>\n"
+            f"qos_enabled=<b>{qos_enabled}</b> strict=<b>{qos_strict}</b>\n"
             f"qos_errors=<b>{policy_stats['qos_errors']}</b>\n"
-            f"denylist_errors=<b>{policy_stats['denylist_errors']}</b>"
+            f"denylist_enabled=<b>{denylist_enabled}</b> mode=<b>{denylist_mode}</b>\n"
+            f"denylist_errors=<b>{policy_stats['denylist_errors']}</b>\n"
+            f"denylist_last_sync_ok=<b>{policy_stats['denylist_last_sync_ok']}</b>\n"
+            f"denylist_last_sync_ts=<b>{policy_stats['denylist_last_sync_ts']}</b>\n"
+            f"denylist_entries=<b>{policy_stats['denylist_entries']}</b>"
         ),
         parse_mode="HTML",
     )
@@ -927,11 +937,16 @@ async def setting_set_cmd(message: types.Message, command: CommandObject):
 
 @router.message(Command("ref_stats"), IsAdmin())
 async def ref_stats_cmd(message: types.Message):
-    summary = await get_referral_summary(message.from_user.id)
+    stats = await get_referral_admin_stats()
+    recent = "\n".join([f"• invitee={r[0]} inviter={r[1]} pay={r[2]}" for r in stats["recent"]]) or "—"
+    top = "\n".join([f"• inviter={row[0]} rewards={row[1]}" for row in stats["top"]]) or "—"
     await message.answer(
         (
-            "🎁 Referral summary (admin snapshot)\n"
-            f"invited_by_admin={summary['invited_count']}\n"
-            f"admin_bonus_days={summary['inviter_bonus_days'] + summary['invitee_bonus_days']}"
-        )
+            "🎁 <b>Referral admin summary</b>\n\n"
+            f"pending=<b>{stats['pending']}</b>\n"
+            f"rewarded=<b>{stats['rewarded']}</b>\n\n"
+            f"<b>Последние начисления</b>\n{recent}\n\n"
+            f"<b>Top inviters</b>\n{top}"
+        ),
+        parse_mode="HTML",
     )

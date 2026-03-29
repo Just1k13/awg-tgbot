@@ -14,6 +14,7 @@ from config import (
     REFERRAL_INVITEE_BONUS_DAYS,
     REFERRAL_INVITER_BONUS_DAYS,
     TORRENT_POLICY_TEXT_ENABLED,
+    VPN_SUBNET_PREFIX,
     logger,
 )
 from database import get_app_setting, get_text_override
@@ -27,6 +28,25 @@ TEXT_DEFAULTS: dict[str, str] = {
     ),
     "support_unavailable": "🆘 Поддержка временно не настроена. Попробуйте позже или напишите администратору сервиса.",
     "unknown_slash": "Неизвестная команда. Используйте кнопки меню или /start.",
+    "buy_menu": "💳 <b>Выберите срок доступа</b>\n\nВ подписку входит доступ до <b>2 устройств</b>.\n\n{price_lines}",
+    "renew_menu": "🔄 <b>У вас уже есть активная подписка</b>\n⏳ Осталось: <b>{remaining}</b>\n\n💡 Можно продлить заранее.\n\n{price_lines}",
+    "guide_hint": "Если активация задержалась — нажмите «Проверить статус активации».",
+    "payment_success": "🎉 <b>Доступ готов</b>\n\nСтатусы: оплата получена → доступ выпускается → доступ готов ✅",
+    "payment_pending": "⏳ Платёж принят. Доступ выпускается в фоне. Обычно до минуты.",
+    "payment_error": "❌ Платёж получен, но активация задержалась. Попробуйте позже или обратитесь в поддержку.",
+    "activation_status_ready": "✅ Оплата получена → доступ выпускается → доступ готов.",
+    "activation_status_pending": "⏳ Оплата получена. Доступ выпускается. Обычно до минуты.",
+    "activation_status_delayed": "⚠️ Активация задержалась. Попробуйте позже или обратитесь в поддержку.",
+    "referral_screen": (
+        "🎁 <b>Рефералы</b>\n\n"
+        "🔗 Ваша ссылка:\n<code>{ref_link}</code>\n\n"
+        "👥 Приглашено: <b>{invited_count}</b>\n"
+        "✅ Rewarded: <b>{rewarded_count}</b>\n"
+        "🎉 Бонусных дней: <b>{bonus_days}</b>\n\n"
+        "Бонус начисляется только после первой успешной оплаты приглашённого пользователя."
+    ),
+    "policy_torrent": "⚠️ Не рекомендуется использовать торренты/P2P через сервис: это повышает риск abuse-жалоб.",
+    "policy_sensitive": "ℹ️ Часть чувствительных сайтов/сервисов может быть недоступна через VPN по policy сервиса.",
 }
 
 TEXT_REQUIRED_PLACEHOLDERS: dict[str, set[str]] = {
@@ -44,6 +64,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "EGRESS_DENYLIST_REFRESH_MINUTES": EGRESS_DENYLIST_REFRESH_MINUTES,
     "EGRESS_DENYLIST_MODE": EGRESS_DENYLIST_MODE,
     "TORRENT_POLICY_TEXT_ENABLED": int(TORRENT_POLICY_TEXT_ENABLED),
+    "VPN_SUBNET_PREFIX": VPN_SUBNET_PREFIX,
 }
 
 

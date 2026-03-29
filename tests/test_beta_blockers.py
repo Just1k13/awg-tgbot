@@ -539,18 +539,89 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         summary = await get_referral_summary(2000)
         self.assertGreaterEqual(summary["inviter_bonus_days"], 3)
 
+    async def test_referral_second_successful_paid_subscription_has_no_second_reward(self):
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(3000)
+        await referrals.capture_referral_start(3001, f"ref_{code}")
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            first = await referrals.apply_referral_rewards_on_first_payment(3001, "pay-a")
+            second = await referrals.apply_referral_rewards_on_first_payment(3001, "pay-b")
+        finally:
+            referrals.issue_subscription = original_issue
+        self.assertTrue(first)
+        self.assertFalse(second)
+
+    async def test_admin_give_path_does_not_trigger_referral_rewards(self):
+        import handlers_admin
+        import referrals
+
+        called = {"count": 0}
+
+        async def fake_apply(*args, **kwargs):
+            called["count"] += 1
+            return True
+
+        original_apply = referrals.apply_referral_rewards_on_first_payment
+        referrals.apply_referral_rewards_on_first_payment = fake_apply
+        try:
+            class DummyMessage:
+                from_user = type("U", (), {"id": 1})()
+                answers = []
+
+                async def answer(self, text, **kwargs):
+                    self.answers.append(text)
+
+            msg = DummyMessage()
+            await handlers_admin.give_manual(msg, type("C", (), {"args": "4000 7"})())  # type: ignore[arg-type]
+        except Exception:
+            pass
+        finally:
+            referrals.apply_referral_rewards_on_first_payment = original_apply
+        self.assertEqual(called["count"], 0)
+
+    async def test_ref_stats_returns_global_summary(self):
+        import handlers_admin
+        import database
+
+        await database.ensure_referral_code(7000, "ABC7000")
+        await database.set_referral_attribution(7001, 7000, "ABC7000")
+
+        class DummyMessage:
+            from_user = type("U", (), {"id": 1})()
+            answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        msg = DummyMessage()
+        await handlers_admin.ref_stats_cmd(msg)  # type: ignore[arg-type]
+        self.assertTrue(msg.answers)
+        self.assertIn("pending", msg.answers[-1])
+
     async def test_qos_soft_mode_does_not_raise(self):
         import network_policy
 
         async def fail_run(*args, **kwargs):
             raise RuntimeError("tc fail")
 
-        original_strict = network_policy.QOS_STRICT
-        network_policy.QOS_STRICT = False
+        async def fake_get_setting(key, cast=None):
+            values = {"QOS_ENABLED": "1", "QOS_STRICT": "0"}
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        network_policy.get_setting = fake_get_setting
         try:
             await network_policy.qos_set(fail_run, "10.8.1.10", 100, 1)
         finally:
-            network_policy.QOS_STRICT = original_strict
+            network_policy.get_setting = original_get_setting
 
     async def test_qos_strict_mode_raises(self):
         import network_policy
@@ -558,13 +629,17 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         async def fail_run(*args, **kwargs):
             raise RuntimeError("tc fail")
 
-        original_strict = network_policy.QOS_STRICT
-        network_policy.QOS_STRICT = True
+        async def fake_get_setting(key, cast=None):
+            values = {"QOS_ENABLED": "1", "QOS_STRICT": "1"}
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        network_policy.get_setting = fake_get_setting
         try:
             with self.assertRaises(RuntimeError):
                 await network_policy.qos_set(fail_run, "10.8.1.10", 100, 1)
         finally:
-            network_policy.QOS_STRICT = original_strict
+            network_policy.get_setting = original_get_setting
 
 
 if __name__ == "__main__":

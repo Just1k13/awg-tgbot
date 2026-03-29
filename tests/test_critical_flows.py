@@ -681,6 +681,14 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', update_body)
         self.assertNotIn('if [[ "$UPDATE_STATUS" == "current" ]]; then', update_body)
 
+    def test_installer_update_has_rollback_path_after_deploy(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn("create_update_backup()", script)
+        self.assertIn("rollback_update_backup()", script)
+        update_body = self._extract_shell_function(script, "update_bot")
+        self.assertIn('update_backup_dir="$(create_update_backup)"', update_body)
+        self.assertIn('rollback_update_backup "$update_backup_dir"', update_body)
+
     def test_clean_orphans_command_does_not_promise_physical_delete(self):
         admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")
         self.assertIn("quarantine", admin_handler)
@@ -745,6 +753,14 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 awg_jc="5",
                 awg_jmin="800",
                 awg_jmax="200",
+                awg_s1="1",
+                awg_s2="2",
+                awg_s3="3",
+                awg_s4="4",
+                awg_h1="1-2",
+                awg_h2="1-2",
+                awg_h3="1-2",
+                awg_h4="1-2",
                 awg_i1="",
                 awg_i2="112233",
                 awg_i3="",
@@ -756,6 +772,14 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 awg_jc="x",
                 awg_jmin="0",
                 awg_jmax="0",
+                awg_s1="1",
+                awg_s2="2",
+                awg_s3="3",
+                awg_s4="4",
+                awg_h1="1-2",
+                awg_h2="1-2",
+                awg_h3="1-2",
+                awg_h4="1-2",
                 awg_i1="",
                 awg_i2="",
                 awg_i3="",
@@ -770,12 +794,59 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
             awg_jc="6",
             awg_jmin="10",
             awg_jmax="50",
+            awg_s1="37",
+            awg_s2="98",
+            awg_s3="47",
+            awg_s4="14",
+            awg_h1="1486401722-1692300209",
+            awg_h2="1696990121-1817276760",
+            awg_h3="1841833217-1995591429",
+            awg_h4="2109962185-2145796739",
             awg_i1="",
             awg_i2="112233",
             awg_i3="",
             awg_i4="",
             awg_i5="",
         )
+
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_awg_obfuscation_settings(
+                awg_jc="6",
+                awg_jmin="10",
+                awg_jmax="50",
+                awg_s1="70000",
+                awg_s2="98",
+                awg_s3="47",
+                awg_s4="14",
+                awg_h1="1486401722-1692300209",
+                awg_h2="1696990121-1817276760",
+                awg_h3="1841833217-1995591429",
+                awg_h4="2109962185-2145796739",
+                awg_i1="",
+                awg_i2="",
+                awg_i3="",
+                awg_i4="",
+                awg_i5="",
+            )
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_awg_obfuscation_settings(
+                awg_jc="6",
+                awg_jmin="10",
+                awg_jmax="50",
+                awg_s1="37",
+                awg_s2="98",
+                awg_s3="47",
+                awg_s4="14",
+                awg_h1="bad",
+                awg_h2="1696990121-1817276760",
+                awg_h3="1841833217-1995591429",
+                awg_h4="2109962185-2145796739",
+                awg_i1="",
+                awg_i2="",
+                awg_i3="",
+                awg_i4="",
+                awg_i5="",
+            )
 
     def test_keepalive_validation(self):
         import config_validate

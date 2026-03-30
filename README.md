@@ -584,3 +584,4 @@ sudo REPO_BRANCH=beta awg-tgbot
 Для более технических деталей можно посмотреть:
 - `docs/security.md`
 - `docs/migration.md`
+- `docs/rkn_denylist.md` (шаблон denylist для доменов гос-сервисов/РКН и политика запрета доступа к ним через VPN)

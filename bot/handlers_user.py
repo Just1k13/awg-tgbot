@@ -22,7 +22,11 @@ from keyboards import (
     get_main_menu,
     get_profile_inline_kb,
 )
-from texts import get_instruction_text
+from texts import (
+    get_activation_status_text,
+    get_instruction_with_policy_text,
+    get_support_full_text,
+)
 from ui_constants import (
     BTN_BUY,
     BTN_CONFIGS,
@@ -37,7 +41,7 @@ from ui_constants import (
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
 )
-from content_settings import get_text, get_setting
+from content_settings import get_text
 from referrals import capture_referral_start, get_referral_screen_data
 
 router = Router()
@@ -73,26 +77,14 @@ async def _send_configs_menu(target, user: types.User):
     configs = await get_user_keys(user.id)
     if not configs:
         await target.answer(
-            (
-                "🔑 <b>Подключение</b>\n\n"
-                "У вас пока нет активного подключения.\n"
-                "Сначала оформите или продлите подписку.\n\n"
-                "Если нужна помощь — откройте инструкцию ниже."
-            ),
+            await get_text("configs_empty"),
             parse_mode="HTML",
             reply_markup=get_instruction_inline_kb(),
         )
         return
 
     await target.answer(
-        (
-            "🔑 <b>Подключение</b>\n\n"
-            "Выберите устройство, с которого хотите подключиться.\n"
-            "Это может быть любое устройство: телефон, планшет, ноутбук, ПК и т.д.\n\n"
-            "Сначала я отправлю:\n"
-            "• <code>vpn://</code> — быстрый импорт в Amnezia.\n\n"
-            "Файл <code>.conf</code> можно запросить отдельно, если нужен ручной вариант настройки."
-        ),
+        await get_text("configs_menu"),
         parse_mode="HTML",
         reply_markup=get_configs_devices_kb(configs),
     )
@@ -137,17 +129,16 @@ async def profile(message: types.Message):
         payment_line = f"{payment_summary['amount']} {payment_summary['currency']} ({created_at})"
         activation_line = payment_summary["last_provision_status"] or payment_summary["status"]
     await message.answer(
-        (
-            "👤 <b>Профиль</b>\n\n"
-            f"🆔 <b>ID:</b> <code>{message.from_user.id}</code>\n"
-            f"👤 <b>Имя:</b> {first_name}\n"
-            f"✈️ <b>Telegram:</b> {escape_html(tg_username)}\n"
-            f"📌 <b>Подписка:</b> {status_text}\n"
-            f"📅 <b>Действует до:</b> {until_text}\n"
-            f"⏳ <b>Осталось:</b> {remaining}\n"
-            f"💸 <b>Последний платёж:</b> {payment_line}\n"
-            f"🚦 <b>Последняя активация:</b> {activation_line}\n\n"
-            "⬇️ Ниже — быстрые действия."
+        await get_text(
+            "profile_screen",
+            user_id=message.from_user.id,
+            first_name=first_name,
+            tg_username=escape_html(tg_username),
+            status_text=status_text,
+            until_text=until_text,
+            remaining=remaining,
+            payment_line=payment_line,
+            activation_line=activation_line,
         ),
         parse_mode="HTML",
         reply_markup=get_profile_inline_kb(is_active),
@@ -169,13 +160,13 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     try:
         key_id = int(cb.data.removeprefix(CB_CONFIG_DEVICE_PREFIX))
     except ValueError:
-        await cb.answer("Некорректный выбор устройства", show_alert=True)
+        await cb.answer(await get_text("config_invalid_device"), show_alert=True)
         return
 
     selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
     if not selected:
         await cb.message.answer(
-            "Не удалось найти ключ для выбранного устройства. Попробуйте открыть раздел «Подключение» ещё раз.",
+            await get_text("config_not_found"),
             reply_markup=get_instruction_inline_kb(),
         )
         return
@@ -183,14 +174,13 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     _, device_num, _cfg, vpn_key = selected
     if vpn_key and vpn_key.strip():
         await cb.message.answer(
-            f"🔐 <b>vpn:// для устройства {device_num}</b>\n\n<code>{escape_html(vpn_key)}</code>\n\n"
-            "Подходит для быстрого импорта в Amnezia.",
+            await get_text("config_vpn_ready", device_num=device_num, vpn_key=escape_html(vpn_key)),
             parse_mode="HTML",
             reply_markup=get_config_result_kb(key_id),
         )
     else:
         await cb.message.answer(
-            "Для выбранного устройства не удалось собрать ключ импорта. Напишите в поддержку или попросите администратора перевыдать доступ.",
+            await get_text("config_vpn_missing"),
             reply_markup=get_instruction_inline_kb(),
         )
 
@@ -202,13 +192,13 @@ async def send_selected_device_conf(cb: types.CallbackQuery):
     try:
         key_id = int(cb.data.removeprefix(CB_CONFIG_CONF_PREFIX))
     except ValueError:
-        await cb.answer("Некорректный запрос .conf", show_alert=True)
+        await cb.answer(await get_text("config_invalid_conf_request"), show_alert=True)
         return
 
     selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
     if not selected:
         await cb.message.answer(
-            "Не удалось найти .conf для выбранного устройства. Откройте раздел «Подключение» ещё раз.",
+            await get_text("config_conf_not_found"),
             reply_markup=get_instruction_inline_kb(),
         )
         return
@@ -220,16 +210,16 @@ async def send_selected_device_conf(cb: types.CallbackQuery):
                 cfg.encode("utf-8"),
                 filename=f"{_config_filename_prefix()}_device_{device_num}.conf",
             ),
-            caption=f"📄 Файл подключения для устройства {device_num}",
+            caption=await get_text("config_conf_caption", device_num=device_num),
             parse_mode="HTML",
         )
         await cb.message.answer(
-            "Файл отправлен ✅ Можно вернуться к списку устройств:",
+            await get_text("config_conf_sent"),
             reply_markup=get_config_result_kb(key_id),
         )
     else:
         await cb.message.answer(
-            "Для выбранного устройства не удалось собрать .conf. Напишите в поддержку или попросите администратора перевыдать доступ.",
+            await get_text("config_conf_missing"),
             reply_markup=get_instruction_inline_kb(),
         )
 
@@ -241,17 +231,14 @@ async def open_configs_from_profile(cb: types.CallbackQuery):
         maybe_set_support_username(cb.from_user.username)
     await cb.answer()
     if not cb.message:
-        await cb.answer("Сообщение недоступно", show_alert=True)
+        await cb.answer(await get_text("callback_message_unavailable"), show_alert=True)
         return
     await _send_configs_menu(cb.message, cb.from_user)
 
 
 @router.message(F.text == BTN_GUIDE)
 async def guide(message: types.Message):
-    extra = ""
-    if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
-        extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
-    await message.answer(get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer(await get_instruction_with_policy_text(), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(F.text == BTN_SUPPORT)
@@ -259,9 +246,7 @@ async def support(message: types.Message):
     support_username = get_support_username()
     if not support_username:
         logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
-        await message.answer(await get_text("support_unavailable"))
-        return
-    await message.answer(f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(support_username)}</b>", parse_mode="HTML")
+    await message.answer(await get_support_full_text(), parse_mode="HTML")
 
 
 @router.callback_query(F.data == CB_CHECK_ACTIVATION_STATUS)
@@ -269,16 +254,10 @@ async def check_activation_status(cb: types.CallbackQuery):
     await cb.answer()
     payment_summary = await get_latest_user_payment_summary(cb.from_user.id)
     if not payment_summary:
-        await cb.message.answer("Платежей пока нет. Нажмите «💳 Оплатить доступ», чтобы начать.")
+        await cb.message.answer(await get_text("activation_status_no_payments"))
         return
     status = payment_summary["last_provision_status"] or payment_summary["status"]
-    if status == "ready":
-        await cb.message.answer(await get_text("activation_status_ready"))
-        return
-    if status in {"provisioning", "payment_received"}:
-        await cb.message.answer(await get_text("activation_status_pending"))
-        return
-    await cb.message.answer(await get_text("activation_status_delayed"))
+    await cb.message.answer(await get_activation_status_text(status))
 
 
 @router.message(F.text == BTN_BUY)
@@ -303,7 +282,7 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
     await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
     await cb.answer()
     if not cb.message:
-        await cb.answer("Сообщение недоступно", show_alert=True)
+        await cb.answer(await get_text("callback_message_unavailable"), show_alert=True)
         return
     await _send_buy_menu(cb.message, cb.from_user.id)
 
@@ -312,10 +291,7 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
     if cb.message:
-        extra = ""
-        if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
-            extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
-        await cb.message.answer(get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
+        await cb.message.answer(await get_instruction_with_policy_text(), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message()
@@ -324,6 +300,6 @@ async def fallback_message(message: types.Message):
         await message.answer(await get_text("unknown_slash"))
         return
     await message.answer(
-        "Не понял сообщение. Используйте кнопки меню ниже.",
+        await get_text("unknown_message"),
         reply_markup=get_main_menu(message.from_user.id, ADMIN_ID),
     )

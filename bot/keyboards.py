@@ -53,9 +53,15 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
 
 
 def get_instruction_inline_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)]]
-    )
+    return _single_button_kb(_guide_row())
+
+
+def _guide_row() -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)]
+
+
+def _single_button_kb(row: list[InlineKeyboardButton]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 def get_configs_devices_kb(configs: list[tuple[int, int, str, str]]) -> InlineKeyboardMarkup:
@@ -63,7 +69,7 @@ def get_configs_devices_kb(configs: list[tuple[int, int, str, str]]) -> InlineKe
         [InlineKeyboardButton(text=f"📱 Устройство {device_num}", callback_data=f"{CB_CONFIG_DEVICE_PREFIX}{key_id}")]
         for key_id, device_num, _, _ in configs
     ]
-    rows.append([InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)])
+    rows.append(_guide_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -72,7 +78,7 @@ def get_config_result_kb(key_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📄 Выдать .conf файл (для опытных)", callback_data=f"{CB_CONFIG_CONF_PREFIX}{key_id}")],
             [InlineKeyboardButton(text="⬅️ Назад к устройствам", callback_data=CB_OPEN_CONFIGS)],
-            [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)],
+            _guide_row(),
         ]
     )
 
@@ -82,7 +88,7 @@ def get_post_payment_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🔑 Получить подключение", callback_data=CB_OPEN_CONFIGS)],
             [InlineKeyboardButton(text="⏱ Проверить статус активации", callback_data=CB_CHECK_ACTIVATION_STATUS)],
-            [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)],
+            _guide_row(),
         ]
     )
 

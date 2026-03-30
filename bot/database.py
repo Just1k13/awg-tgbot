@@ -53,6 +53,13 @@ async def fetchall(sql: str, params: tuple[Any, ...] = ()) -> list[Any]:
         return await cursor.fetchall()
 
 
+async def fetchval(sql: str, params: tuple[Any, ...] = (), default: Any = 0) -> Any:
+    row = await fetchone(sql, params)
+    if not row:
+        return default
+    return row[0]
+
+
 async def execute(sql: str, params: tuple[Any, ...] = ()) -> None:
     db = await get_shared_db()
     await db.execute(sql, params)

@@ -43,6 +43,7 @@ from helpers import utc_now_naive
 from keyboards import get_post_payment_kb
 from content_settings import get_text
 from referrals import apply_referral_rewards_on_first_payment
+from texts import get_payment_result_text
 from ui_constants import CB_BUY_30, CB_BUY_7
 
 router = Router()
@@ -154,13 +155,13 @@ async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
 async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
     tariff = TARIFFS.get(q.invoice_payload)
     if not tariff:
-        await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректный платеж.")
+        await bot.answer_pre_checkout_query(q.id, ok=False, error_message=await get_text("payment_payload_error"))
         return
     if q.currency != tariff["currency"]:
-        await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректная валюта платежа.")
+        await bot.answer_pre_checkout_query(q.id, ok=False, error_message=await get_text("payment_currency_error"))
         return
     if q.total_amount != tariff["amount"]:
-        await bot.answer_pre_checkout_query(q.id, ok=False, error_message="Некорректная сумма платежа.")
+        await bot.answer_pre_checkout_query(q.id, ok=False, error_message=await get_text("payment_amount_error"))
         return
     ready, reason = await checkout_readiness()
     if not ready:
@@ -168,7 +169,7 @@ async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
         await bot.answer_pre_checkout_query(
             q.id,
             ok=False,
-            error_message="Сервис временно недоступен для активации. Попробуйте чуть позже.",
+            error_message=await get_text("precheckout_unavailable"),
         )
         return
     await bot.answer_pre_checkout_query(q.id, ok=True)
@@ -179,21 +180,21 @@ async def success_pay(message: types.Message):
     payment = message.successful_payment
     tariff = TARIFFS.get(payment.invoice_payload)
     if not tariff:
-        await message.answer("Ошибка оплаты: неизвестный payload.")
+        await message.answer(await get_text("payment_payload_error"))
         return
     if payment.currency != tariff["currency"]:
-        await message.answer("Ошибка оплаты: неверная валюта.")
+        await message.answer(await get_text("payment_currency_error"))
         return
     if payment.total_amount != tariff["amount"]:
-        await message.answer("Ошибка оплаты: неверная сумма.")
+        await message.answer(await get_text("payment_amount_error"))
         return
 
     current_status = await get_payment_status(payment.telegram_payment_charge_id)
     if current_status == "applied" or await payment_already_processed(payment.telegram_payment_charge_id):
-        await message.answer("✅ Этот платёж уже был обработан.")
+        await message.answer(await get_text("payment_already_processed"))
         return
     if current_status == "provisioning":
-        await message.answer("⏳ Платёж уже обрабатывается. Подождите немного и проверьте профиль или конфиги.")
+        await message.answer(await get_text("payment_already_provisioning"))
         return
 
     raw_payload = {
@@ -216,9 +217,9 @@ async def success_pay(message: types.Message):
             status="received",
             raw_payload_json=json.dumps(raw_payload, ensure_ascii=False),
         )
-        await message.answer("✅ Оплата получена.")
+        await message.answer(await get_text("payment_received"))
         await update_last_provision_status(payment.telegram_payment_charge_id, "payment_received")
-        await message.answer("⏳ Доступ выпускается. Обычно это занимает до минуты.")
+        await message.answer(await get_text("payment_provisioning_started"))
         await update_last_provision_status(payment.telegram_payment_charge_id, "provisioning")
         applied = await process_payment_provisioning(
             payment_id=payment.telegram_payment_charge_id,
@@ -230,21 +231,13 @@ async def success_pay(message: types.Message):
             await update_last_provision_status(payment.telegram_payment_charge_id, "ready")
             await mark_ready_notification_sent(payment.telegram_payment_charge_id)
             await message.answer(
-                (
-                    (await get_text("payment_success"))
-                    + "\nСледующий шаг — откройте подключение и импортируйте его в Amnezia."
-                    "🎉 <b>Доступ готов</b>\n\n"
-                    "Статусы: оплата получена → доступ выпускается → доступ готов ✅\n"
-                    "Следующий шаг — откройте подключение и импортируйте его в Amnezia."
-                ),
+                await get_payment_result_text("ready"),
                 parse_mode="HTML",
                 reply_markup=get_post_payment_kb(),
             )
         else:
             await message.answer(
-                (await get_text("payment_pending"))
-                +
-                "\n\nКогда всё будет готово, нажмите «🔑 Получить подключение».",
+                await get_payment_result_text("pending"),
                 reply_markup=get_post_payment_kb(),
             )
     except Exception as e:
@@ -342,7 +335,7 @@ async def payment_recovery_worker(bot: Bot | None = None) -> int:
                 if bot is not None and await mark_ready_notification_sent(payment_id):
                     await bot.send_message(
                         user_id,
-                        "✅ Доступ готов. Платёж успешно применён в фоне. Откройте «🔑 Подключение».",
+                        await get_text("payment_recovery_ready"),
                     )
         except Exception as e:
             logger.warning("Recovery failed for payment=%s: %s", payment_id, e)

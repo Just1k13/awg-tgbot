@@ -8,9 +8,13 @@
   - path: `/usr/local/libexec/awg-bot-helper`
   - policy: `/etc/awg-bot-helper.json`
   - sudoers rule: `/etc/sudoers.d/awg-bot-helper`
-  - allowed operations only: `check-awg`, `show`, `genkey`, `pubkey`, `genpsk`, `add-peer`, `remove-peer`
+  - allowed operations: `check-awg`, `show`, `genkey`, `pubkey`, `genpsk`, `add-peer`, `remove-peer`, `qos-check`, `qos-set`, `qos-clear`, `qos-sync`, `denylist-check`, `denylist-sync`, `denylist-clear`
 - Helper validates container/interface names, public keys and IPv4 values and does not use shell strings.
 - Helper denies requests outside policy target (`container/interface`) and performs policy-file hardening checks (exists, regular file, not symlink, root-owned, not group/world writable).
+- Actual helper CLI surface is broader than basic peer lifecycle and includes controlled traffic-policy operations:
+  - QoS: `qos-check`, `qos-set`, `qos-clear`, `qos-sync`
+  - Egress denylist: `denylist-check`, `denylist-sync`, `denylist-clear`
+- Because these operations execute via root helper, they are part of privileged perimeter and must be included in threat-model and change review.
 
 ## Installer safety (TTY / destructive actions)
 
@@ -52,3 +56,12 @@
 - Helper still requires controlled `sudo` access for service user to perform privileged docker operations.
 - Full host compromise is reduced compared to `docker` group, but this remains privileged code-path and must be monitored.
 - Manual edits of `.env` without policy sync can still break runtime operations; explicit status warning and `sync-helper-policy` reduce this risk but do not remove operator error entirely.
+
+## Compliance and prohibited usage policy (RU / RKN risk reduction)
+
+- Operator policy: do **not** use VPN access for government websites/apps and services related to Roskomnadzor or state e-services.
+- Technical recommendation:
+  - maintain an explicit denylist for such domains in `EGRESS_DENYLIST_DOMAINS`;
+  - keep `EGRESS_DENYLIST_MODE=strict` for enforced blocking via helper/nft;
+  - communicate this policy to end-users in onboarding/instructions.
+- This policy is operational guidance only and does not replace legal consultation or local compliance requirements.

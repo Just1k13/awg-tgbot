@@ -6,6 +6,9 @@ BTN_SUPPORT = "🆘 Поддержка"
 BTN_REFERRALS = "🎁 Рефералы"
 BTN_ADMIN = "⚙️ Админка"
 
+ADMIN_CALLBACK_PREFIX = "a:"
+USER_CONFIG_CALLBACK_PREFIX = "config_"
+
 CB_BUY_7 = "buy_7"
 CB_BUY_30 = "buy_30"
 CB_SHOW_INSTRUCTION = "show_instruction"
@@ -45,3 +48,26 @@ CB_ADMIN_CANCEL_EDIT = "a:cx"
 
 CB_BROADCAST_CONFIRM = "broadcast_confirm"
 CB_BROADCAST_CANCEL = "broadcast_cancel"
+
+CB_ADMIN_USERS_PAGE_PREFIX = "admin_users_page_"
+CB_ADMIN_MANAGE_USER_PREFIX = "admin_manage_user_"
+CB_ADMIN_ADD_DAYS_PREFIX = "admin_add_days_"
+CB_ADMIN_REVOKE_PREFIX = "admin_revoke_"
+CB_ADMIN_DELETE_PREFIX = "admin_delete_"
+
+CB_CONFIRM_CLEAN_ORPHANS = "confirm_clean_orphans"
+CB_CANCEL_CLEAN_ORPHANS = "cancel_clean_orphans"
+CB_CONFIRM_REVOKE = "confirm_revoke"
+CB_CANCEL_REVOKE = "cancel_revoke"
+CB_CONFIRM_DELETE_USER = "confirm_delete_user"
+CB_CANCEL_DELETE_USER = "cancel_delete_user"
+CB_CONFIRM_CLEAN_ORPHANS_FORCE = "confirm_clean_orphans_force"
+CB_CANCEL_CLEAN_ORPHANS_FORCE = "cancel_clean_orphans_force"
+
+
+def is_admin_callback_data(data: str | None) -> bool:
+    return bool(data and data.startswith(ADMIN_CALLBACK_PREFIX))
+
+
+def is_user_config_callback_data(data: str | None) -> bool:
+    return bool(data and data.startswith(USER_CONFIG_CALLBACK_PREFIX))

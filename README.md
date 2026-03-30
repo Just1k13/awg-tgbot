@@ -292,8 +292,11 @@ tail -f /var/log/awg-tgbot/bot.log
 /sync_awg
 /clean_orphans
 /clean_orphans_force
+/force_delete FORCE|DELETE
+/cancel_edit
 /backup
 /send ТЕКСТ
+/health
 /text_list
 /text_get KEY
 /text_set KEY VALUE
@@ -314,10 +317,13 @@ tail -f /var/log/awg-tgbot/bot.log
 - `/sync_awg` — быстрая проверка AWG ↔ БД;
 - `/clean_orphans` — quarantine-этап только для `bot_managed` peer, без физического удаления;
 - `/clean_orphans_force` — физическое удаление только `bot_managed` peer после двойного подтверждения;
+- `/force_delete` — финальный шаг с кодовым словом для подтверждённого force-удаления orphan peer;
+- `/cancel_edit` — отменить текущий режим редактирования текста/настройки в админке;
 - `/backup` — резервная копия БД без секретных данных;
   - по умолчанию в secure mode (шифрование Fernet);
   - insecure-отправка разрешается только при явном `BACKUP_ALLOW_INSECURE_SEND=1`.
 - `/send` — массовая рассылка.
+- `/health` — оперативный health-отчёт (jobs, helper failures, QoS/Denylist, rate-limit метрики);
 - `/text_*` — управление редактируемыми пользовательскими текстами;
 - `/setting_*` — управление runtime settings (feature flags/параметры);
 - `/ref_stats` — короткий referral summary.
@@ -386,7 +392,7 @@ sudo REPO_UPDATE_REF=<40-hex-commit-sha> awg-tgbot update
 
 ---
 
-### 3) Для endpoint нужен внешний IPv4
+### 5) Для endpoint нужен внешний IPv4
 Проект рассчитывает на внешний endpoint именно в формате **IPv4:port**.
 
 Это значит:
@@ -396,13 +402,13 @@ sudo REPO_UPDATE_REF=<40-hex-commit-sha> awg-tgbot update
 
 ---
 
-### 4) `API_TOKEN` и `ADMIN_ID` автоматически не подставляются
+### 6) `API_TOKEN` и `ADMIN_ID` автоматически не подставляются
 Эти значения installer не угадывает.  
 Их нужно ввести вручную при установке или переустановке.
 
 ---
 
-### 5) `ENCRYPTION_SECRET` нужно беречь
+### 7) `ENCRYPTION_SECRET` нужно беречь
 Installer умеет сгенерировать `ENCRYPTION_SECRET`, если его ещё нет.  
 Но после этого его важно **сохранить и не потерять**.
 
@@ -413,7 +419,7 @@ Installer умеет сгенерировать `ENCRYPTION_SECRET`, если е
 
 ---
 
-### 6) Если вручную меняли `.env`, синхронизируйте policy
+### 8) Если вручную меняли `.env`, синхронизируйте policy
 Если вы руками изменили:
 - `DOCKER_CONTAINER`
 - `WG_INTERFACE`
@@ -429,7 +435,7 @@ sudo awg-tgbot status
 
 ---
 
-### 7) Где лежат основные файлы
+### 9) Где лежат основные файлы
 
 | Что | Путь |
 |---|---|
@@ -447,7 +453,7 @@ sudo awg-tgbot status
 
 ---
 
-### 8) Какие переменные в `.env` важны для runtime
+### 10) Какие переменные в `.env` важны для runtime
 
 Ключевые runtime-переменные (`API_TOKEN`, `ADMIN_ID`, `SERVER_PUBLIC_KEY`, `SERVER_IP`, `DOCKER_CONTAINER`, `WG_INTERFACE`) должны оставаться валидными.
 

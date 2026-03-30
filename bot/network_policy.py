@@ -65,13 +65,19 @@ async def resolve_domains(domains_raw: str) -> list[str]:
 
 
 async def qos_rate_for_key(rate_limit_mbit: int | None) -> int:
-    if rate_limit_mbit:
-        return int(rate_limit_mbit)
+    if rate_limit_mbit is not None:
+        value = int(rate_limit_mbit)
+        if value <= 0:
+            return 0
+        return value
     return int(await get_setting("DEFAULT_KEY_RATE_MBIT", int) or 100)
 
 
 async def qos_set(run_docker, ip: str, rate_mbit: int, user_id: int) -> None:
     if int(await get_setting("QOS_ENABLED", int) or 0) != 1:
+        return
+    if int(rate_mbit) <= 0:
+        await qos_clear(run_docker, ip, user_id)
         return
     strict = int(await get_setting("QOS_STRICT", int) or 0) == 1
     try:
@@ -102,7 +108,7 @@ async def qos_sync(run_docker, active_ips_with_rate: list[tuple[str, int]]) -> N
     if int(await get_setting("QOS_ENABLED", int) or 0) != 1:
         return
     strict = int(await get_setting("QOS_STRICT", int) or 0) == 1
-    payload = "\n".join(f"{ip},{rate}" for ip, rate in active_ips_with_rate)
+    payload = "\n".join(f"{ip},{rate}" for ip, rate in active_ips_with_rate if int(rate) > 0)
     try:
         await run_docker(["qos-sync"], input_data=payload)
         await set_metric("qos_last_sync_ok", 1)

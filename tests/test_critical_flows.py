@@ -455,6 +455,87 @@ peer: PUBKEY2
         self.assertEqual(peers[1]["public_key"], "PUBKEY2")
         self.assertEqual(peers[1]["ip"], "10.8.1.12")
 
+    async def test_parse_awg_show_output_handles_non_32_networks(self):
+        import awg_backend
+
+        sample = """
+interface: awg0
+peer: PUBKEY_A
+  allowed ips: 10.8.1.11/32, 10.8.1.0/24
+peer: PUBKEY_B
+  allowed ips: 10.8.1.0/24, 10.8.1.12/32
+"""
+        peers = awg_backend.parse_awg_show_output(sample)
+        self.assertEqual(peers[0]["ip"], "10.8.1.11")
+        self.assertEqual(peers[1]["ip"], "10.8.1.12")
+
+    async def test_reserved_ips_ignore_deleted_but_keep_delete_pending(self):
+        import database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (201, '0', '2026-01-01T00:00:00')")
+            await db.execute(
+                "INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state) VALUES (201, 1, 'k-del', '', '10.8.1.31', '2026-01-01T00:00:00', 'deleted')"
+            )
+            await db.execute(
+                "INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state) VALUES (201, 2, 'k-pending-del', '', '10.8.1.32', '2026-01-01T00:00:00', 'delete_pending')"
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        reserved = await database.get_reserved_ips_from_db()
+        self.assertNotIn(31, reserved)
+        self.assertIn(32, reserved)
+
+    async def test_reconcile_active_awg_state_restores_missing_peer(self):
+        import awg_backend
+        import database
+
+        enc_psk = awg_backend.encrypt_text("psk-value")
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (301, '2099-01-01T00:00:00', '2026-01-01T00:00:00')")
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, psk_key, client_private_key)
+                VALUES (301, 1, ?, '', '10.8.1.33', '2026-01-01T00:00:00', 'active', ?, ?)
+                """,
+                ("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", enc_psk, awg_backend.encrypt_text("priv")),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        restored: list[tuple[str, str, str]] = []
+
+        async def fake_get_awg_peers():
+            return []
+
+        async def fake_add_peer(public_key, ip, psk):
+            restored.append((public_key, ip, psk))
+
+        async def fake_qos_set(*args, **kwargs):
+            return None
+
+        original_get = awg_backend.get_awg_peers
+        original_add = awg_backend.add_peer_to_awg
+        original_qos = awg_backend.qos_set
+        awg_backend.get_awg_peers = fake_get_awg_peers
+        awg_backend.add_peer_to_awg = fake_add_peer
+        awg_backend.qos_set = fake_qos_set
+        try:
+            stats = await awg_backend.reconcile_active_awg_state()
+        finally:
+            awg_backend.get_awg_peers = original_get
+            awg_backend.add_peer_to_awg = original_add
+            awg_backend.qos_set = original_qos
+
+        self.assertEqual(stats["restored"], 1)
+        self.assertEqual(restored[0][1], "10.8.1.33")
+        self.assertEqual(restored[0][2], "psk-value")
+
     async def test_build_client_config_keeps_i2_i5_even_without_i1(self):
         import awg_backend
 

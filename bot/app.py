@@ -14,6 +14,7 @@ from awg_backend import (
     cleanup_expired_subscriptions,
     expired_subscriptions_worker,
     get_orphan_awg_peers,
+    reconcile_active_awg_state,
     reconcile_pending_awg_state,
     run_docker,
 )
@@ -239,6 +240,13 @@ async def _startup_checks(bot: Bot) -> None:
         await bootstrap_protected_peers()
     except Exception as error:
         logger.exception("Ошибка bootstrap protected peers: %s", error)
+
+    try:
+        active_sync = await reconcile_active_awg_state()
+        if active_sync["restored"] or active_sync["failed"]:
+            logger.info("Active reconcile stats: %s", active_sync)
+    except Exception as error:
+        logger.exception("Ошибка восстановления active peers: %s", error)
 
     try:
         db_info = await db_health_info()

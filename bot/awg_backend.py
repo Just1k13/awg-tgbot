@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import ipaddress
 import re
 import uuid
 import zlib
@@ -22,7 +23,7 @@ from database import (
 )
 from helpers import is_valid_awg_public_key, parse_server_host_port, utc_now_naive
 from network_policy import denylist_sync, qos_clear, qos_rate_for_key, qos_set, qos_sync
-from security_utils import encrypt_text
+from security_utils import decrypt_text, encrypt_text
 
 subscription_lock = asyncio.Lock()
 _peers_cache: dict[str, Any] = {"expires_at": None, "data": None}
@@ -89,9 +90,20 @@ def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
             continue
         if lowered.startswith("allowed ips:"):
             allowed = line.split(":", 1)[1].strip()
-            m = re.search(rf"({re.escape(VPN_SUBNET_PREFIX)}\d+)/32", allowed)
-            if m:
-                current_ip = m.group(1)
+            candidates = [item.strip() for item in allowed.split(",") if item.strip()]
+            current_ip = None
+            for item in candidates:
+                try:
+                    network = ipaddress.ip_network(item, strict=False)
+                except ValueError:
+                    continue
+                if network.version != 4 or network.prefixlen != 32:
+                    continue
+                host_ip = str(network.network_address)
+                if not host_ip.startswith(VPN_SUBNET_PREFIX):
+                    continue
+                current_ip = host_ip
+                break
     if current_pub:
         peers.append({"public_key": current_pub, "ip": current_ip})
     return peers
@@ -1138,4 +1150,50 @@ async def reconcile_pending_awg_state() -> dict[str, int]:
         await db.close()
     await sync_qos_state()
     await denylist_sync(run_docker)
+    return stats
+
+
+async def reconcile_active_awg_state() -> dict[str, int]:
+    db = await open_db()
+    try:
+        async with db.execute(
+            """
+            SELECT public_key, ip, psk_key, user_id, rate_limit_mbit
+            FROM keys
+            WHERE state='active'
+              AND public_key NOT LIKE 'pending:%'
+              AND public_key IS NOT NULL
+              AND TRIM(public_key) != ''
+              AND ip IS NOT NULL
+              AND TRIM(ip) != ''
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+    finally:
+        await db.close()
+
+    peers = await get_awg_peers()
+    awg_keys = {(peer.get("public_key") or "").strip() for peer in peers if (peer.get("public_key") or "").strip()}
+    stats = {"restored": 0, "skipped_invalid_secret": 0, "already_present": 0, "failed": 0}
+
+    for public_key, ip, psk_key_enc, user_id, rate_limit_override in rows:
+        public_key = str(public_key).strip()
+        ip = str(ip).strip()
+        if not public_key or not ip:
+            continue
+        if public_key in awg_keys:
+            stats["already_present"] += 1
+            continue
+        try:
+            psk_key = decrypt_text(psk_key_enc)
+            if not psk_key:
+                stats["skipped_invalid_secret"] += 1
+                logger.error("Active reconcile skipped: empty psk for key=%s", public_key)
+                continue
+            await add_peer_to_awg(public_key, ip, psk_key)
+            await qos_set(run_docker, ip, await qos_rate_for_key(rate_limit_override), int(user_id))
+            stats["restored"] += 1
+        except Exception as error:
+            stats["failed"] += 1
+            logger.error("Active reconcile failed for key=%s ip=%s: %s", public_key, ip, error)
     return stats

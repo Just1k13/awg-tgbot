@@ -1,0 +1,98 @@
+name: Security audit
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - beta
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install audit tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit cyclonedx-bom
+
+      - name: Run pip-audit (JSON)
+        run: |
+          pip-audit -r bot/requirements.txt -f json -o pip-audit.json
+
+      - name: Enforce severity policy (fail on high/critical)
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path("pip-audit.json").read_text(encoding="utf-8"))
+          high_or_critical = []
+          for dep in report.get("dependencies", []):
+              for vul in dep.get("vulns", []):
+                  sev = str(vul.get("severity", "unknown")).lower()
+                  if sev in {"high", "critical"}:
+                      high_or_critical.append(
+                          f"{dep.get('name')} {dep.get('version')} {vul.get('id')} severity={sev}"
+                      )
+          if high_or_critical:
+              print("High/Critical vulnerabilities found:")
+              for line in high_or_critical:
+                  print(" -", line)
+              raise SystemExit(1)
+          print("No high/critical vulnerabilities found.")
+          PY
+
+      - name: Build CycloneDX SBOM (requirements)
+        run: |
+          cyclonedx-py requirements bot/requirements.txt --output-file sbom.cdx.json --of JSON
+
+      - name: Build SPDX SBOM (minimal from CycloneDX conversion fallback)
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          cdx = json.loads(Path("sbom.cdx.json").read_text(encoding="utf-8"))
+          spdx = {
+              "spdxVersion": "SPDX-2.3",
+              "dataLicense": "CC0-1.0",
+              "SPDXID": "SPDXRef-DOCUMENT",
+              "name": "awg-tgbot-python-deps",
+              "documentNamespace": "https://example.local/spdx/awg-tgbot-python-deps",
+              "packages": [],
+          }
+          for i, comp in enumerate(cdx.get("components", []), start=1):
+              name = comp.get("name", f"pkg-{i}")
+              version = comp.get("version", "UNKNOWN")
+              spdx["packages"].append(
+                  {
+                      "name": name,
+                      "SPDXID": f"SPDXRef-Package-{i}",
+                      "versionInfo": version,
+                      "downloadLocation": "NOASSERTION",
+                      "filesAnalyzed": False,
+                      "licenseConcluded": "NOASSERTION",
+                      "licenseDeclared": "NOASSERTION",
+                  }
+              )
+          Path("sbom.spdx.json").write_text(json.dumps(spdx, ensure_ascii=False, indent=2), encoding="utf-8")
+          print("Wrote sbom.spdx.json")
+          PY
+
+      - name: Upload security artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-audit-artifacts
+          path: |
+            pip-audit.json
+            sbom.cdx.json
+            sbom.spdx.json

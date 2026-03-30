@@ -73,6 +73,17 @@ class IsAdmin(BaseFilter):
         return bool(message.from_user and message.from_user.id == ADMIN_ID)
 
 
+class HasPendingAdminEdit(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        if not message.from_user:
+            return False
+        row = await fetchone(
+            "SELECT 1 FROM pending_actions WHERE admin_id = ? AND action_key IN (?, ?) LIMIT 1",
+            (message.from_user.id, "edit_text", "edit_setting"),
+        )
+        return bool(row)
+
+
 async def notify_user_subscription_granted(bot: Bot, user_id: int, days: int, new_until) -> bool:
     try:
         await bot.send_message(
@@ -918,7 +929,7 @@ async def cancel_edit_cmd(message: types.Message):
     await message.answer("❌ Редактирование отменено.")
 
 
-@router.message(IsAdmin(), F.text, ~F.text.startswith("/"))
+@router.message(IsAdmin(), HasPendingAdminEdit(), F.text, ~F.text.startswith("/"))
 async def admin_pending_edit_consumer(message: types.Message):
     edit_text_state = await pop_pending_admin_action(message.from_user.id, "edit_text")
     if edit_text_state:

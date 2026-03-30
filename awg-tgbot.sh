@@ -2037,8 +2037,24 @@ print_file_tail_tty_safe() {
 
 print_journal_tail_tty_safe() {
   local lines="${1:-50}"
+  local raw_logs="" filtered_logs=""
   if service_exists; then
-    screen_run journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+    raw_logs="$(journalctl -u "$SERVICE_NAME" -n 400 --no-pager 2>/dev/null || true)"
+    filtered_logs="$(
+      printf '%s\n' "$raw_logs" | grep -Eiv \
+        'sudo\[[0-9]+\]: pam_unix\(sudo:session\): session (opened|closed) for user root|sudo\[[0-9]+\]:[[:space:]]+awg-bot[[:space:]]*: .*COMMAND=/usr/local/libexec/awg-bot-helper (show|denylist-clear --vpn-subnet )' \
+        || true
+    )"
+    if [[ -n "$filtered_logs" ]]; then
+      if has_tty; then
+        printf '%s\n' "$filtered_logs" | tail -n "$lines" >&3 2>/dev/null || true
+      else
+        printf '%s\n' "$filtered_logs" | tail -n "$lines" 2>/dev/null || true
+      fi
+    else
+      screen_warn "После фильтрации служебного sudo-шума журнал пуст, показываю raw-лог."
+      screen_run journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+    fi
   else
     screen_warn "Сервис $SERVICE_NAME не найден."
   fi

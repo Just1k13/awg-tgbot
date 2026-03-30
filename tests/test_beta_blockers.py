@@ -641,6 +641,43 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         finally:
             network_policy.get_setting = original_get_setting
 
+    async def test_content_text_defaults_cover_user_and_payment_flow(self):
+        import content_settings
+
+        required_keys = {
+            "start",
+            "buy_menu",
+            "renew_menu",
+            "instruction_body",
+            "support_contact",
+            "profile_screen",
+            "configs_empty",
+            "configs_menu",
+            "payment_success",
+            "payment_pending",
+            "payment_error",
+            "payment_next_step",
+            "activation_status_ready",
+            "activation_status_pending",
+            "activation_status_delayed",
+            "unknown_slash",
+            "unknown_message",
+            "unknown_callback_action",
+        }
+        self.assertTrue(required_keys.issubset(set(content_settings.TEXT_DEFAULTS)))
+
+    async def test_instruction_text_contains_dynamic_download_url(self):
+        import config
+        import texts
+
+        original = config.DOWNLOAD_URL
+        config.DOWNLOAD_URL = "https://example.com/client"
+        try:
+            rendered = await texts.get_instruction_text()
+        finally:
+            config.DOWNLOAD_URL = original
+        self.assertIn("example.com/client", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -37,6 +37,7 @@ from database import (
     update_broadcast_job_progress,
     write_audit_log,
 )
+from content_settings import get_text
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
 from payments import router as payments_router
@@ -122,7 +123,7 @@ dp.callback_query.middleware(DuplicateCallbackGuardMiddleware())
 
 @fallback_router.callback_query()
 async def fallback_callback(cb: types.CallbackQuery):
-    await cb.answer("Действие не найдено")
+    await cb.answer(await get_text("unknown_callback_action"))
 
 
 dp.include_router(payments_router)

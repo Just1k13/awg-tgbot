@@ -7,7 +7,7 @@ INSTALL_DIR="/opt/amnezia/bot"
 STATE_DIR="${INSTALL_DIR}/.state"
 REPO_BRANCH_FILE="${STATE_DIR}/repo_branch"
 REPO_BRANCH="${REPO_BRANCH:-$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)}"
-REPO_BRANCH="${REPO_BRANCH:-main}"
+REPO_BRANCH="${REPO_BRANCH:-beta}"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
 TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
@@ -1584,6 +1584,7 @@ menu_choose_update_ref() {
 
   if [[ "$UPDATE_SAFE_READY" != "1" ]]; then
     screen_echo "Авто-подготовка pinned update сейчас недоступна."
+    screen_echo "Безопасное обновление требует pinned commit SHA."
     screen_echo "Безопасное обновление возможно только с явным SHA."
     screen_echo "Ручная команда:"
     screen_echo "  $(print_pinned_update_command)"
@@ -1643,9 +1644,10 @@ update_bot() {
   if ! is_full_sha "$requested_ref"; then
     print_line
     warn "Авто-подготовка pinned update недоступна."
+    warn "Безопасное обновление требует pinned commit SHA."
     warn "Безопасное обновление выполняется только по фиксированному commit SHA."
     warn "Запусти вручную: $(print_pinned_update_command)"
-    warn "Обновление по mutable ветке отключено."
+    warn "Небезопасный update по mutable ветке отключён."
     info "Safe update unavailable: no pinned ref detected."
     print_line
     return 1

@@ -37,8 +37,7 @@ from ui_constants import (
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
 )
-from content_settings import get_text
-from content_settings import get_setting
+from content_settings import get_text, get_setting
 from referrals import capture_referral_start, get_referral_screen_data
 
 router = Router()
@@ -59,22 +58,12 @@ async def _send_buy_menu(target, user_id: int):
         remaining = format_remaining_time(sub_until)
         await target.answer(
             await get_text("renew_menu", remaining=remaining, price_lines="\n".join(price_lines)),
-            (
-                "🔄 <b>У вас уже есть активная подписка</b>\n"
-                f"⏳ Осталось: <b>{remaining}</b>\n\n"
-                "💡 Вы можете продлить её заранее. Новые дни добавятся к текущему сроку.\n\n"
-                "В подписку входит доступ до <b>2 устройств</b> и быстрый импорт в Amnezia.\n\n"
-                + "\n".join(price_lines)
-            ),
             parse_mode="HTML",
             reply_markup=get_buy_inline_kb(),
         )
         return
     await target.answer(
         await get_text("buy_menu", price_lines="\n".join(price_lines)),
-        "💳 <b>Выберите срок доступа</b>\n\n"
-        "В подписку входит доступ до <b>2 устройств</b> и быстрый импорт в Amnezia.\n\n"
-        + "\n".join(price_lines),
         parse_mode="HTML",
         reply_markup=get_buy_inline_kb(),
     )
@@ -271,7 +260,6 @@ async def support(message: types.Message):
     if not support_username:
         logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
         await message.answer(await get_text("support_unavailable"))
-        await message.answer("🆘 Поддержка временно не настроена. Попробуйте позже или напишите администратору сервиса.")
         return
     await message.answer(f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(support_username)}</b>", parse_mode="HTML")
 
@@ -285,18 +273,12 @@ async def check_activation_status(cb: types.CallbackQuery):
         return
     status = payment_summary["last_provision_status"] or payment_summary["status"]
     if status == "ready":
-        await cb.message.answer(await get_text("activation_status_ready") + " Откройте «🔑 Подключение».")
+        await cb.message.answer(await get_text("activation_status_ready"))
         return
     if status in {"provisioning", "payment_received"}:
         await cb.message.answer(await get_text("activation_status_pending"))
         return
     await cb.message.answer(await get_text("activation_status_delayed"))
-        await cb.message.answer("✅ Оплата получена → доступ выпускается → доступ готов. Откройте «🔑 Подключение».")
-        return
-    if status in {"provisioning", "payment_received"}:
-        await cb.message.answer("⏳ Оплата получена. Доступ выпускается. Обычно это занимает до минуты.")
-        return
-    await cb.message.answer("⚠️ Активация задержалась. Проверьте статус позже или напишите в поддержку.")
 
 
 @router.message(F.text == BTN_BUY)
@@ -330,14 +312,16 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
     if cb.message:
-        await cb.message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+        extra = ""
+        if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
+            extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
+        await cb.message.answer(get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message()
 async def fallback_message(message: types.Message):
     if message.text and message.text.startswith("/"):
         await message.answer(await get_text("unknown_slash"))
-        await message.answer("Неизвестная команда. Используйте кнопки меню или /start.")
         return
     await message.answer(
         "Не понял сообщение. Используйте кнопки меню ниже.",

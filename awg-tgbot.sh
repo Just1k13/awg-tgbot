@@ -2065,7 +2065,7 @@ print_journal_tail_tty_safe() {
   local lines="${1:-50}"
   local raw_logs="" filtered_logs=""
   if service_exists; then
-    raw_logs="$(read_service_journal 400)"
+    raw_logs="$(journalctl -u "$SERVICE_NAME" -n 400 --no-pager 2>/dev/null || true)"
     filtered_logs="$(
       printf '%s\n' "$raw_logs" | grep -Eiv \
         'sudo\[[0-9]+\]: pam_unix\(sudo:session\): session (opened|closed) for user root|sudo\[[0-9]+\]:[[:space:]]+awg-bot[[:space:]]*: .*COMMAND=/usr/local/libexec/awg-bot-helper (show|denylist-clear --vpn-subnet )' \
@@ -2079,7 +2079,7 @@ print_journal_tail_tty_safe() {
       fi
     else
       screen_warn "После фильтрации служебного sudo-шума журнал пуст, показываю raw-лог."
-      screen_run read_service_journal "$lines"
+      screen_run journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
     fi
   else
     screen_warn "Сервис $SERVICE_NAME не найден."
@@ -2110,7 +2110,7 @@ print_service_error_context_tty_safe() {
     return 0
   fi
 
-  raw_logs="$(read_service_journal 400)"
+  raw_logs="$(journalctl -u "$SERVICE_NAME" -n 400 --no-pager 2>/dev/null || true)"
   filtered_logs="$(printf '%s\n' "$raw_logs" | grep -Ei 'error|failed|traceback|exception|permission denied' || true)"
   meaningful_logs="$(printf '%s\n' "$filtered_logs" | grep -Eiv "Failed with result 'exit-code'" || true)"
 

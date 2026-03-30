@@ -7,7 +7,11 @@ INSTALL_DIR="/opt/amnezia/bot"
 STATE_DIR="${INSTALL_DIR}/.state"
 REPO_BRANCH_FILE="${STATE_DIR}/repo_branch"
 REPO_BRANCH="${REPO_BRANCH:-$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)}"
-REPO_BRANCH="${REPO_BRANCH:-beta}"
+REPO_BRANCH="${REPO_BRANCH:-main}"
+case "$REPO_BRANCH" in
+  main|beta) ;;
+  *) REPO_BRANCH="main" ;;
+esac
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
 TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"

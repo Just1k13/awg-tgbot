@@ -4,14 +4,46 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ENV_FILE = Path('.env')
-load_dotenv(ENV_FILE)
+
+
+def _read_env_text_lossy(path: Path) -> tuple[str, bool] | None:
+    if not path.exists():
+        return None
+    raw = path.read_bytes()
+    for encoding in ('utf-8', 'utf-8-sig'):
+        try:
+            return raw.decode(encoding), False
+        except UnicodeDecodeError:
+            continue
+    for encoding in ('cp1251', 'latin-1'):
+        try:
+            return raw.decode(encoding), True
+        except UnicodeDecodeError:
+            continue
+    return raw.decode('utf-8', errors='replace'), True
+
+
+def _ensure_env_utf8(path: Path) -> None:
+    result = _read_env_text_lossy(path)
+    if result is None:
+        return
+    text, should_rewrite = result
+    normalized = text.replace('\x00', '')
+    if should_rewrite or normalized != text:
+        path.write_text(normalized, encoding='utf-8')
+
+
+_ensure_env_utf8(ENV_FILE)
+load_dotenv(ENV_FILE, encoding='utf-8')
 
 
 def read_env_file(path: Path) -> dict[str, str]:
     data: dict[str, str] = {}
-    if not path.exists():
+    result = _read_env_text_lossy(path)
+    if result is None:
         return data
-    for raw_line in path.read_text(encoding='utf-8').splitlines():
+    text, _ = result
+    for raw_line in text.replace('\x00', '').splitlines():
         line = raw_line.strip()
         if not line or line.startswith('#') or '=' not in line:
             continue

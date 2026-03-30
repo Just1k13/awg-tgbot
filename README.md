@@ -278,6 +278,8 @@ tail -f /var/log/awg-tgbot/bot.log
 - рассылку;
 - безопасный backup базы без секретов.
 
+> Rollout policy: все рискованные изменения сначала выкатываются в `beta`, проходят smoke-check, и только потом промоутятся в `main`.
+
 ### Основные админ-команды
 
 ```text
@@ -292,6 +294,14 @@ tail -f /var/log/awg-tgbot/bot.log
 /clean_orphans_force
 /backup
 /send ТЕКСТ
+/text_list
+/text_get KEY
+/text_set KEY VALUE
+/text_reset KEY
+/setting_list
+/setting_get KEY
+/setting_set KEY VALUE
+/ref_stats
 ```
 
 Коротко:
@@ -305,7 +315,24 @@ tail -f /var/log/awg-tgbot/bot.log
 - `/clean_orphans` — quarantine-этап только для `bot_managed` peer, без физического удаления;
 - `/clean_orphans_force` — физическое удаление только `bot_managed` peer после двойного подтверждения;
 - `/backup` — резервная копия БД без секретных данных;
+  - по умолчанию в secure mode (шифрование Fernet);
+  - insecure-отправка разрешается только при явном `BACKUP_ALLOW_INSECURE_SEND=1`.
 - `/send` — массовая рассылка.
+- `/text_*` — управление редактируемыми пользовательскими текстами;
+- `/setting_*` — управление runtime settings (feature flags/параметры);
+- `/ref_stats` — короткий referral summary.
+
+### QoS / Referrals / Content / Denylist (beta)
+
+- **Per-key QoS**: лимит по умолчанию `100 mbit` на peer IP (через helper-команды `qos-*` + `tc`), configurable через settings/ENV.
+  - текущая реализация: practical egress-cap на трафик peer по IP; состояние синка видно в `/health` (`qos_errors`, `qos_last_sync_ok`).
+- **Referrals**: deep-link `?start=ref_<code>`, бонусы после первой успешно применённой оплаты (invitee +5 / inviter +3 по умолчанию), идемпотентно.
+  - бонус начисляется только один раз на invitee (вторая и последующие оплаты invitee бонус не дают).
+- **Editable content/settings**: базовые user-facing тексты и ключевые флаги можно менять из админки (`/text_*`, `/setting_*`) с fallback на defaults.
+- **Generic egress denylist**: оператор управляет списками доменов/CIDR, sync через helper-команды `denylist-*`; список по умолчанию пустой.
+  - denylist реально привязан к nft chain/rule и применяется только к трафику VPN-пула (`VPN_SUBNET_PREFIX`).
+  - refresh выполняется периодически (`EGRESS_DENYLIST_REFRESH_MINUTES`) и на reconcile.
+- **Важно**: технический torrent blocking **намеренно не реализован**; есть только policy recommendation в пользовательских текстах.
 
 ---
 
@@ -497,6 +524,16 @@ sudo REPO_BRANCH=main awg-tgbot
 ```bash
 sudo REPO_BRANCH=beta awg-tgbot
 ```
+
+### Обязательный smoke-check перед merge `beta -> main`
+Минимум проверьте:
+1. новая покупка (получение доступа и конфигов);
+2. продление активной подписки;
+3. повторная доставка `successful_payment` (идемпотентность);
+4. degraded readiness => `pre_checkout` reject;
+5. unknown slash command даёт понятный ответ;
+6. `/backup` в secure mode и explicit insecure режиме;
+7. helper policy mismatch даёт корректную ошибку и блокирует опасные операции.
 
 ---
 

@@ -681,6 +681,14 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', update_body)
         self.assertNotIn('if [[ "$UPDATE_STATUS" == "current" ]]; then', update_body)
 
+    def test_installer_update_has_rollback_path_after_deploy(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn("create_update_backup()", script)
+        self.assertIn("rollback_update_backup()", script)
+        update_body = self._extract_shell_function(script, "update_bot")
+        self.assertIn('update_backup_dir="$(create_update_backup)"', update_body)
+        self.assertIn('rollback_update_backup "$update_backup_dir"', update_body)
+
     def test_clean_orphans_command_does_not_promise_physical_delete(self):
         admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")
         self.assertIn("quarantine", admin_handler)
@@ -710,6 +718,39 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     awg_helper._load_policy()
 
+    def test_helper_rejects_symlink_policy(self):
+        import awg_helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target.json"
+            policy_path = Path(tmp) / "policy.json"
+            target.write_text(json.dumps({"container": "allowed-c", "interface": "awg0"}), encoding="utf-8")
+            policy_path.symlink_to(target)
+            with patch.object(awg_helper, "POLICY_PATH", policy_path):
+                with self.assertRaises(RuntimeError):
+                    awg_helper._load_policy()
+
+    def test_validate_helper_policy_mismatch_is_hard_failure(self):
+        import config_validate
+
+        class DummyLogger:
+            def error(self, *_args, **_kwargs):
+                return None
+
+            def warning(self, *_args, **_kwargs):
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            policy_path = Path(tmp) / "policy.json"
+            policy_path.write_text(json.dumps({"container": "amnezia-awg2", "interface": "awg0"}), encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                config_validate.validate_helper_policy(
+                    policy_path=str(policy_path),
+                    docker_container="different-container",
+                    wg_interface="awg0",
+                    logger=DummyLogger(),
+                )
+
     def test_helper_parser_has_no_external_target_args(self):
         import awg_helper
 
@@ -718,6 +759,10 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         arg_dests = {action.dest for action in add_peer._actions}
         self.assertNotIn("container", arg_dests)
         self.assertNotIn("interface", arg_dests)
+        self.assertIn("qos-set", parser._subparsers._group_actions[0].choices)
+        self.assertIn("qos-clear", parser._subparsers._group_actions[0].choices)
+        self.assertIn("qos-sync", parser._subparsers._group_actions[0].choices)
+        self.assertIn("denylist-sync", parser._subparsers._group_actions[0].choices)
 
     def test_helper_public_key_validation_requires_real_base64_wireguard_key(self):
         import awg_helper
@@ -737,6 +782,142 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertFalse(result)
         mock_which.assert_called_once_with("docker;rm -rf /")
 
+    def test_content_settings_placeholder_validation(self):
+        import asyncio
+        from content_settings import validate_text_template
+
+        ok, err = asyncio.run(validate_text_template("support_contact", "Contact: {support_username}"))
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+        ok2, err2 = asyncio.run(validate_text_template("support_contact", "Contact: nope"))
+        self.assertFalse(ok2)
+        self.assertIn("missing placeholders", err2)
+
+    def test_network_policy_parsing(self):
+        from network_policy import parse_cidrs
+
+        parsed = parse_cidrs("10.0.0.1/32, 10.10.0.0/16")
+        self.assertEqual(parsed, ["10.0.0.1/32", "10.10.0.0/16"])
+
+    def test_denylist_soft_mode_does_not_raise(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "soft",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "10.10.0.0/16",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("nft fail")
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            asyncio.run(network_policy.denylist_sync(fail_run))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
+
+    def test_denylist_strict_mode_raises(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "strict",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "10.10.0.0/16",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("nft fail")
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(network_policy.denylist_sync(fail_run))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
+
+    def test_denylist_soft_mode_dns_error_does_not_raise(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "soft",
+                "EGRESS_DENYLIST_DOMAINS": "bad_domain",
+                "EGRESS_DENYLIST_CIDRS": "",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        original_resolve = network_policy.resolve_domains
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.resolve_domains = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("dns fail"))  # type: ignore[assignment]
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            asyncio.run(network_policy.denylist_sync(lambda *_args, **_kwargs: asyncio.sleep(0)))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.resolve_domains = original_resolve
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
+
+    def test_denylist_strict_mode_parse_error_raises(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "strict",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "bad-cidr",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            with self.assertRaises(Exception):
+                asyncio.run(network_policy.denylist_sync(lambda *_args, **_kwargs: asyncio.sleep(0)))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
+
     def test_awg_settings_validation_rejects_invalid_numeric_ranges(self):
         import config_validate
 
@@ -745,6 +926,14 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 awg_jc="5",
                 awg_jmin="800",
                 awg_jmax="200",
+                awg_s1="1",
+                awg_s2="2",
+                awg_s3="3",
+                awg_s4="4",
+                awg_h1="1-2",
+                awg_h2="1-2",
+                awg_h3="1-2",
+                awg_h4="1-2",
                 awg_i1="",
                 awg_i2="112233",
                 awg_i3="",
@@ -756,6 +945,14 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
                 awg_jc="x",
                 awg_jmin="0",
                 awg_jmax="0",
+                awg_s1="1",
+                awg_s2="2",
+                awg_s3="3",
+                awg_s4="4",
+                awg_h1="1-2",
+                awg_h2="1-2",
+                awg_h3="1-2",
+                awg_h4="1-2",
                 awg_i1="",
                 awg_i2="",
                 awg_i3="",
@@ -770,12 +967,59 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
             awg_jc="6",
             awg_jmin="10",
             awg_jmax="50",
+            awg_s1="37",
+            awg_s2="98",
+            awg_s3="47",
+            awg_s4="14",
+            awg_h1="1486401722-1692300209",
+            awg_h2="1696990121-1817276760",
+            awg_h3="1841833217-1995591429",
+            awg_h4="2109962185-2145796739",
             awg_i1="",
             awg_i2="112233",
             awg_i3="",
             awg_i4="",
             awg_i5="",
         )
+
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_awg_obfuscation_settings(
+                awg_jc="6",
+                awg_jmin="10",
+                awg_jmax="50",
+                awg_s1="70000",
+                awg_s2="98",
+                awg_s3="47",
+                awg_s4="14",
+                awg_h1="1486401722-1692300209",
+                awg_h2="1696990121-1817276760",
+                awg_h3="1841833217-1995591429",
+                awg_h4="2109962185-2145796739",
+                awg_i1="",
+                awg_i2="",
+                awg_i3="",
+                awg_i4="",
+                awg_i5="",
+            )
+        with self.assertRaises(RuntimeError):
+            config_validate.validate_awg_obfuscation_settings(
+                awg_jc="6",
+                awg_jmin="10",
+                awg_jmax="50",
+                awg_s1="37",
+                awg_s2="98",
+                awg_s3="47",
+                awg_s4="14",
+                awg_h1="bad",
+                awg_h2="1696990121-1817276760",
+                awg_h3="1841833217-1995591429",
+                awg_h4="2109962185-2145796739",
+                awg_i1="",
+                awg_i2="",
+                awg_i3="",
+                awg_i4="",
+                awg_i5="",
+            )
 
     def test_keepalive_validation(self):
         import config_validate

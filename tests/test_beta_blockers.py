@@ -73,6 +73,82 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(row[1])
         self.assertIsNone(row[2])
 
+    async def test_pre_checkout_rejects_amount_currency_mismatch(self):
+        import payments
+
+        class DummyBot:
+            def __init__(self):
+                self.calls = []
+
+            async def answer_pre_checkout_query(self, qid, ok, error_message=None):
+                self.calls.append((qid, ok, error_message))
+
+        class DummyQuery:
+            def __init__(self, payload, amount, currency):
+                self.id = "q1"
+                self.invoice_payload = payload
+                self.total_amount = amount
+                self.currency = currency
+
+        bot = DummyBot()
+        original_readiness = payments.checkout_readiness
+        payments.checkout_readiness = lambda: asyncio.sleep(0, result=(True, ""))  # type: ignore[assignment]
+        try:
+            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS + 1, "XTR"), bot)
+            self.assertEqual(bot.calls[-1][1], False)
+            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "USD"), bot)
+            self.assertEqual(bot.calls[-1][1], False)
+            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "XTR"), bot)
+            self.assertEqual(bot.calls[-1][1], True)
+        finally:
+            payments.checkout_readiness = original_readiness
+
+    async def test_pre_checkout_rejects_unknown_payload(self):
+        import payments
+
+        class DummyBot:
+            def __init__(self):
+                self.calls = []
+
+            async def answer_pre_checkout_query(self, qid, ok, error_message=None):
+                self.calls.append((qid, ok, error_message))
+
+        class DummyQuery:
+            id = "q-unknown"
+            invoice_payload = "sub_999"
+            total_amount = payments.STARS_PRICE_7_DAYS
+            currency = "XTR"
+
+        bot = DummyBot()
+        await payments.pre_checkout(DummyQuery(), bot)
+        self.assertFalse(bot.calls[-1][1])
+
+    async def test_pre_checkout_rejects_when_readiness_degraded(self):
+        import payments
+
+        class DummyBot:
+            def __init__(self):
+                self.calls = []
+
+            async def answer_pre_checkout_query(self, qid, ok, error_message=None):
+                self.calls.append((qid, ok, error_message))
+
+        class DummyQuery:
+            id = "q-degraded"
+            invoice_payload = "sub_7"
+            total_amount = payments.STARS_PRICE_7_DAYS
+            currency = "XTR"
+
+        bot = DummyBot()
+        original_readiness = payments.checkout_readiness
+        payments.checkout_readiness = lambda: asyncio.sleep(0, result=(False, "db down"))  # type: ignore[assignment]
+        try:
+            await payments.pre_checkout(DummyQuery(), bot)
+        finally:
+            payments.checkout_readiness = original_readiness
+        self.assertFalse(bot.calls[-1][1])
+        self.assertIn("временно", bot.calls[-1][2])
+
     async def test_retries_stop_at_max_attempts_and_mark_stuck(self):
         import database
         import payments
@@ -336,6 +412,234 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         await database.ensure_user_exists(12)
         recipients = await database.get_broadcast_recipients(job_id, 0, 50)
         self.assertEqual(recipients, [10, 11])
+
+    async def test_backup_requires_explicit_opt_in_for_insecure_send(self):
+        import config
+        import handlers_admin
+
+        class DummyMessage:
+            def __init__(self):
+                self.answers = []
+                self.documents = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+            async def answer_document(self, document, caption=None, **kwargs):
+                self.documents.append((document, caption))
+
+        original_secure = handlers_admin.BACKUP_SECURE_MODE
+        original_allow = handlers_admin.BACKUP_ALLOW_INSECURE_SEND
+        handlers_admin.BACKUP_SECURE_MODE = False
+        handlers_admin.BACKUP_ALLOW_INSECURE_SEND = False
+        original_config_db_path = config.DB_PATH
+        config.DB_PATH = self.db_path
+        try:
+            msg = DummyMessage()
+            await handlers_admin.backup_db(msg)  # type: ignore[arg-type]
+            self.assertTrue(any("Небезопасная отправка backup отключена" in text for text in msg.answers))
+            self.assertEqual(msg.documents, [])
+        finally:
+            handlers_admin.BACKUP_SECURE_MODE = original_secure
+            handlers_admin.BACKUP_ALLOW_INSECURE_SEND = original_allow
+            config.DB_PATH = original_config_db_path
+
+    async def test_unknown_slash_command_gets_user_feedback(self):
+        import handlers_user
+
+        class DummyMessage:
+            def __init__(self):
+                self.text = "/unknown"
+                self.from_user = type("U", (), {"id": 101})()
+                self.answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        message = DummyMessage()
+        await handlers_user.fallback_message(message)  # type: ignore[arg-type]
+        self.assertTrue(message.answers)
+        self.assertIn("Неизвестная команда", message.answers[-1])
+
+    async def test_recovery_ready_notification_is_idempotent(self):
+        import database
+        import payments
+
+        await database.save_payment(
+            telegram_payment_charge_id="tg_notify",
+            provider_payment_charge_id="prov_notify",
+            user_id=555,
+            payload="sub_7",
+            amount=payments.STARS_PRICE_7_DAYS,
+            currency="XTR",
+            payment_method="stars",
+            status="needs_repair",
+            raw_payload_json="{}",
+        )
+        await database.execute("UPDATE provisioning_jobs SET status='needs_repair', next_retry_at=NULL WHERE payment_id='tg_notify'")
+
+        async def fake_process(payment_id, user_id, payload, days):
+            await database.update_payment_status(payment_id, "applied")
+            return True
+
+        class DummyBot:
+            def __init__(self):
+                self.sent = []
+
+            async def send_message(self, user_id, text, **kwargs):
+                self.sent.append((user_id, text))
+
+        bot = DummyBot()
+        original_process = payments.process_payment_provisioning
+        payments.process_payment_provisioning = fake_process
+        try:
+            await payments.payment_recovery_worker(bot)  # type: ignore[arg-type]
+            await payments.payment_recovery_worker(bot)  # type: ignore[arg-type]
+        finally:
+            payments.process_payment_provisioning = original_process
+
+        self.assertEqual(len(bot.sent), 1)
+
+    async def test_referral_capture_first_wins_and_self_referral_rejected(self):
+        import referrals
+        from database import get_referral_attribution
+
+        code_1 = await referrals.ensure_user_referral_code(1000)
+        code_2 = await referrals.ensure_user_referral_code(1001)
+        self_ref = await referrals.capture_referral_start(1000, f"ref_{code_1}")
+        self.assertFalse(self_ref)
+        first = await referrals.capture_referral_start(1002, f"ref_{code_1}")
+        second = await referrals.capture_referral_start(1002, f"ref_{code_2}")
+        self.assertTrue(first)
+        self.assertFalse(second)
+        attribution = await get_referral_attribution(1002)
+        self.assertEqual(attribution[0], 1000)
+
+    async def test_referral_reward_is_idempotent(self):
+        import referrals
+        from database import get_referral_attribution, get_referral_summary
+
+        code = await referrals.ensure_user_referral_code(2000)
+        await referrals.capture_referral_start(2001, f"ref_{code}")
+        self.assertIsNotNone(await get_referral_attribution(2001))
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            return datetime.fromisoformat("2026-04-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            first = await referrals.apply_referral_rewards_on_first_payment(2001, "pay-1")
+            second = await referrals.apply_referral_rewards_on_first_payment(2001, "pay-1")
+        finally:
+            referrals.issue_subscription = original_issue
+        self.assertTrue(first)
+        self.assertFalse(second)
+        summary = await get_referral_summary(2000)
+        self.assertGreaterEqual(summary["inviter_bonus_days"], 3)
+
+    async def test_referral_second_successful_paid_subscription_has_no_second_reward(self):
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(3000)
+        await referrals.capture_referral_start(3001, f"ref_{code}")
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            first = await referrals.apply_referral_rewards_on_first_payment(3001, "pay-a")
+            second = await referrals.apply_referral_rewards_on_first_payment(3001, "pay-b")
+        finally:
+            referrals.issue_subscription = original_issue
+        self.assertTrue(first)
+        self.assertFalse(second)
+
+    async def test_admin_give_path_does_not_trigger_referral_rewards(self):
+        import handlers_admin
+        import referrals
+
+        called = {"count": 0}
+
+        async def fake_apply(*args, **kwargs):
+            called["count"] += 1
+            return True
+
+        original_apply = referrals.apply_referral_rewards_on_first_payment
+        referrals.apply_referral_rewards_on_first_payment = fake_apply
+        try:
+            class DummyMessage:
+                from_user = type("U", (), {"id": 1})()
+                answers = []
+
+                async def answer(self, text, **kwargs):
+                    self.answers.append(text)
+
+            msg = DummyMessage()
+            await handlers_admin.give_manual(msg, type("C", (), {"args": "4000 7"})())  # type: ignore[arg-type]
+        except Exception:
+            pass
+        finally:
+            referrals.apply_referral_rewards_on_first_payment = original_apply
+        self.assertEqual(called["count"], 0)
+
+    async def test_ref_stats_returns_global_summary(self):
+        import handlers_admin
+        import database
+
+        await database.ensure_referral_code(7000, "ABC7000")
+        await database.set_referral_attribution(7001, 7000, "ABC7000")
+
+        class DummyMessage:
+            from_user = type("U", (), {"id": 1})()
+            answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        msg = DummyMessage()
+        await handlers_admin.ref_stats_cmd(msg)  # type: ignore[arg-type]
+        self.assertTrue(msg.answers)
+        self.assertIn("pending", msg.answers[-1])
+
+    async def test_qos_soft_mode_does_not_raise(self):
+        import network_policy
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("tc fail")
+
+        async def fake_get_setting(key, cast=None):
+            values = {"QOS_ENABLED": "1", "QOS_STRICT": "0"}
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        network_policy.get_setting = fake_get_setting
+        try:
+            await network_policy.qos_set(fail_run, "10.8.1.10", 100, 1)
+        finally:
+            network_policy.get_setting = original_get_setting
+
+    async def test_qos_strict_mode_raises(self):
+        import network_policy
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("tc fail")
+
+        async def fake_get_setting(key, cast=None):
+            values = {"QOS_ENABLED": "1", "QOS_STRICT": "1"}
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        network_policy.get_setting = fake_get_setting
+        try:
+            with self.assertRaises(RuntimeError):
+                await network_policy.qos_set(fail_run, "10.8.1.10", 100, 1)
+        finally:
+            network_policy.get_setting = original_get_setting
 
 
 if __name__ == "__main__":

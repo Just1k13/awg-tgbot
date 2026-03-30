@@ -1,17 +1,18 @@
 import re
 
 from aiogram import F, Router, types
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 
 from config import (
     ADMIN_ID,
     SERVER_NAME,
     STARS_PRICE_7_DAYS,
     STARS_PRICE_30_DAYS,
+    logger,
     get_support_username,
     maybe_set_support_username,
 )
-from database import ensure_user_exists, get_user_keys, get_user_subscription
+from database import ensure_user_exists, get_latest_user_payment_summary, get_user_keys, get_user_subscription
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active
 from keyboards import (
     get_buy_inline_kb,
@@ -27,13 +28,17 @@ from ui_constants import (
     BTN_CONFIGS,
     BTN_GUIDE,
     BTN_PROFILE,
+    BTN_REFERRALS,
     BTN_SUPPORT,
+    CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX,
     CB_CONFIG_DEVICE_PREFIX,
     CB_OPEN_CONFIGS,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
 )
+from content_settings import get_text, get_setting
+from referrals import capture_referral_start, get_referral_screen_data
 
 router = Router()
 
@@ -52,21 +57,13 @@ async def _send_buy_menu(target, user_id: int):
     if subscription_is_active(sub_until):
         remaining = format_remaining_time(sub_until)
         await target.answer(
-            (
-                "🔄 <b>У вас уже есть активная подписка</b>\n"
-                f"⏳ Осталось: <b>{remaining}</b>\n\n"
-                "💡 Вы можете продлить её заранее. Новые дни добавятся к текущему сроку.\n\n"
-                "В подписку входит доступ до <b>2 устройств</b>.\n\n"
-                + "\n".join(price_lines)
-            ),
+            await get_text("renew_menu", remaining=remaining, price_lines="\n".join(price_lines)),
             parse_mode="HTML",
             reply_markup=get_buy_inline_kb(),
         )
         return
     await target.answer(
-        "💳 <b>Выберите срок доступа</b>\n\n"
-        "В подписку входит доступ до <b>2 устройств</b>.\n\n"
-        + "\n".join(price_lines),
+        await get_text("buy_menu", price_lines="\n".join(price_lines)),
         parse_mode="HTML",
         reply_markup=get_buy_inline_kb(),
     )
@@ -112,24 +109,13 @@ async def noop_callback(cb: types.CallbackQuery):
 
 
 @router.message(Command("start"))
-async def start(message: types.Message):
+async def start(message: types.Message, command: CommandObject):
     await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    if command.args:
+        await capture_referral_start(message.from_user.id, command.args.strip())
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
-    await message.answer(
-        (
-            "🌐 <b>Свободный интернет</b>\n\n"
-            "Как начать в 3 шага:\n"
-            "1) <b>💳 Оплатить доступ</b>\n"
-            "2) <b>🔑 Получить подключение</b>\n"
-            "3) Импортировать ключ в <b>Amnezia</b>\n\n"
-            "В подписку входит доступ до <b>2 устройств</b>.\n"
-            "Если нужна помощь, нажмите <b>📖 Как подключиться</b>.\n\n"
-            "Выберите действие в меню ниже."
-        ),
-        parse_mode="HTML",
-        reply_markup=get_main_menu(message.from_user.id, ADMIN_ID),
-    )
+    await message.answer(await get_text("start"), parse_mode="HTML", reply_markup=get_main_menu(message.from_user.id, ADMIN_ID))
 
 
 @router.message(F.text == BTN_PROFILE)
@@ -143,6 +129,13 @@ async def profile(message: types.Message):
     first_name = escape_html(message.from_user.first_name)
     is_active = subscription_is_active(sub_until)
     remaining = format_remaining_time(sub_until) if is_active else "—"
+    payment_summary = await get_latest_user_payment_summary(message.from_user.id)
+    payment_line = "нет данных"
+    activation_line = "нет данных"
+    if payment_summary:
+        created_at = str(payment_summary["created_at"]).replace("T", " ")[:16]
+        payment_line = f"{payment_summary['amount']} {payment_summary['currency']} ({created_at})"
+        activation_line = payment_summary["last_provision_status"] or payment_summary["status"]
     await message.answer(
         (
             "👤 <b>Профиль</b>\n\n"
@@ -151,7 +144,9 @@ async def profile(message: types.Message):
             f"✈️ <b>Telegram:</b> {escape_html(tg_username)}\n"
             f"📌 <b>Подписка:</b> {status_text}\n"
             f"📅 <b>Действует до:</b> {until_text}\n"
-            f"⏳ <b>Осталось:</b> {remaining}\n\n"
+            f"⏳ <b>Осталось:</b> {remaining}\n"
+            f"💸 <b>Последний платёж:</b> {payment_line}\n"
+            f"🚦 <b>Последняя активация:</b> {activation_line}\n\n"
             "⬇️ Ниже — быстрые действия."
         ),
         parse_mode="HTML",
@@ -253,15 +248,37 @@ async def open_configs_from_profile(cb: types.CallbackQuery):
 
 @router.message(F.text == BTN_GUIDE)
 async def guide(message: types.Message):
-    await message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+    extra = ""
+    if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
+        extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
+    await message.answer(get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(F.text == BTN_SUPPORT)
 async def support(message: types.Message):
-    await message.answer(
-        f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(get_support_username())}</b>",
-        parse_mode="HTML",
-    )
+    support_username = get_support_username()
+    if not support_username:
+        logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
+        await message.answer(await get_text("support_unavailable"))
+        return
+    await message.answer(f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(support_username)}</b>", parse_mode="HTML")
+
+
+@router.callback_query(F.data == CB_CHECK_ACTIVATION_STATUS)
+async def check_activation_status(cb: types.CallbackQuery):
+    await cb.answer()
+    payment_summary = await get_latest_user_payment_summary(cb.from_user.id)
+    if not payment_summary:
+        await cb.message.answer("Платежей пока нет. Нажмите «💳 Оплатить доступ», чтобы начать.")
+        return
+    status = payment_summary["last_provision_status"] or payment_summary["status"]
+    if status == "ready":
+        await cb.message.answer(await get_text("activation_status_ready"))
+        return
+    if status in {"provisioning", "payment_received"}:
+        await cb.message.answer(await get_text("activation_status_pending"))
+        return
+    await cb.message.answer(await get_text("activation_status_delayed"))
 
 
 @router.message(F.text == BTN_BUY)
@@ -270,6 +287,15 @@ async def buy(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
     await _send_buy_menu(message, message.from_user.id)
+
+
+@router.message(F.text == BTN_REFERRALS)
+async def referrals_screen(message: types.Message, bot):
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    me = await bot.get_me()
+    bot_username = getattr(me, "username", "") or "bot"
+    data = await get_referral_screen_data(message.from_user.id, bot_username)
+    await message.answer(await get_text("referral_screen", ref_link=data["link"], invited_count=data["invited_count"], rewarded_count=data["rewarded_count"], bonus_days=data["bonus_days"]), parse_mode="HTML")
 
 
 @router.callback_query(F.data == CB_SHOW_BUY_MENU)
@@ -286,12 +312,16 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
     if cb.message:
-        await cb.message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+        extra = ""
+        if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
+            extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
+        await cb.message.answer(get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message()
 async def fallback_message(message: types.Message):
     if message.text and message.text.startswith("/"):
+        await message.answer(await get_text("unknown_slash"))
         return
     await message.answer(
         "Не понял сообщение. Используйте кнопки меню ниже.",

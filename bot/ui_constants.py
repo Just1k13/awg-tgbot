@@ -3,6 +3,7 @@ BTN_CONFIGS = "🔑 Подключение"
 BTN_BUY = "💳 Оплатить доступ"
 BTN_GUIDE = "📖 Как подключиться"
 BTN_SUPPORT = "🆘 Поддержка"
+BTN_REFERRALS = "🎁 Рефералы"
 BTN_ADMIN = "⚙️ Админка"
 
 CB_BUY_7 = "buy_7"

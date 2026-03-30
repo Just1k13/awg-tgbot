@@ -759,6 +759,10 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         arg_dests = {action.dest for action in add_peer._actions}
         self.assertNotIn("container", arg_dests)
         self.assertNotIn("interface", arg_dests)
+        self.assertIn("qos-set", parser._subparsers._group_actions[0].choices)
+        self.assertIn("qos-clear", parser._subparsers._group_actions[0].choices)
+        self.assertIn("qos-sync", parser._subparsers._group_actions[0].choices)
+        self.assertIn("denylist-sync", parser._subparsers._group_actions[0].choices)
 
     def test_helper_public_key_validation_requires_real_base64_wireguard_key(self):
         import awg_helper
@@ -777,6 +781,142 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
             result = config_detect.command_exists("docker;rm -rf /")
         self.assertFalse(result)
         mock_which.assert_called_once_with("docker;rm -rf /")
+
+    def test_content_settings_placeholder_validation(self):
+        import asyncio
+        from content_settings import validate_text_template
+
+        ok, err = asyncio.run(validate_text_template("support_contact", "Contact: {support_username}"))
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+        ok2, err2 = asyncio.run(validate_text_template("support_contact", "Contact: nope"))
+        self.assertFalse(ok2)
+        self.assertIn("missing placeholders", err2)
+
+    def test_network_policy_parsing(self):
+        from network_policy import parse_cidrs
+
+        parsed = parse_cidrs("10.0.0.1/32, 10.10.0.0/16")
+        self.assertEqual(parsed, ["10.0.0.1/32", "10.10.0.0/16"])
+
+    def test_denylist_soft_mode_does_not_raise(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "soft",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "10.10.0.0/16",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("nft fail")
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            asyncio.run(network_policy.denylist_sync(fail_run))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
+
+    def test_denylist_strict_mode_raises(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "strict",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "10.10.0.0/16",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        async def fail_run(*args, **kwargs):
+            raise RuntimeError("nft fail")
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(network_policy.denylist_sync(fail_run))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
+
+    def test_denylist_soft_mode_dns_error_does_not_raise(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "soft",
+                "EGRESS_DENYLIST_DOMAINS": "bad_domain",
+                "EGRESS_DENYLIST_CIDRS": "",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        original_resolve = network_policy.resolve_domains
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.resolve_domains = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("dns fail"))  # type: ignore[assignment]
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            asyncio.run(network_policy.denylist_sync(lambda *_args, **_kwargs: asyncio.sleep(0)))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.resolve_domains = original_resolve
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
+
+    def test_denylist_strict_mode_parse_error_raises(self):
+        import asyncio
+        import network_policy
+
+        async def fake_get_setting(key, cast=None):
+            values = {
+                "EGRESS_DENYLIST_ENABLED": "1",
+                "EGRESS_DENYLIST_MODE": "strict",
+                "EGRESS_DENYLIST_DOMAINS": "",
+                "EGRESS_DENYLIST_CIDRS": "bad-cidr",
+                "VPN_SUBNET_PREFIX": "10.8.1.",
+            }
+            return cast(values[key]) if cast else values[key]
+
+        original_get_setting = network_policy.get_setting
+        original_inc = network_policy.increment_metric
+        original_set = network_policy.set_metric
+        network_policy.get_setting = fake_get_setting
+        network_policy.increment_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        network_policy.set_metric = lambda *_args, **_kwargs: asyncio.sleep(0)  # type: ignore[assignment]
+        try:
+            with self.assertRaises(Exception):
+                asyncio.run(network_policy.denylist_sync(lambda *_args, **_kwargs: asyncio.sleep(0)))
+        finally:
+            network_policy.get_setting = original_get_setting
+            network_policy.increment_metric = original_inc
+            network_policy.set_metric = original_set
 
     def test_awg_settings_validation_rejects_invalid_numeric_ranges(self):
         import config_validate

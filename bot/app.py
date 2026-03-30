@@ -41,12 +41,16 @@ from handlers_admin import router as admin_router
 from handlers_user import router as user_router
 from payments import router as payments_router
 from payments import payment_recovery_worker
+from network_policy import denylist_should_refresh
+from awg_backend import run_docker
+from network_policy import denylist_sync
 
 dp = Dispatcher()
 bg_worker_task: asyncio.Task | None = None
 payment_recovery_task: asyncio.Task | None = None
 broadcast_task: asyncio.Task | None = None
 reconciliation_task: asyncio.Task | None = None
+denylist_refresh_task: asyncio.Task | None = None
 
 fallback_router = Router()
 
@@ -128,7 +132,7 @@ dp.include_router(fallback_router)
 
 
 async def main():
-    global bg_worker_task, payment_recovery_task, broadcast_task, reconciliation_task
+    global bg_worker_task, payment_recovery_task, broadcast_task, reconciliation_task, denylist_refresh_task
 
     bot = Bot(token=API_TOKEN)
     logger.info("Запуск бота")
@@ -257,10 +261,20 @@ async def main():
                 logger.exception("Broadcast worker error: %s", e)
                 await asyncio.sleep(2)
 
+    async def _denylist_refresh_worker() -> None:
+        while True:
+            try:
+                if await denylist_should_refresh():
+                    await denylist_sync(run_docker)
+            except Exception as e:
+                logger.exception("Denylist refresh worker error: %s", e)
+            await asyncio.sleep(60)
+
     bg_worker_task = asyncio.create_task(expired_subscriptions_worker(CLEANUP_INTERVAL_SECONDS))
     payment_recovery_task = asyncio.create_task(_payments_worker())
     reconciliation_task = asyncio.create_task(_reconciliation_worker())
     broadcast_task = asyncio.create_task(_broadcast_worker())
+    denylist_refresh_task = asyncio.create_task(_denylist_refresh_worker())
     try:
         await dp.start_polling(bot)
     finally:
@@ -272,6 +286,8 @@ async def main():
             reconciliation_task.cancel()
         if broadcast_task:
             broadcast_task.cancel()
+        if denylist_refresh_task:
+            denylist_refresh_task.cancel()
         await close_shared_db()
         await bot.session.close()
 

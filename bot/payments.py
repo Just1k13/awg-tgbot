@@ -41,6 +41,8 @@ from database import (
 )
 from helpers import utc_now_naive
 from keyboards import get_post_payment_kb
+from content_settings import get_text
+from referrals import apply_referral_rewards_on_first_payment
 from ui_constants import CB_BUY_30, CB_BUY_7
 
 router = Router()
@@ -229,6 +231,8 @@ async def success_pay(message: types.Message):
             await mark_ready_notification_sent(payment.telegram_payment_charge_id)
             await message.answer(
                 (
+                    (await get_text("payment_success"))
+                    + "\nСледующий шаг — откройте подключение и импортируйте его в Amnezia."
                     "🎉 <b>Доступ готов</b>\n\n"
                     "Статусы: оплата получена → доступ выпускается → доступ готов ✅\n"
                     "Следующий шаг — откройте подключение и импортируйте его в Amnezia."
@@ -238,7 +242,8 @@ async def success_pay(message: types.Message):
             )
         else:
             await message.answer(
-                "⏳ Платёж принят. Выдача доступа выполняется в фоне, это обычно занимает до минуты."
+                (await get_text("payment_pending"))
+                +
                 "\n\nКогда всё будет готово, нажмите «🔑 Получить подключение».",
                 reply_markup=get_post_payment_kb(),
             )
@@ -253,7 +258,7 @@ async def success_pay(message: types.Message):
         )
         await write_audit_log(message.from_user.id, "payment_provision_failed", str(e)[:500])
         await message.answer(
-            "❌ Платёж получен, но возникла ошибка при активации доступа. Администратор увидит это в журнале и сможет повторно выдать доступ."
+            await get_text("payment_error")
         )
 
 
@@ -276,6 +281,7 @@ async def process_payment_provisioning(payment_id: str, user_id: int, payload: s
         )
         if not finalized:
             raise RuntimeError("payment finalization lock lost")
+        await apply_referral_rewards_on_first_payment(user_id, payment_id)
         return True
     except Exception as e:
         retry_at = (utc_now_naive() + timedelta(seconds=PAYMENT_RETRY_DELAY_SECONDS)).isoformat()

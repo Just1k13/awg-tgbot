@@ -1,7 +1,7 @@
 import re
 
 from aiogram import F, Router, types
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 
 from config import (
     ADMIN_ID,
@@ -28,6 +28,7 @@ from ui_constants import (
     BTN_CONFIGS,
     BTN_GUIDE,
     BTN_PROFILE,
+    BTN_REFERRALS,
     BTN_SUPPORT,
     CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX,
@@ -36,6 +37,9 @@ from ui_constants import (
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
 )
+from content_settings import get_text
+from content_settings import get_setting
+from referrals import capture_referral_start, get_referral_screen_data
 
 router = Router()
 
@@ -54,6 +58,7 @@ async def _send_buy_menu(target, user_id: int):
     if subscription_is_active(sub_until):
         remaining = format_remaining_time(sub_until)
         await target.answer(
+            await get_text("renew_menu", remaining=remaining, price_lines="\n".join(price_lines)),
             (
                 "🔄 <b>У вас уже есть активная подписка</b>\n"
                 f"⏳ Осталось: <b>{remaining}</b>\n\n"
@@ -66,6 +71,7 @@ async def _send_buy_menu(target, user_id: int):
         )
         return
     await target.answer(
+        await get_text("buy_menu", price_lines="\n".join(price_lines)),
         "💳 <b>Выберите срок доступа</b>\n\n"
         "В подписку входит доступ до <b>2 устройств</b> и быстрый импорт в Amnezia.\n\n"
         + "\n".join(price_lines),
@@ -114,24 +120,13 @@ async def noop_callback(cb: types.CallbackQuery):
 
 
 @router.message(Command("start"))
-async def start(message: types.Message):
+async def start(message: types.Message, command: CommandObject):
     await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    if command.args:
+        await capture_referral_start(message.from_user.id, command.args.strip())
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
-    await message.answer(
-        (
-            "🌐 <b>Свободный интернет</b>\n\n"
-            "Как начать в 3 шага:\n"
-            "1) <b>💳 Оплатить доступ</b>\n"
-            "2) <b>🔑 Получить подключение</b>\n"
-            "3) Импортировать ключ в <b>Amnezia</b>\n\n"
-            "В подписку входит доступ до <b>2 устройств</b>.\n"
-            "Если нужна помощь, нажмите <b>📖 Как подключиться</b>.\n\n"
-            "Выберите действие в меню ниже."
-        ),
-        parse_mode="HTML",
-        reply_markup=get_main_menu(message.from_user.id, ADMIN_ID),
-    )
+    await message.answer(await get_text("start"), parse_mode="HTML", reply_markup=get_main_menu(message.from_user.id, ADMIN_ID))
 
 
 @router.message(F.text == BTN_PROFILE)
@@ -264,7 +259,10 @@ async def open_configs_from_profile(cb: types.CallbackQuery):
 
 @router.message(F.text == BTN_GUIDE)
 async def guide(message: types.Message):
-    await message.answer(get_instruction_text(), parse_mode="HTML", disable_web_page_preview=True)
+    extra = ""
+    if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
+        extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
+    await message.answer(get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(F.text == BTN_SUPPORT)
@@ -272,6 +270,7 @@ async def support(message: types.Message):
     support_username = get_support_username()
     if not support_username:
         logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
+        await message.answer(await get_text("support_unavailable"))
         await message.answer("🆘 Поддержка временно не настроена. Попробуйте позже или напишите администратору сервиса.")
         return
     await message.answer(f"🆘 <b>Поддержка</b>\n\nПо всем вопросам пишите: <b>{escape_html(support_username)}</b>", parse_mode="HTML")
@@ -286,6 +285,12 @@ async def check_activation_status(cb: types.CallbackQuery):
         return
     status = payment_summary["last_provision_status"] or payment_summary["status"]
     if status == "ready":
+        await cb.message.answer(await get_text("activation_status_ready") + " Откройте «🔑 Подключение».")
+        return
+    if status in {"provisioning", "payment_received"}:
+        await cb.message.answer(await get_text("activation_status_pending"))
+        return
+    await cb.message.answer(await get_text("activation_status_delayed"))
         await cb.message.answer("✅ Оплата получена → доступ выпускается → доступ готов. Откройте «🔑 Подключение».")
         return
     if status in {"provisioning", "payment_received"}:
@@ -300,6 +305,15 @@ async def buy(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
     await _send_buy_menu(message, message.from_user.id)
+
+
+@router.message(F.text == BTN_REFERRALS)
+async def referrals_screen(message: types.Message, bot):
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    me = await bot.get_me()
+    bot_username = getattr(me, "username", "") or "bot"
+    data = await get_referral_screen_data(message.from_user.id, bot_username)
+    await message.answer(await get_text("referral_screen", ref_link=data["link"], invited_count=data["invited_count"], rewarded_count=data["rewarded_count"], bonus_days=data["bonus_days"]), parse_mode="HTML")
 
 
 @router.callback_query(F.data == CB_SHOW_BUY_MENU)
@@ -322,6 +336,7 @@ async def show_instruction_callback(cb: types.CallbackQuery):
 @router.message()
 async def fallback_message(message: types.Message):
     if message.text and message.text.startswith("/"):
+        await message.answer(await get_text("unknown_slash"))
         await message.answer("Неизвестная команда. Используйте кнопки меню или /start.")
         return
     await message.answer(

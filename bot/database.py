@@ -104,6 +104,7 @@ async def init_db() -> None:
         await ensure_column(db, "keys", "state", "TEXT NOT NULL DEFAULT 'active'")
         await ensure_column(db, "keys", "state_updated_at", "TEXT")
         await ensure_column(db, "keys", "delete_reason", "TEXT")
+        await ensure_column(db, "keys", "rate_limit_mbit", "INTEGER")
 
         await db.execute(
             """
@@ -254,6 +255,59 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by INTEGER
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS text_overrides (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                updated_by INTEGER
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_codes (
+                user_id INTEGER PRIMARY KEY,
+                code TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_attributions (
+                invitee_user_id INTEGER PRIMARY KEY,
+                inviter_user_id INTEGER NOT NULL,
+                referral_code TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS referral_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invitee_user_id INTEGER NOT NULL,
+                inviter_user_id INTEGER NOT NULL,
+                payment_id TEXT NOT NULL UNIQUE,
+                invitee_bonus_days INTEGER NOT NULL,
+                inviter_bonus_days INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'applied',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub_until ON users(sub_until)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_user_id ON keys(user_id)")
@@ -266,6 +320,9 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guards_expires ON callback_guards(expires_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_subscription_operations_status ON subscription_operations(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_inviter ON referral_rewards(inviter_user_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_invitee ON referral_rewards(invitee_user_id, created_at)")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_reward_once_per_invitee ON referral_rewards(invitee_user_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_jobs_status ON broadcast_jobs(status, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_targets_job ON broadcast_job_targets(job_id, user_id)")
 
@@ -867,6 +924,202 @@ async def increment_metric(metric_key: str, delta: int = 1) -> None:
 async def get_metric(metric_key: str) -> int:
     row = await fetchone("SELECT metric_value FROM runtime_metrics WHERE metric_key = ?", (metric_key,))
     return int(row[0]) if row else 0
+
+
+async def set_metric(metric_key: str, value: int) -> None:
+    await execute(
+        """
+        INSERT INTO runtime_metrics (metric_key, metric_value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(metric_key) DO UPDATE SET
+            metric_value = excluded.metric_value,
+            updated_at = excluded.updated_at
+        """,
+        (metric_key, int(value), utc_now_naive().isoformat()),
+    )
+
+
+async def set_app_setting(key: str, value: str, updated_by: int | None = None) -> None:
+    await execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at, updated_by)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at,
+            updated_by = excluded.updated_by
+        """,
+        (key, value, utc_now_naive().isoformat(), updated_by),
+    )
+
+
+async def get_app_setting(key: str) -> str | None:
+    row = await fetchone("SELECT value FROM app_settings WHERE key = ?", (key,))
+    return row[0] if row else None
+
+
+async def list_app_settings() -> list[tuple[str, str, str, int | None]]:
+    return await fetchall("SELECT key, value, updated_at, updated_by FROM app_settings ORDER BY key")
+
+
+async def set_text_override(key: str, value: str, updated_by: int | None = None) -> None:
+    await execute(
+        """
+        INSERT INTO text_overrides (key, value, updated_at, updated_by)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at,
+            updated_by = excluded.updated_by
+        """,
+        (key, value, utc_now_naive().isoformat(), updated_by),
+    )
+
+
+async def get_text_override(key: str) -> str | None:
+    row = await fetchone("SELECT value FROM text_overrides WHERE key = ?", (key,))
+    return row[0] if row else None
+
+
+async def list_text_overrides() -> list[tuple[str, str, str, int | None]]:
+    return await fetchall("SELECT key, value, updated_at, updated_by FROM text_overrides ORDER BY key")
+
+
+async def reset_text_override(key: str) -> None:
+    await execute("DELETE FROM text_overrides WHERE key = ?", (key,))
+
+
+async def ensure_referral_code(user_id: int, code: str) -> None:
+    await execute(
+        """
+        INSERT OR IGNORE INTO referral_codes (user_id, code, created_at)
+        VALUES (?, ?, ?)
+        """,
+        (user_id, code, utc_now_naive().isoformat()),
+    )
+
+
+async def get_referral_code(user_id: int) -> str | None:
+    row = await fetchone("SELECT code FROM referral_codes WHERE user_id = ?", (user_id,))
+    return row[0] if row else None
+
+
+async def get_user_id_by_referral_code(code: str) -> int | None:
+    row = await fetchone("SELECT user_id FROM referral_codes WHERE code = ?", (code,))
+    return int(row[0]) if row else None
+
+
+async def set_referral_attribution(invitee_user_id: int, inviter_user_id: int, referral_code: str) -> bool:
+    db = await open_db()
+    try:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO referral_attributions (invitee_user_id, inviter_user_id, referral_code, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (invitee_user_id, inviter_user_id, referral_code, utc_now_naive().isoformat()),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) == 1
+    finally:
+        await db.close()
+
+
+async def get_referral_attribution(invitee_user_id: int) -> tuple[int, str] | None:
+    row = await fetchone(
+        "SELECT inviter_user_id, referral_code FROM referral_attributions WHERE invitee_user_id = ?",
+        (invitee_user_id,),
+    )
+    return (int(row[0]), str(row[1])) if row else None
+
+
+async def user_has_paid_subscription(user_id: int) -> bool:
+    row = await fetchone(
+        "SELECT 1 FROM payments WHERE user_id = ? AND status = 'applied' LIMIT 1",
+        (user_id,),
+    )
+    return bool(row)
+
+
+async def create_referral_reward_once(
+    invitee_user_id: int,
+    inviter_user_id: int,
+    payment_id: str,
+    invitee_bonus_days: int,
+    inviter_bonus_days: int,
+) -> bool:
+    db = await open_db()
+    try:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO referral_rewards (
+                invitee_user_id, inviter_user_id, payment_id, invitee_bonus_days, inviter_bonus_days, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, 'applied', ?)
+            """,
+            (invitee_user_id, inviter_user_id, payment_id, invitee_bonus_days, inviter_bonus_days, utc_now_naive().isoformat()),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) == 1
+    finally:
+        await db.close()
+
+
+async def get_referral_summary(user_id: int) -> dict[str, int]:
+    invited = await fetchone("SELECT COUNT(*) FROM referral_attributions WHERE inviter_user_id = ?", (user_id,))
+    rewarded = await fetchone("SELECT COUNT(*) FROM referral_rewards WHERE inviter_user_id = ?", (user_id,))
+    row = await fetchone(
+        """
+        SELECT COALESCE(SUM(inviter_bonus_days), 0), COALESCE(SUM(invitee_bonus_days), 0)
+        FROM referral_rewards
+        WHERE inviter_user_id = ? OR invitee_user_id = ?
+        """,
+        (user_id, user_id),
+    )
+    inviter_bonus = int(row[0]) if row else 0
+    invitee_bonus = int(row[1]) if row else 0
+    return {
+        "invited_count": int(invited[0]) if invited else 0,
+        "rewarded_count": int(rewarded[0]) if rewarded else 0,
+        "inviter_bonus_days": inviter_bonus,
+        "invitee_bonus_days": invitee_bonus,
+    }
+
+
+async def get_referral_admin_stats(limit: int = 5) -> dict[str, Any]:
+    pending = await fetchone(
+        """
+        SELECT COUNT(*)
+        FROM referral_attributions a
+        LEFT JOIN referral_rewards r ON r.invitee_user_id = a.invitee_user_id
+        WHERE r.invitee_user_id IS NULL
+        """
+    )
+    rewarded = await fetchone("SELECT COUNT(*) FROM referral_rewards")
+    recent = await fetchall(
+        """
+        SELECT invitee_user_id, inviter_user_id, payment_id, invitee_bonus_days, inviter_bonus_days, created_at
+        FROM referral_rewards
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    top = await fetchall(
+        """
+        SELECT inviter_user_id, COUNT(*) AS cnt
+        FROM referral_rewards
+        GROUP BY inviter_user_id
+        ORDER BY cnt DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return {
+        "pending": int(pending[0]) if pending else 0,
+        "rewarded": int(rewarded[0]) if rewarded else 0,
+        "recent": recent,
+        "top": top,
+    }
 
 
 async def create_broadcast_job(admin_id: int, text: str) -> int:

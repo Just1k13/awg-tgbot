@@ -69,6 +69,8 @@ STATE_BOT_ENV_FOUND=0
 STATE_BOT_STATE_FOUND=0
 STATE_BOT_INSTALLED=0
 STATE_BOT_RESIDUAL=0
+STATE_KERNEL_SUPPORTED=0
+STATE_AMNEZIAWG_INSTALLED=0
 STARTUP_STATE_CODE="unknown"
 UPDATE_STATUS="not_applicable"
 UPDATE_REMOTE_SHA=""
@@ -760,7 +762,34 @@ reset_system_state() {
   STATE_BOT_STATE_FOUND=0
   STATE_BOT_INSTALLED=0
   STATE_BOT_RESIDUAL=0
+  STATE_KERNEL_SUPPORTED=0
+  STATE_AMNEZIAWG_INSTALLED=0
   STARTUP_STATE_CODE="unknown"
+}
+
+check_kernel_support() {
+  local kernel
+  kernel="$(uname -r 2>/dev/null || true)"
+  if [[ "$kernel" =~ ^([0-9]+)\.([0-9]+) ]]; then
+    local major minor
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    if (( major > 5 || (major == 5 && minor >= 6) )); then
+      STATE_KERNEL_SUPPORTED=1
+    fi
+  fi
+}
+
+check_amneziawg_installed() {
+  if [[ -d "/etc/amnezia/amneziawg" ]]; then
+    STATE_AMNEZIAWG_INSTALLED=1
+    return 0
+  fi
+  if require_command docker && docker_is_accessible; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qi 'amnezia'; then
+      STATE_AMNEZIAWG_INSTALLED=1
+    fi
+  fi
 }
 
 check_awg_installed() {
@@ -839,6 +868,8 @@ check_bot_installed() {
 
 collect_system_state() {
   reset_system_state
+  check_kernel_support
+  check_amneziawg_installed
   check_awg_installed
   check_bot_installed
 
@@ -969,6 +1000,8 @@ print_detailed_startup_summary() {
   echo "Ветка: ${REPO_BRANCH}"
   echo "Service: $(status_found_text "$STATE_BOT_SERVICE_FOUND")"
   echo "Docker: $(status_available_text "$STATE_DOCKER_DAEMON")"
+  echo "Linux kernel (>=5.6): $(status_available_text "$STATE_KERNEL_SUPPORTED")"
+  echo "AmneziaWG install: $(status_found_text "$STATE_AMNEZIAWG_INSTALLED")"
   print_line
   echo "Docker CLI: $([[ "$STATE_DOCKER_INSTALLED" == "1" ]] && echo 'установлен' || echo 'не установлен')"
   echo "Docker daemon: $(status_available_text "$STATE_DOCKER_DAEMON")"
@@ -1002,6 +1035,36 @@ print_detailed_startup_summary() {
   print_recommended_actions
   print_line
   return 0
+}
+
+ensure_fernet_key() {
+  local current key
+  current="$(get_env_value FERNET_KEY)"
+  if [[ -n "$current" ]]; then
+    return 0
+  fi
+  key="$($PYTHON_BIN - <<'PY'
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+PY
+)"
+  set_env_value FERNET_KEY "$key"
+}
+
+setup_logrotate() {
+  cat > /etc/logrotate.d/awg-tgbot <<ROTATE
+${APP_LOG_FILE} {
+  daily
+  rotate 14
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+  su ${BOT_USER} ${BOT_USER}
+}
+ROTATE
+  chmod 644 /etc/logrotate.d/awg-tgbot
 }
 
 print_startup_summary() {
@@ -1443,6 +1506,12 @@ check_updates() {
 install_or_reinstall_flow() {
   local mode="$1" tmp_dir choice api_token admin_id server_name secret value default
   detect_install_state
+  if [[ "$STATE_KERNEL_SUPPORTED" != "1" ]]; then
+    die "Ядро Linux слишком старое для AWG (нужно >= 5.6)."
+  fi
+  if [[ "$STATE_AMNEZIAWG_INSTALLED" != "1" ]]; then
+    die "AmneziaWG не обнаружен. Сначала установи AmneziaWG."
+  fi
   if [[ "$mode" == "install" && "$STATE_AWG_FOUND" != "1" ]]; then
     print_startup_summary
     die "AWG не обнаружен. Установка доступна только после явной подготовки и запуска AWG."
@@ -1490,6 +1559,7 @@ install_or_reinstall_flow() {
   ensure_env_file
 
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
+  ensure_fernet_key
 
   if [[ "$choice" == "1" ]]; then
     write_detected_awg_env
@@ -1529,6 +1599,7 @@ install_or_reinstall_flow() {
   ensure_venv_and_requirements || die "Не удалось установить Python зависимости."
   ensure_bot_user || die "Не удалось подготовить service пользователя."
   install_awg_helper || die "Не удалось установить helper для AWG."
+  setup_logrotate || die "Не удалось настроить logrotate."
   write_service || die "Не удалось создать systemd сервис."
   persist_repo_branch
   persist_remote_sha

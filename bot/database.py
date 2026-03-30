@@ -1,6 +1,7 @@
 import hashlib
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from helpers import utc_now_naive
 from security_utils import decrypt_text
 
 _shared_db: aiosqlite.Connection | None = None
+SAFE_TG_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
 
 
 async def _apply_pragmas(db: aiosqlite.Connection) -> None:
@@ -231,6 +233,30 @@ async def init_db() -> None:
         await ensure_column(db, "provisioning_jobs", "lease_expires_at", "TEXT")
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS payment_prechecks (
+                precheckout_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'created',
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscription_notifications (
+                user_id INTEGER NOT NULL,
+                sub_until TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, sub_until, kind)
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS callback_guards (
                 guard_key TEXT PRIMARY KEY,
                 action_scope TEXT NOT NULL,
@@ -323,6 +349,7 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_payments_user_created_at ON payments(user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_retry ON provisioning_jobs(status, next_retry_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_jobs_lease_expires ON provisioning_jobs(lease_expires_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_prechecks_user_created ON payment_prechecks(user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_state ON keys(state)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_guards_expires ON callback_guards(expires_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
@@ -416,13 +443,20 @@ async def clear_pending_broadcast(admin_id: int) -> None:
 
 
 async def ensure_user_exists(user_id: int, tg_username: str | None = None, first_name: str | None = None) -> None:
+    if not isinstance(user_id, int) or user_id <= 0:
+        raise ValueError("invalid telegram user_id")
+    safe_username = tg_username
+    if tg_username:
+        candidate = tg_username.lstrip("@").strip()
+        safe_username = candidate if SAFE_TG_USERNAME_RE.fullmatch(candidate) else None
+    safe_first_name = (first_name or "").strip()[:128] or None
     db = await get_shared_db()
     await db.execute(
         """
         INSERT OR IGNORE INTO users (user_id, sub_until, created_at, tg_username, first_name)
         VALUES (?, '0', ?, ?, ?)
         """,
-        (user_id, utc_now_naive().isoformat(), tg_username, first_name),
+        (user_id, utc_now_naive().isoformat(), safe_username, safe_first_name),
     )
     await db.execute(
         """
@@ -431,7 +465,7 @@ async def ensure_user_exists(user_id: int, tg_username: str | None = None, first
             first_name = COALESCE(?, first_name)
         WHERE user_id = ?
         """,
-        (tg_username, first_name, user_id),
+        (safe_username, safe_first_name, user_id),
     )
     await db.commit()
 
@@ -669,6 +703,76 @@ async def save_payment(
         raise
     finally:
         await db.close()
+
+
+async def upsert_payment_precheck(
+    precheckout_id: str,
+    user_id: int,
+    payload: str,
+    status: str = "created",
+    error_message: str | None = None,
+) -> None:
+    now_iso = utc_now_naive().isoformat()
+    await execute(
+        """
+        INSERT INTO payment_prechecks (precheckout_id, user_id, payload, status, error_message, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(precheckout_id) DO UPDATE SET
+            status = excluded.status,
+            error_message = excluded.error_message,
+            updated_at = excluded.updated_at
+        """,
+        (precheckout_id, user_id, payload, status, error_message, now_iso, now_iso),
+    )
+
+
+async def mark_payment_precheck_status(precheckout_id: str, status: str, error_message: str | None = None) -> None:
+    await execute(
+        """
+        UPDATE payment_prechecks
+        SET status = ?, error_message = ?, updated_at = ?
+        WHERE precheckout_id = ?
+        """,
+        (status, error_message, utc_now_naive().isoformat(), precheckout_id),
+    )
+
+
+async def has_subscription_notification(user_id: int, sub_until: str, kind: str) -> bool:
+    row = await fetchone(
+        """
+        SELECT 1
+        FROM subscription_notifications
+        WHERE user_id = ? AND sub_until = ? AND kind = ?
+        """,
+        (user_id, sub_until, kind),
+    )
+    return bool(row)
+
+
+async def mark_subscription_notification_sent(user_id: int, sub_until: str, kind: str) -> None:
+    await execute(
+        """
+        INSERT OR IGNORE INTO subscription_notifications (user_id, sub_until, kind, sent_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user_id, sub_until, kind, utc_now_naive().isoformat()),
+    )
+
+
+async def get_subscriptions_expiring_within(hours: int = 24) -> list[tuple[int, str]]:
+    now_iso = utc_now_naive().isoformat()
+    deadline = (utc_now_naive() + timedelta(hours=hours)).isoformat()
+    rows = await fetchall(
+        """
+        SELECT user_id, sub_until
+        FROM users
+        WHERE sub_until != '0'
+          AND sub_until > ?
+          AND sub_until <= ?
+        """,
+        (now_iso, deadline),
+    )
+    return [(int(uid), str(sub_until)) for uid, sub_until in rows]
 
 
 async def claim_payment_and_job_for_provisioning(

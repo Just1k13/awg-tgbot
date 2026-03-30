@@ -2,6 +2,7 @@ import re
 
 from aiogram import F, Router, types
 from aiogram.filters import Command, CommandObject
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from config import (
     ADMIN_ID,
@@ -95,6 +96,15 @@ async def _find_user_config_by_key_id(user_id: int, key_id: int):
     return next((item for item in configs if item[0] == key_id), None)
 
 
+def _help_clients_kb() -> types.InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📱 iOS", url="https://apps.apple.com/app/amnezia-vpn/id1600529902")
+    kb.button(text="🤖 Android", url="https://play.google.com/store/apps/details?id=org.amnezia.vpn")
+    kb.button(text="🪟 Windows", url="https://amnezia.org/downloads")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 @router.callback_query(F.data == "noop")
 async def noop_callback(cb: types.CallbackQuery):
     await cb.answer()
@@ -108,6 +118,33 @@ async def start(message: types.Message, command: CommandObject):
     if message.from_user.id == ADMIN_ID:
         maybe_set_support_username(message.from_user.username)
     await message.answer(await get_text("start"), parse_mode="HTML", reply_markup=get_main_menu(message.from_user.id, ADMIN_ID))
+
+
+@router.message(Command("my_config"))
+async def my_config_cmd(message: types.Message):
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    configs = await get_user_keys(message.from_user.id)
+    if not configs:
+        await message.answer(await get_text("configs_empty"), parse_mode="HTML", reply_markup=get_instruction_inline_kb())
+        return
+    key_id, device_num, cfg, vpn_key = configs[0]
+    await message.answer_document(
+        types.BufferedInputFile(
+            cfg.encode("utf-8"),
+            filename=f"{_config_filename_prefix()}_device_{device_num}.conf",
+        ),
+        caption=f"Ваш активный конфиг (device {device_num})",
+    )
+    if vpn_key:
+        await message.answer(f"<code>{escape_html(vpn_key)}</code>", parse_mode="HTML")
+
+
+@router.message(Command("help"))
+async def help_cmd(message: types.Message):
+    await message.answer(
+        "Выберите официальный клиент AmneziaWG для установки:",
+        reply_markup=_help_clients_kb(),
+    )
 
 
 @router.message(F.text == BTN_PROFILE)

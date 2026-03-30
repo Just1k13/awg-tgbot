@@ -999,6 +999,12 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
             network_policy.increment_metric = original_inc
             network_policy.set_metric = original_set
 
+    def test_domain_to_ascii_converts_idn(self):
+        import network_policy
+
+        self.assertEqual(network_policy._domain_to_ascii("госуслуги.рф"), "xn--c1aapkosapc.xn--p1ai")
+        self.assertEqual(network_policy._domain_to_ascii("gosuslugi.ru"), "gosuslugi.ru")
+
     def test_awg_settings_validation_rejects_invalid_numeric_ranges(self):
         import config_validate
 

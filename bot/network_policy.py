@@ -17,6 +17,16 @@ def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
 
 
+def _domain_to_ascii(domain: str) -> str:
+    domain = (domain or "").strip().rstrip(".")
+    if not domain:
+        return ""
+    try:
+        return domain.encode("idna").decode("ascii")
+    except Exception:
+        return domain
+
+
 def parse_cidrs(raw: str) -> list[str]:
     cidrs: list[str] = []
     for item in _parse_csv(raw):
@@ -29,16 +39,22 @@ async def resolve_domains(domains_raw: str) -> list[str]:
     resolved: set[str] = set()
     loop = asyncio.get_running_loop()
     for domain in _parse_csv(domains_raw):
+        query_domain = _domain_to_ascii(domain)
+        if not query_domain:
+            continue
         try:
             addrinfo = await asyncio.wait_for(
-                loop.getaddrinfo(domain, 443, type=socket.SOCK_STREAM),
+                loop.getaddrinfo(query_domain, 443, type=socket.SOCK_STREAM),
                 timeout=DENYLIST_DNS_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             logger.warning("denylist resolve timeout for domain=%s", domain)
             continue
         except OSError as error:
-            logger.warning("denylist resolve failed for domain=%s: %s", domain, error)
+            if getattr(error, "errno", None) == -2:
+                logger.info("denylist domain has no DNS records now: %s", domain)
+            else:
+                logger.warning("denylist resolve failed for domain=%s: %s", domain, error)
             continue
         for family, _, _, _, sockaddr in addrinfo:
             if family == socket.AF_INET:

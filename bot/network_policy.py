@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 import ipaddress
 import socket
@@ -24,19 +25,26 @@ def parse_cidrs(raw: str) -> list[str]:
     return cidrs
 
 
-def resolve_domains(domains_raw: str) -> list[str]:
+async def resolve_domains(domains_raw: str) -> list[str]:
     resolved: set[str] = set()
-    previous_timeout = socket.getdefaulttimeout()
-    socket.setdefaulttimeout(DENYLIST_DNS_TIMEOUT_SECONDS)
-    try:
-        for domain in _parse_csv(domains_raw):
-            for family, _, _, _, sockaddr in socket.getaddrinfo(domain, 443, type=socket.SOCK_STREAM):
-                if family == socket.AF_INET:
-                    resolved.add(f"{sockaddr[0]}/32")
-                    if len(resolved) >= DENYLIST_MAX_RESOLVED_CIDRS:
-                        return sorted(resolved)
-    finally:
-        socket.setdefaulttimeout(previous_timeout)
+    loop = asyncio.get_running_loop()
+    for domain in _parse_csv(domains_raw):
+        try:
+            addrinfo = await asyncio.wait_for(
+                loop.getaddrinfo(domain, 443, type=socket.SOCK_STREAM),
+                timeout=DENYLIST_DNS_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("denylist resolve timeout for domain=%s", domain)
+            continue
+        except OSError as error:
+            logger.warning("denylist resolve failed for domain=%s: %s", domain, error)
+            continue
+        for family, _, _, _, sockaddr in addrinfo:
+            if family == socket.AF_INET:
+                resolved.add(f"{sockaddr[0]}/32")
+                if len(resolved) >= DENYLIST_MAX_RESOLVED_CIDRS:
+                    return sorted(resolved)
     return sorted(resolved)
 
 
@@ -105,7 +113,7 @@ async def denylist_sync(run_docker) -> None:
     domains = str(await get_setting("EGRESS_DENYLIST_DOMAINS", str) or "")
     cidrs = str(await get_setting("EGRESS_DENYLIST_CIDRS", str) or "")
     try:
-        resolved = resolve_domains(domains)
+        resolved = await resolve_domains(domains)
         cidr_values = parse_cidrs(cidrs)
     except Exception as e:
         await increment_metric("denylist_errors")

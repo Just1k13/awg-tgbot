@@ -8,27 +8,71 @@
 - Снизить риск претензий к VPN-доступу за счёт блокировки доступа к государственным сервисам и связанным доменам через VPN-туннель.
 - Реализуется через `EGRESS_DENYLIST_DOMAINS` + `EGRESS_DENYLIST_MODE=strict`.
 
-## Стартовый список доменов
+## Обновлённый baseline (расширенный)
 
 ```text
 gosuslugi.ru
 www.gosuslugi.ru
 esia.gosuslugi.ru
+pos.gosuslugi.ru
+gosweb.gosuslugi.ru
 госуслуги.рф
-roskomnadzor.gov.ru
+
 rkn.gov.ru
+pd.rkn.gov.ru
+service.rkn.gov.ru
+
 nalog.gov.ru
+www.nalog.gov.ru
+lkfl2.nalog.ru
+
 fssp.gov.ru
+www.fssp.gov.ru
+
 mvd.ru
+www.mvd.ru
+мвд.рф
+
+gibdd.ru
+www.gibdd.ru
+
+sfr.gov.ru
+pfr.gov.ru
+
+rosreestr.gov.ru
+www.rosreestr.gov.ru
+
+goszakaz.gov.ru
+zakupki.gov.ru
+pravo.gov.ru
 ```
+
+## Дополнительно: приложение/сайт MAX
+
+Если вы имели в виду именно сервис **MAX (max.ru)**, добавьте его домены в основной denylist:
+
+```text
+max.ru
+www.max.ru
+```
+
 
 ## Рекомендованный `.env` фрагмент
 
 ```dotenv
 EGRESS_DENYLIST_ENABLED=1
 EGRESS_DENYLIST_MODE=strict
-EGRESS_DENYLIST_DOMAINS=gosuslugi.ru,www.gosuslugi.ru,esia.gosuslugi.ru,госуслуги.рф,roskomnadzor.gov.ru,rkn.gov.ru,nalog.gov.ru,fssp.gov.ru,mvd.ru
+EGRESS_DENYLIST_DOMAINS=gosuslugi.ru,www.gosuslugi.ru,esia.gosuslugi.ru,pos.gosuslugi.ru,gosweb.gosuslugi.ru,госуслуги.рф,rkn.gov.ru,pd.rkn.gov.ru,service.rkn.gov.ru,nalog.gov.ru,www.nalog.gov.ru,lkfl2.nalog.ru,fssp.gov.ru,www.fssp.gov.ru,mvd.ru,www.mvd.ru,мвд.рф,gibdd.ru,www.gibdd.ru,sfr.gov.ru,pfr.gov.ru,rosreestr.gov.ru,www.rosreestr.gov.ru,goszakaz.gov.ru,zakupki.gov.ru,pravo.gov.ru,max.ru,www.max.ru
 ```
+
+## Откуда взяты домены (проверка в интернете)
+
+- Госуслуги / ЕСИА: `gosuslugi.ru`, `esia.gosuslugi.ru`.
+- Роскомнадзор: `rkn.gov.ru`, портал ПДн `pd.rkn.gov.ru`, сервисы `service.rkn.gov.ru`.
+- ФНС: `nalog.gov.ru`.
+
+(Дальше список расширен по официальным доменным зонам гос-сервисов и практической эксплуатации denylist.
+Отдельно добавлен пример для сервиса MAX: `max.ru`.)
 
 ## Операционные правила
 
@@ -37,3 +81,4 @@ EGRESS_DENYLIST_DOMAINS=gosuslugi.ru,www.gosuslugi.ru,esia.gosuslugi.ru,госу
 3. После изменения `.env` запускайте:
    - `sudo awg-tgbot sync-helper-policy`
    - `sudo awg-tgbot status`
+4. Проверяйте метрики denylist в админке/логах после первого sync, чтобы поймать ложные блокировки.

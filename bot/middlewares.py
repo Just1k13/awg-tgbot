@@ -82,6 +82,7 @@ class RateLimitMiddleware(BaseMiddleware):
         self.max_hits = max_hits
         self.max_entries = max_entries
         self._hits: OrderedDict[tuple[int, int, str], deque[float]] = OrderedDict()
+        self._last_notice: OrderedDict[tuple[int, int, str], float] = OrderedDict()
 
     def _is_limited(self, key: tuple[int, int, str], now: float) -> bool:
         bucket = self._hits.get(key)
@@ -135,6 +136,17 @@ class RateLimitMiddleware(BaseMiddleware):
             await self._record_rate_limit_drop(scope)
             if isinstance(event, types.CallbackQuery):
                 await event.answer("Слишком часто. Подождите секунду.")
+            elif isinstance(event, types.Message):
+                now = monotonic()
+                last_notice = self._last_notice.get(key, 0.0)
+                if (now - last_notice) >= 1.5:
+                    self._last_notice[key] = now
+                    if len(self._last_notice) > self.max_entries:
+                        self._last_notice.popitem(last=False)
+                    try:
+                        await event.answer("Слишком часто. Подождите секунду.")
+                    except Exception:
+                        pass
             return None
 
         return await handler(event, data)

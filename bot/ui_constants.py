@@ -52,6 +52,7 @@ CB_BROADCAST_CANCEL = "broadcast_cancel"
 CB_ADMIN_USERS_PAGE_PREFIX = "admin_users_page_"
 CB_ADMIN_MANAGE_USER_PREFIX = "admin_manage_user_"
 CB_ADMIN_ADD_DAYS_PREFIX = "admin_add_days_"
+CB_ADMIN_SET_RATE_PREFIX = "admin_set_rate_"
 CB_ADMIN_REVOKE_PREFIX = "admin_revoke_"
 CB_ADMIN_DELETE_PREFIX = "admin_delete_"
 

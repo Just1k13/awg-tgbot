@@ -21,6 +21,7 @@ from config import (
 )
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone, fetchval,
+    execute,
     get_app_setting,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
     get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_text_override, get_user_meta, list_app_settings,
@@ -43,6 +44,7 @@ from ui_constants import (
     CB_ADMIN_TEXT_RESET_PREFIX, CB_ADMIN_TEXTS, CB_ADMIN_TEXTS_PAGE_PREFIX,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
     CB_ADMIN_USERS_PAGE_PREFIX, CB_ADMIN_MANAGE_USER_PREFIX, CB_ADMIN_ADD_DAYS_PREFIX,
+    CB_ADMIN_SET_RATE_PREFIX,
     CB_ADMIN_REVOKE_PREFIX, CB_ADMIN_DELETE_PREFIX, CB_CONFIRM_CLEAN_ORPHANS,
     CB_CANCEL_CLEAN_ORPHANS, CB_CONFIRM_REVOKE, CB_CANCEL_REVOKE, CB_CONFIRM_DELETE_USER,
     CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE,
@@ -220,6 +222,60 @@ def _all_setting_keys() -> list[str]:
     return sorted(SETTING_DEFAULTS.keys())
 
 
+SETTING_LABELS: dict[str, tuple[str, str]] = {
+    "REFERRAL_ENABLED": ("Рефералка включена", "1 — включена, 0 — выключена."),
+    "REFERRAL_INVITEE_BONUS_DAYS": ("Бонус приглашённому (дни)", "Сколько дней получает новый пользователь после первой оплаты."),
+    "REFERRAL_INVITER_BONUS_DAYS": ("Бонус пригласившему (дни)", "Сколько дней получает пригласивший после первой оплаты приглашённого."),
+    "DEFAULT_KEY_RATE_MBIT": ("Скорость по умолчанию (Мбит/с)", "Лимит скорости для новых ключей."),
+    "QOS_ENABLED": ("Ограничение скорости включено", "1 — лимиты скорости активны."),
+    "QOS_STRICT": ("Строгий режим QoS", "1 — ошибка QoS останавливает операцию; 0 — только warning."),
+    "EGRESS_DENYLIST_ENABLED": ("Блок-лист сайтов включен", "1 — включен denylist исходящего трафика."),
+    "EGRESS_DENYLIST_MODE": ("Режим блок-листа", "strict — ошибки sync критичны; soft — только логируются."),
+    "EGRESS_DENYLIST_DOMAINS": ("Домены в блок-листе", "Список доменов через запятую."),
+    "EGRESS_DENYLIST_CIDRS": ("IP/CIDR в блок-листе", "Список сетей через запятую."),
+    "EGRESS_DENYLIST_REFRESH_MINUTES": ("Интервал обновления block-листа (мин)", "Как часто обновлять denylist в фоне."),
+    "TORRENT_POLICY_TEXT_ENABLED": ("Показывать предупреждение про P2P", "1 — в инструкции отображается блок про policy."),
+    "VPN_SUBNET_PREFIX": ("Префикс VPN подсети", "Обычно 10.8.1."),
+}
+
+TEXT_LABELS: dict[str, tuple[str, str]] = {
+    "start": ("Стартовое сообщение", "Текст после /start."),
+    "buy_menu": ("Экран покупки", "Показывается перед выбором тарифа."),
+    "renew_menu": ("Экран продления", "Показывается при активной подписке."),
+    "profile_screen": ("Экран профиля", "Карточка пользователя и статус подписки."),
+    "configs_menu": ("Экран подключения", "Объяснение, что отправляется vpn:// и .conf."),
+    "configs_empty": ("Нет подключений", "Сообщение, когда у пользователя нет ключей."),
+    "payment_success": ("Оплата: доступ готов", "Статус успешной активации."),
+    "payment_pending": ("Оплата: в обработке", "Статус, когда выдача ещё в процессе."),
+    "payment_error": ("Оплата: ошибка", "Сообщение при проблеме активации."),
+    "referral_screen": ("Экран рефералов", "Ссылка, статистика и правила начисления бонуса."),
+    "support_contact": ("Текст поддержки", "Полный текст раздела поддержки."),
+    "instruction_body": ("Инструкция подключения", "Пошаговый гайд для пользователя."),
+}
+
+
+def _humanize_setting_key(key: str) -> tuple[str, str]:
+    if key in SETTING_LABELS:
+        return SETTING_LABELS[key]
+    return key.replace("_", " ").capitalize(), "Технический параметр."
+
+
+def _humanize_text_key(key: str) -> tuple[str, str]:
+    if key in TEXT_LABELS:
+        return TEXT_LABELS[key]
+    return key.replace("_", " ").capitalize(), "Технический текстовый шаблон."
+
+
+def _compact_setting_title(key: str) -> str:
+    title, _ = _humanize_setting_key(key)
+    return f"{title} · {key}"
+
+
+def _compact_text_title(key: str) -> str:
+    title, _ = _humanize_text_key(key)
+    return f"{title} · {key}"
+
+
 def _value_type_hint(default_value) -> str:
     if isinstance(default_value, int):
         return "int"
@@ -232,9 +288,9 @@ async def _render_texts_list(target_message: types.Message, page: int = 0) -> No
     keys = _all_text_keys()
     chunk, page, total_pages = _chunk_keys(keys, page)
     await target_message.answer(
-        "📝 <b>Тексты</b>\nВыберите ключ для просмотра/редактирования.",
+        "📝 <b>Тексты</b>\nВыберите понятное название. Технический ключ показан после точки.",
         parse_mode="HTML",
-        reply_markup=get_admin_texts_list_kb(chunk, page, total_pages),
+        reply_markup=get_admin_texts_list_kb(chunk, page, total_pages, _compact_text_title),
     )
 
 
@@ -242,19 +298,22 @@ async def _render_settings_list(target_message: types.Message, page: int = 0) ->
     keys = _all_setting_keys()
     chunk, page, total_pages = _chunk_keys(keys, page)
     await target_message.answer(
-        "⚙️ <b>Настройки</b>\nВыберите ключ для просмотра/редактирования.",
+        "⚙️ <b>Настройки</b>\nВыберите понятное название. Технический ключ показан после точки.",
         parse_mode="HTML",
-        reply_markup=get_admin_settings_list_kb(chunk, page, total_pages),
+        reply_markup=get_admin_settings_list_kb(chunk, page, total_pages, _compact_setting_title),
     )
 
 
 async def _render_text_detail(target_message: types.Message, key: str, index: int, page: int) -> None:
     current_value = await get_text_override(key) or TEXT_DEFAULTS.get(key, "")
     default_value = TEXT_DEFAULTS.get(key, "")
+    title, description = _humanize_text_key(key)
     await target_message.answer(
         (
             "📝 <b>Карточка текста</b>\n\n"
-            f"key=<code>{key}</code>\n"
+            f"Название: <b>{escape_html(title)}</b>\n"
+            f"Описание: {escape_html(description)}\n"
+            f"Ключ: <code>{key}</code>\n"
             f"current:\n<blockquote>{escape_html(_truncate_preview(str(current_value)))}</blockquote>\n"
             f"default:\n<blockquote>{escape_html(_truncate_preview(str(default_value), 280))}</blockquote>"
         ),
@@ -267,13 +326,16 @@ async def _render_setting_detail(target_message: types.Message, key: str, index:
     raw_current = await get_app_setting(key)
     default_value = SETTING_DEFAULTS.get(key)
     current_value = raw_current if raw_current is not None else default_value
+    title, description = _humanize_setting_key(key)
     await target_message.answer(
         (
             "⚙️ <b>Карточка настройки</b>\n\n"
-            f"key=<code>{key}</code>\n"
-            f"type=<b>{_value_type_hint(default_value)}</b>\n"
-            f"current=<code>{escape_html(str(current_value))}</code>\n"
-            f"default=<code>{escape_html(str(default_value))}</code>"
+            f"Название: <b>{escape_html(title)}</b>\n"
+            f"Описание: {escape_html(description)}\n"
+            f"Ключ: <code>{key}</code>\n"
+            f"Тип: <b>{_value_type_hint(default_value)}</b>\n"
+            f"Текущее: <code>{escape_html(str(current_value))}</code>\n"
+            f"По умолчанию: <code>{escape_html(str(default_value))}</code>"
         ),
         parse_mode="HTML",
         reply_markup=get_admin_setting_detail_kb(index, page),
@@ -357,6 +419,10 @@ def _user_manage_kb(uid: int, page: int) -> types.InlineKeyboardMarkup:
                 types.InlineKeyboardButton(text="+1 день", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_1_{page}"),
                 types.InlineKeyboardButton(text="+7 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_7_{page}"),
                 types.InlineKeyboardButton(text="+30 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_30_{page}"),
+            ],
+            [
+                types.InlineKeyboardButton(text="🚦 100 Мбит", callback_data=f"{CB_ADMIN_SET_RATE_PREFIX}{uid}_100_{page}"),
+                types.InlineKeyboardButton(text="♾ Без лимита", callback_data=f"{CB_ADMIN_SET_RATE_PREFIX}{uid}_off_{page}"),
             ],
             [
                 types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"{CB_ADMIN_REVOKE_PREFIX}{uid}_{page}"),
@@ -524,7 +590,7 @@ async def admin_text_edit_start(cb: types.CallbackQuery):
         {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
     )
     await cb.message.answer(
-        f"✏️ Отправьте новое значение для <code>{key}</code>.\nДля отмены нажмите кнопку ниже.",
+        f"✏️ Отправьте новое значение для <code>{key}</code> ({_humanize_text_key(key)[0]}).\nДля отмены нажмите кнопку ниже.",
         parse_mode="HTML",
         reply_markup=get_admin_edit_mode_kb(),
     )
@@ -550,7 +616,7 @@ async def admin_setting_edit_start(cb: types.CallbackQuery):
         {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
     )
     await cb.message.answer(
-        f"✏️ Отправьте новое значение для <code>{key}</code>.\nДля отмены нажмите кнопку ниже.",
+        f"✏️ Отправьте новое значение для <code>{key}</code> ({_humanize_setting_key(key)[0]}).\nДля отмены нажмите кнопку ниже.",
         parse_mode="HTML",
         reply_markup=get_admin_edit_mode_kb(),
     )
@@ -725,6 +791,46 @@ async def admin_add_days_btn(cb: types.CallbackQuery):
     except Exception as e:
         logger.exception("Ошибка admin_add_days_btn: %s", e)
         await cb.answer("❌ Не удалось продлить доступ", show_alert=True)
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_SET_RATE_PREFIX))
+async def admin_set_rate_btn(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    try:
+        _, _, _, uid_raw, rate_raw, _page_raw = cb.data.split("_", 5)
+        uid = int(uid_raw)
+        if rate_raw == "off":
+            rate_value = 0
+            rate_label = "без ограничения"
+        else:
+            rate_value = int(rate_raw)
+            if rate_value <= 0:
+                await cb.answer("Некорректный лимит", show_alert=True)
+                return
+            rate_label = f"{rate_value} Мбит/с"
+        await execute(
+            """
+            UPDATE keys
+            SET rate_limit_mbit = ?
+            WHERE user_id = ? AND state IN ('active', 'pending')
+            """,
+            (rate_value, uid),
+        )
+        changed = int((await fetchone("SELECT changes()"))[0])
+        if changed <= 0:
+            await cb.answer("Нет активных ключей", show_alert=True)
+            return
+        await sync_qos_state()
+        await write_audit_log(cb.from_user.id, "set_rate_limit_btn", f"target={uid}; rate_mbit={rate_value}; keys={changed}")
+        await cb.answer(f"✅ Лимит: {rate_label}")
+        await cb.message.answer(
+            f"🚦 Лимит скорости для пользователя <code>{uid}</code>: <b>{rate_label}</b> (ключей: {changed}).",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Ошибка admin_set_rate_btn: %s", e)
+        await cb.answer("❌ Не удалось изменить лимит", show_alert=True)
 
 
 @router.callback_query(F.data.startswith(CB_ADMIN_REVOKE_PREFIX))
@@ -1049,6 +1155,93 @@ async def give_manual(message: types.Message, command: CommandObject):
     except Exception as e:
         logger.exception("Ошибка /give: %s", e)
         await message.answer("❌ Не удалось выдать доступ.")
+
+
+@router.message(Command("set_rate"), IsAdmin())
+async def set_user_rate_limit_cmd(message: types.Message, command: CommandObject):
+    if admin_command_limited("set_rate", message.from_user.id):
+        await message.answer("⏳ Слишком частый вызов /set_rate")
+        return
+    if not command.args:
+        await message.answer(
+            "Формат: <code>/set_rate ID МБИТ|off</code>\n"
+            "Пример: <code>/set_rate 123456789 100</code> или <code>/set_rate 123456789 off</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        uid_raw, rate_raw = command.args.split(maxsplit=1)
+        uid = int(uid_raw)
+        normalized = rate_raw.strip().lower()
+        if normalized in {"off", "none", "unlimited", "nolimit", "безлимит", "без_лимита"}:
+            rate = 0
+            rate_label = "без ограничения"
+        else:
+            rate = int(rate_raw)
+            if rate <= 0:
+                await message.answer("Скорость должна быть больше 0 Мбит/с или используйте <code>off</code> для отключения лимита.", parse_mode="HTML")
+                return
+            if rate > 10000:
+                await message.answer("Слишком большое значение. Укажите реалистичный лимит до 10000 Мбит/с.")
+                return
+            rate_label = f"{rate} Мбит/с"
+        await execute(
+            """
+            UPDATE keys
+            SET rate_limit_mbit = ?
+            WHERE user_id = ? AND state IN ('active', 'pending')
+            """,
+            (rate, uid),
+        )
+        changed = int((await fetchone("SELECT changes()"))[0])
+        if changed <= 0:
+            await message.answer("У пользователя нет активных/ожидающих ключей для применения лимита.")
+            return
+        await sync_qos_state()
+        await write_audit_log(message.from_user.id, "set_rate_limit", f"target={uid}; rate_mbit={rate}; keys={changed}")
+        await message.answer(
+            f"✅ Лимит скорости обновлён: <b>{rate_label}</b> для пользователя <code>{uid}</code> (ключей: {changed}).",
+            parse_mode="HTML",
+        )
+    except ValueError:
+        await message.answer("Ошибка формата. Пример: <code>/set_rate 123456789 100</code> или <code>/set_rate 123456789 off</code>", parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Ошибка /set_rate: %s", e)
+        await message.answer("❌ Не удалось применить лимит скорости.")
+
+
+@router.message(Command("rate"), IsAdmin())
+async def get_user_rate_limit_cmd(message: types.Message, command: CommandObject):
+    if not command.args:
+        await message.answer("Формат: <code>/rate ID</code>", parse_mode="HTML")
+        return
+    try:
+        uid = int(command.args.strip())
+        rows = await fetchall(
+            """
+            SELECT device_num, ip, COALESCE(rate_limit_mbit, 0), state
+            FROM keys
+            WHERE user_id = ?
+            ORDER BY device_num
+            """,
+            (uid,),
+        )
+        if not rows:
+            await message.answer("Ключи пользователя не найдены.")
+            return
+        default_rate = int(await get_setting("DEFAULT_KEY_RATE_MBIT", int) or 100)
+        lines = [f"🚦 <b>Лимиты скорости для user_id={uid}</b>", f"По умолчанию: <b>{default_rate} Мбит/с</b>", ""]
+        for device_num, ip, rate_limit_mbit, state in rows:
+            effective = int(rate_limit_mbit) if int(rate_limit_mbit or 0) > 0 else default_rate
+            lines.append(
+                f"• device {device_num} | ip <code>{ip or '—'}</code> | state={state} | limit=<b>{effective} Мбит/с</b>"
+            )
+        await message.answer("\n".join(lines), parse_mode="HTML")
+    except ValueError:
+        await message.answer("Ошибка формата. Пример: <code>/rate 123456789</code>", parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Ошибка /rate: %s", e)
+        await message.answer("❌ Не удалось получить лимиты скорости.")
 
 
 @router.message(Command("revoke"), IsAdmin())

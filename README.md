@@ -304,6 +304,8 @@ tail -f /var/log/awg-tgbot/bot.log
 /setting_list
 /setting_get KEY
 /setting_set KEY VALUE
+/set_rate ID МБИТ|off
+/rate ID
 /ref_stats
 ```
 
@@ -326,16 +328,19 @@ tail -f /var/log/awg-tgbot/bot.log
 - `/health` — оперативный health-отчёт (jobs, helper failures, QoS/Denylist, rate-limit метрики);
 - `/text_*` — управление редактируемыми пользовательскими текстами;
 - `/setting_*` — управление runtime settings (feature flags/параметры);
+- `/set_rate` — установить лимит скорости (Мбит/с) для ключей пользователя и сразу применить QoS (`off` = без ограничения);
+- `/rate` — показать эффективные лимиты скорости по ключам пользователя;
 - `/ref_stats` — короткий referral summary.
 
 ### QoS / Referrals / Content / Denylist (beta)
 
 - **Per-key QoS**: лимит по умолчанию `100 mbit` на peer IP (через helper-команды `qos-*` + `tc`), configurable через settings/ENV.
   - текущая реализация: practical egress-cap на трафик peer по IP; состояние синка видно в `/health` (`qos_errors`, `qos_last_sync_ok`).
+  - в карточке пользователя есть быстрые пресеты: `100 Мбит` и `Без лимита`.
 - **Referrals**: deep-link `?start=ref_<code>`, бонусы после первой успешно применённой оплаты (invitee +5 / inviter +3 по умолчанию), идемпотентно.
   - бонус начисляется только один раз на invitee (вторая и последующие оплаты invitee бонус не дают).
 - **Editable content/settings**: базовые user-facing тексты и ключевые флаги можно менять из админки (`/text_*`, `/setting_*`) с fallback на defaults.
-- **Generic egress denylist**: оператор управляет списками доменов/CIDR, sync через helper-команды `denylist-*`; список по умолчанию пустой.
+- **Generic egress denylist**: оператор управляет списками доменов/CIDR, sync через helper-команды `denylist-*`; в дефолтах уже есть baseline preset.
   - denylist реально привязан к nft chain/rule и применяется только к трафику VPN-пула (`VPN_SUBNET_PREFIX`).
   - refresh выполняется периодически (`EGRESS_DENYLIST_REFRESH_MINUTES`) и на reconcile.
 - **Важно**: технический torrent blocking **намеренно не реализован**; есть только policy recommendation в пользовательских текстах.

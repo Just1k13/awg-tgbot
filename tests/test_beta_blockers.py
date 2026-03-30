@@ -478,7 +478,7 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         )
         await database.execute("UPDATE provisioning_jobs SET status='needs_repair', next_retry_at=NULL WHERE payment_id='tg_notify'")
 
-        async def fake_process(payment_id, user_id, payload, days):
+        async def fake_process(payment_id, user_id, payload, days, bot=None):
             await database.update_payment_status(payment_id, "applied")
             return True
 
@@ -559,6 +559,38 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first)
         self.assertFalse(second)
 
+    async def test_inviter_gets_notification_after_referral_reward(self):
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(8000)
+        await referrals.capture_referral_start(8001, f"ref_{code}")
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        class DummyBot:
+            def __init__(self):
+                self.sent = []
+
+            async def send_message(self, user_id, text, **kwargs):
+                self.sent.append((user_id, text, kwargs))
+
+        bot = DummyBot()
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            applied = await referrals.apply_referral_rewards_on_first_payment(8001, "pay-note")
+            self.assertTrue(applied)
+            notified = await referrals.notify_inviter_about_referral_reward(bot, 8001)
+        finally:
+            referrals.issue_subscription = original_issue
+
+        self.assertTrue(notified)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(bot.sent[0][0], 8000)
+        self.assertIn("ID: <code>8001</code>", bot.sent[0][1])
+
     async def test_admin_give_path_does_not_trigger_referral_rewards(self):
         import handlers_admin
         import referrals
@@ -586,6 +618,89 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         finally:
             referrals.apply_referral_rewards_on_first_payment = original_apply
         self.assertEqual(called["count"], 0)
+
+    async def test_admin_set_rate_updates_user_keys(self):
+        import handlers_admin
+        import database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (9100, '0', '2026-01-01T00:00:00')")
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
+                VALUES (9100, 1, 'PUB9100=', '', '10.8.1.90', '2026-01-01T00:00:00', 'active')
+                """
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        async def fake_sync():
+            return None
+
+        class DummyMessage:
+            from_user = type("U", (), {"id": 1})()
+            bot = object()
+            answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        msg = DummyMessage()
+        handlers_admin.admin_command_rate_limit.clear()
+        original_sync = handlers_admin.sync_qos_state
+        handlers_admin.sync_qos_state = fake_sync
+        try:
+            await handlers_admin.set_user_rate_limit_cmd(msg, type("C", (), {"args": "9100 55"})())  # type: ignore[arg-type]
+        finally:
+            handlers_admin.sync_qos_state = original_sync
+
+        row = await database.fetchone("SELECT rate_limit_mbit FROM keys WHERE user_id = 9100")
+        self.assertEqual(int(row[0]), 55)
+        self.assertTrue(msg.answers)
+        self.assertIn("55", msg.answers[-1])
+
+    async def test_admin_set_rate_off_disables_limit(self):
+        import handlers_admin
+        import database
+
+        db = await database.open_db()
+        try:
+            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (9200, '0', '2026-01-01T00:00:00')")
+            await db.execute(
+                """
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, rate_limit_mbit)
+                VALUES (9200, 1, 'PUB9200=', '', '10.8.1.91', '2026-01-01T00:00:00', 'active', 100)
+                """
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        async def fake_sync():
+            return None
+
+        class DummyMessage:
+            from_user = type("U", (), {"id": 1})()
+            bot = object()
+            answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        msg = DummyMessage()
+        handlers_admin.admin_command_rate_limit.clear()
+        original_sync = handlers_admin.sync_qos_state
+        handlers_admin.sync_qos_state = fake_sync
+        try:
+            await handlers_admin.set_user_rate_limit_cmd(msg, type("C", (), {"args": "9200 off"})())  # type: ignore[arg-type]
+        finally:
+            handlers_admin.sync_qos_state = original_sync
+
+        row = await database.fetchone("SELECT rate_limit_mbit FROM keys WHERE user_id = 9200")
+        self.assertEqual(int(row[0]), 0)
+        self.assertTrue(any("без ограничения" in answer for answer in msg.answers))
 
     async def test_ref_stats_returns_global_summary(self):
         import handlers_admin

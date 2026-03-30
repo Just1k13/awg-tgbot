@@ -2103,16 +2103,31 @@ print_journal_matches_tty_safe() {
 
 print_service_error_context_tty_safe() {
   local lines="${1:-20}"
-  local raw_logs="" filtered_logs="" meaningful_logs="" fallback_logs="" app_tail=""
+  local raw_logs="" filtered_logs="" meaningful_logs="" fallback_logs="" app_tail="" status_tail=""
 
   if ! service_exists; then
     screen_warn "Сервис $SERVICE_NAME не найден."
     return 0
   fi
 
-  raw_logs="$(journalctl -u "$SERVICE_NAME" -n 400 --no-pager 2>/dev/null || true)"
-  filtered_logs="$(printf '%s\n' "$raw_logs" | grep -Ei 'error|failed|traceback|exception|permission denied' || true)"
-  meaningful_logs="$(printf '%s\n' "$filtered_logs" | grep -Eiv "Failed with result 'exit-code'" || true)"
+  raw_logs="$(journalctl -u "$SERVICE_NAME" -n 2000 --no-pager 2>/dev/null || true)"
+  filtered_logs="$(printf '%s\n' "$raw_logs" | grep -Ei 'error|failed|traceback|exception|permission denied|main process exited|code=exited|status=[0-9]+' || true)"
+  meaningful_logs="$(printf '%s\n' "$filtered_logs" | grep -Eiv "Failed with result[ =]+'?exit-code'?|Scheduled restart job, restart counter is at" || true)"
+
+  if [[ -z "$filtered_logs" ]]; then
+    screen_echo "Явных ошибок сервиса в последних записях journalctl не найдено."
+    fallback_logs="$(printf '%s\n' "$raw_logs" | tail -n "$lines")"
+    if [[ -n "$fallback_logs" ]]; then
+      screen_line
+      screen_echo "Последние строки сервиса:"
+      if has_tty; then
+        printf '%s\n' "$fallback_logs" >&3 2>/dev/null || true
+      else
+        printf '%s\n' "$fallback_logs" 2>/dev/null || true
+      fi
+    fi
+    return 0
+  fi
 
   if [[ -n "$meaningful_logs" ]]; then
     if has_tty; then
@@ -2124,8 +2139,21 @@ print_service_error_context_tty_safe() {
   fi
 
   screen_warn "Найдены только повторы 'Failed with result=exit-code' без причины. Показываю расширенный контекст."
+  status_tail="$(systemctl status "$SERVICE_NAME" -n "$lines" --no-pager 2>/dev/null || true)"
+  if [[ -n "$status_tail" ]]; then
+    screen_line
+    screen_echo "systemctl status (последние строки):"
+    if has_tty; then
+      printf '%s\n' "$status_tail" >&3 2>/dev/null || true
+    else
+      printf '%s\n' "$status_tail" 2>/dev/null || true
+    fi
+  fi
+
   fallback_logs="$(printf '%s\n' "$raw_logs" | tail -n "$lines")"
   if [[ -n "$fallback_logs" ]]; then
+    screen_line
+    screen_echo "Расширенный контекст journalctl:"
     if has_tty; then
       printf '%s\n' "$fallback_logs" >&3 2>/dev/null || true
     else

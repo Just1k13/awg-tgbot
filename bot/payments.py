@@ -43,6 +43,7 @@ from helpers import utc_now_naive
 from keyboards import get_post_payment_kb
 from content_settings import get_text
 from referrals import apply_referral_rewards_on_first_payment
+from texts import get_payment_result_text
 from ui_constants import CB_BUY_30, CB_BUY_7
 
 router = Router()
@@ -230,13 +231,13 @@ async def success_pay(message: types.Message):
             await update_last_provision_status(payment.telegram_payment_charge_id, "ready")
             await mark_ready_notification_sent(payment.telegram_payment_charge_id)
             await message.answer(
-                f"{await get_text('payment_success')}\n{await get_text('payment_next_step')}",
+                await get_payment_result_text("ready"),
                 parse_mode="HTML",
                 reply_markup=get_post_payment_kb(),
             )
         else:
             await message.answer(
-                f"{await get_text('payment_pending')}\n\n{await get_text('payment_pending_followup')}",
+                await get_payment_result_text("pending"),
                 reply_markup=get_post_payment_kb(),
             )
     except Exception as e:
@@ -334,7 +335,7 @@ async def payment_recovery_worker(bot: Bot | None = None) -> int:
                 if bot is not None and await mark_ready_notification_sent(payment_id):
                     await bot.send_message(
                         user_id,
-                        "✅ Доступ готов. Платёж успешно применён в фоне. Откройте «🔑 Подключение».",
+                        await get_text("payment_recovery_ready"),
                     )
         except Exception as e:
             logger.warning("Recovery failed for payment=%s: %s", payment_id, e)

@@ -72,10 +72,12 @@ STATE_BOT_RESIDUAL=0
 STARTUP_STATE_CODE="unknown"
 UPDATE_STATUS="not_applicable"
 UPDATE_REMOTE_SHA=""
+UPDATE_REMOTE_TITLE=""
 UPDATE_LOCAL_SHA=""
 UPDATE_CHECK_TS=0
 UPDATE_CACHE_TTL=15
 UPDATE_CACHE_BRANCH=""
+UPDATE_SAFE_READY=0
 
 print_line() { printf '%s\n' "------------------------------------------------------------"; }
 info() { printf '[*] %s\n' "$*" >&2; }
@@ -394,10 +396,47 @@ cleanup_transient_install_state() {
 
   return 0
 }
+fetch_remote_commit_info() {
+  local payload="" parsed=""
+  payload="$(curl -fsSL "$COMMIT_API_URL" 2>/dev/null || true)"
+  [[ -n "$payload" ]] || return 0
+  parsed="$("$PYTHON_BIN" - "$payload" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+raw = sys.argv[1]
+try:
+    data = json.loads(raw)
+except Exception:
+    raise SystemExit(0)
+
+sha = data.get("sha", "")
+commit = data.get("commit", {})
+message = ""
+if isinstance(commit, dict):
+    message = commit.get("message", "")
+
+if isinstance(sha, str):
+    sha = sha.strip()
+else:
+    sha = ""
+
+if isinstance(message, str):
+    title = message.splitlines()[0].strip()
+else:
+    title = ""
+
+if sha:
+    print(f"{sha}\t{title}")
+PY
+)"
+  printf '%s' "$parsed"
+}
+
 fetch_remote_sha() {
-  local sha=""
-  sha="$(curl -fsSL "$COMMIT_API_URL" 2>/dev/null | grep -m1 '"sha"' | sed -E 's/.*"sha": "([a-f0-9]+)".*/\1/' || true)"
-  printf '%s' "$sha"
+  local info_line=""
+  info_line="$(fetch_remote_commit_info)"
+  printf '%s' "${info_line%%$'\t'*}"
 }
 
 get_local_sha() { [[ -f "$VERSION_FILE" ]] && cat "$VERSION_FILE" || true; }
@@ -820,9 +859,11 @@ detect_install_state() {
 }
 
 refresh_update_status_quiet() {
-  local now_ts=0
+  local now_ts=0 info_line=""
   UPDATE_STATUS="not_applicable"
   UPDATE_LOCAL_SHA="$(get_local_sha)"
+  UPDATE_REMOTE_TITLE=""
+  UPDATE_SAFE_READY=0
 
   if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
     UPDATE_REMOTE_SHA=""
@@ -841,11 +882,18 @@ refresh_update_status_quiet() {
       else
         UPDATE_STATUS="available"
       fi
+      if is_full_sha "${UPDATE_REMOTE_SHA:-}"; then
+        UPDATE_SAFE_READY=1
+      fi
       return 0
     fi
   fi
 
-  UPDATE_REMOTE_SHA="$(fetch_remote_sha)"
+  info_line="$(fetch_remote_commit_info)"
+  UPDATE_REMOTE_SHA="${info_line%%$'\t'*}"
+  if [[ "$info_line" == *$'\t'* ]]; then
+    UPDATE_REMOTE_TITLE="${info_line#*$'\t'}"
+  fi
   UPDATE_CACHE_BRANCH="$REPO_BRANCH"
   UPDATE_CHECK_TS="$now_ts"
 
@@ -855,6 +903,9 @@ refresh_update_status_quiet() {
     UPDATE_STATUS="current"
   else
     UPDATE_STATUS="available"
+  fi
+  if is_full_sha "${UPDATE_REMOTE_SHA:-}"; then
+    UPDATE_SAFE_READY=1
   fi
   return 0
 }
@@ -873,7 +924,7 @@ print_recommended_actions() {
   case "$STARTUP_STATE_CODE" in
     awg_yes_bot_yes)
       echo "• Открой «Статус», чтобы проверить сервис и ветку."
-      echo "• Если доступно обновление — запусти «Обновить»."
+      echo "• Если доступно обновление — запусти «Безопасно обновить (pinned)»."
       echo "• Если есть проблемы — открой «Логи» → «Что не так?»."
       ;;
     awg_yes_bot_no)
@@ -898,13 +949,13 @@ print_update_status_line() {
   case "$UPDATE_STATUS" in
     available)
       echo
-      printf '%s\n' "$(color_red '[!] ДОСТУПНО ОБНОВЛЕНИЕ')"
+      printf '%s\n' "$(color_red '[!] ДОСТУПНО БЕЗОПАСНОЕ ОБНОВЛЕНИЕ (PINNED)')"
       echo "    Локальная версия: ${UPDATE_LOCAL_SHA:0:12}"
       echo "    Новая версия:    ${UPDATE_REMOTE_SHA:0:12}"
-      printf '    %s\n' "$(color_red 'Открой пункт меню: 3) Обновить')"
+      printf '    %s\n' "$(color_red 'Открой пункт меню: 3) Безопасно обновить (pinned)')"
       ;;
     current) echo "Обновление: версия актуальна" ;;
-    unknown) echo "Обновление: не удалось проверить" ;;
+    unknown) echo "Обновление: не удалось подготовить pinned commit" ;;
   esac
   return 0
 }
@@ -935,7 +986,12 @@ print_detailed_startup_summary() {
   print_update_status_line
   if [[ "$STATE_BOT_INSTALLED" == "1" ]]; then
     echo "Локальная версия: ${UPDATE_LOCAL_SHA:-неизвестно}"
-    echo "Remote SHA: ${UPDATE_REMOTE_SHA:-не удалось получить}"
+    echo "Доступный commit: ${UPDATE_REMOTE_SHA:-не удалось получить}"
+    echo "Pinned update готов: $([[ "$UPDATE_SAFE_READY" == "1" ]] && echo 'да' || echo 'нет')"
+    echo "Pinned SHA для update: ${UPDATE_REMOTE_SHA:-недоступен}"
+    if [[ -n "$UPDATE_REMOTE_TITLE" ]]; then
+      echo "Commit title: ${UPDATE_REMOTE_TITLE}"
+    fi
   fi
   print_line
   echo "Состояние: $(startup_state_message)"
@@ -1287,6 +1343,9 @@ stop_service_if_exists() {
 
 show_status() {
   local active_state enabled_state local_sha branch_info env_state env_container env_interface policy_container policy_interface docker_membership
+  local remote_sha safe_ready_text
+  detect_install_state
+  refresh_update_status_quiet
   print_line
   branch_info="$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)"
   [[ -n "$branch_info" ]] || branch_info="$REPO_BRANCH"
@@ -1296,6 +1355,10 @@ show_status() {
   [[ -n "$enabled_state" ]] || enabled_state="not-found"
   local_sha="$(get_local_sha | cut -c1-12)"
   [[ -n "$local_sha" ]] || local_sha="неизвестно"
+  remote_sha="${UPDATE_REMOTE_SHA:0:12}"
+  [[ -n "$remote_sha" ]] || remote_sha="не удалось получить"
+  safe_ready_text="нет"
+  [[ "$UPDATE_SAFE_READY" == "1" ]] && safe_ready_text="да"
   env_state="нет"
   [[ -f "$ENV_FILE" ]] && env_state="есть"
   env_container="$(get_env_value DOCKER_CONTAINER)"
@@ -1312,6 +1375,9 @@ show_status() {
   echo "Автозапуск: ${enabled_state}"
   echo "Ветка: ${branch_info}"
   echo "Локальная версия: ${local_sha}"
+  echo "Доступная версия: ${remote_sha}"
+  echo "Safe update готов: ${safe_ready_text}"
+  echo "Pinned SHA для update: ${UPDATE_REMOTE_SHA:-недоступен}"
   echo "Логи приложения: ${APP_LOG_FILE}"
   echo "Лог установки: ${INSTALL_LOG}"
   if id -u "$BOT_USER" >/dev/null 2>&1 && id -nG "$BOT_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
@@ -1351,15 +1417,23 @@ check_updates() {
   echo "Ветка : ${REPO_BRANCH}"
   echo "Remote: ${UPDATE_REMOTE_SHA:-не удалось получить}"
   echo "Local : ${UPDATE_LOCAL_SHA:-нет локальной версии}"
+  echo "Pinned update готов: $([[ "$UPDATE_SAFE_READY" == "1" ]] && echo 'да' || echo 'нет')"
+  if [[ -n "$UPDATE_REMOTE_TITLE" ]]; then
+    echo "Commit title: ${UPDATE_REMOTE_TITLE}"
+  fi
   case "$UPDATE_STATUS" in
     current)
       ok "Обновления не найдены. Установлена актуальная версия."
       ;;
     available)
-      warn "Доступно обновление. Используй пункт меню «Обновить» или команду: sudo awg-tgbot update"
+      warn "Доступно безопасное обновление по pinned commit. Открой пункт «Безопасно обновить (pinned)»."
+      if [[ "$UPDATE_SAFE_READY" == "1" ]]; then
+        echo "Готовая команда: sudo REPO_UPDATE_REF=${UPDATE_REMOTE_SHA} awg-tgbot update"
+      fi
       ;;
     unknown|*)
-      warn "Не удалось проверить обновления."
+      warn "Не удалось подготовить pinned update автоматически."
+      echo "Для ручного безопасного обновления используй: sudo REPO_UPDATE_REF=<40-hex-sha> awg-tgbot update"
       ;;
   esac
   print_line
@@ -1479,8 +1553,79 @@ relaunch_installer_menu() {
   exec "$target"
 }
 
+print_pinned_update_command() {
+  local sha="${1:-}"
+  if is_full_sha "$sha"; then
+    echo "sudo REPO_UPDATE_REF=${sha} awg-tgbot update"
+  else
+    echo "sudo REPO_UPDATE_REF=<40-hex-sha> awg-tgbot update"
+  fi
+}
+
+menu_choose_update_ref() {
+  local selection="" resolved_ref=""
+  refresh_update_status_quiet
+  screen_line
+  screen_echo "Безопасное обновление (pinned commit)"
+  screen_echo "Текущая ветка: ${REPO_BRANCH}"
+  screen_echo "Текущий commit: ${UPDATE_LOCAL_SHA:-неизвестно}"
+  screen_echo "Доступный commit: ${UPDATE_REMOTE_SHA:-не удалось определить}"
+  if [[ -n "$UPDATE_REMOTE_TITLE" ]]; then
+    screen_echo "Commit title: ${UPDATE_REMOTE_TITLE}"
+  fi
+  screen_line
+
+  if [[ "$UPDATE_STATUS" == "current" ]]; then
+    screen_echo "Уже установлена актуальная версия."
+    screen_echo "Обновление не требуется."
+    screen_line
+    return 1
+  fi
+
+  if [[ "$UPDATE_SAFE_READY" != "1" ]]; then
+    screen_echo "Авто-подготовка pinned update сейчас недоступна."
+    screen_echo "Безопасное обновление возможно только с явным SHA."
+    screen_echo "Ручная команда:"
+    screen_echo "  $(print_pinned_update_command)"
+    screen_line
+    return 1
+  fi
+
+  screen_echo "Обновление будет выполнено ТОЛЬКО до pinned commit:"
+  screen_echo "  ${UPDATE_REMOTE_SHA}"
+  screen_line
+  screen_echo "[1] Обновить безопасно до pinned commit"
+  screen_echo "[2] Показать команду"
+  screen_echo "[0] Назад"
+  screen_line
+  prompt_menu_key "Выбор: " selection
+  case "$selection" in
+    1)
+      resolved_ref="$UPDATE_REMOTE_SHA"
+      info "Получен доступный pinned commit: ${resolved_ref}"
+      info "Пользователь подтвердил safe update из меню."
+      REPO_UPDATE_REF="$resolved_ref"
+      export REPO_UPDATE_REF
+      return 0
+      ;;
+    2)
+      screen_echo "Готовая команда безопасного обновления:"
+      screen_echo "  $(print_pinned_update_command "$UPDATE_REMOTE_SHA")"
+      screen_echo "Технический эквивалент (git):"
+      screen_echo "  cd ${INSTALL_DIR} && git fetch ${REPO_URL}.git ${UPDATE_REMOTE_SHA} && git checkout ${UPDATE_REMOTE_SHA}"
+      info "Пользователь запросил команду ручного safe update."
+      screen_line
+      return 1
+      ;;
+    *)
+      info "Update aborted by user."
+      return 1
+      ;;
+  esac
+}
+
 update_bot() {
-  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret requested_ref local_sha update_backup_dir=""
+  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret requested_ref local_sha update_backup_dir="" previous_sha=""
   detect_install_state
   if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
     warn "Бот не установлен."
@@ -1488,17 +1633,27 @@ update_bot() {
   fi
 
   requested_ref="${REPO_UPDATE_REF:-}"
+  if [[ "$mode" == "menu" ]]; then
+    if ! menu_choose_update_ref; then
+      return 0
+    fi
+    requested_ref="${REPO_UPDATE_REF:-}"
+  fi
+
   if ! is_full_sha "$requested_ref"; then
     print_line
-    warn "Безопасное обновление требует pinned commit SHA."
-    warn "Передай REPO_UPDATE_REF=<40-hex-commit> явно в этой же команде update."
-    warn "Небезопасный update по mutable ветке отключён."
+    warn "Авто-подготовка pinned update недоступна."
+    warn "Безопасное обновление выполняется только по фиксированному commit SHA."
+    warn "Запусти вручную: $(print_pinned_update_command)"
+    warn "Обновление по mutable ветке отключено."
+    info "Safe update unavailable: no pinned ref detected."
     print_line
     return 1
   fi
 
   refresh_update_status_quiet
   local_sha="${UPDATE_LOCAL_SHA:-}"
+  previous_sha="${local_sha:-unknown}"
   if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then
     print_line
     ok "Запрошенный SHA уже установлен (${local_sha:0:12}). Обновление не требуется."
@@ -1508,10 +1663,11 @@ update_bot() {
 
   print_line
   info "Обновление AWG Telegram Bot"
+  info "Pinned ref для обновления: ${requested_ref}"
   if [[ "$UPDATE_STATUS" == "available" ]]; then
-    info "Доступна новая версия. Начинаю обновление..."
+    info "Доступна новая версия. Начинаю безопасное обновление до pinned commit..."
   elif [[ "$UPDATE_STATUS" == "unknown" ]]; then
-    warn "Не удалось заранее проверить обновления. Пытаюсь обновить по текущей ветке..."
+    warn "Метаданные обновления недоступны, но задан явный pinned commit."
   fi
 
   ensure_packages || die "Не удалось обновить системные зависимости."
@@ -1544,6 +1700,13 @@ update_bot() {
   start_service || { rollback_update_backup "$update_backup_dir"; die "Не удалось перезапустить сервис."; }
   [[ -n "$update_backup_dir" ]] && rm -rf "$update_backup_dir"
   ok "Обновление завершено."
+  print_line
+  echo "Итог обновления:"
+  echo "Было: ${previous_sha}"
+  echo "Стало: ${requested_ref}"
+  echo "Статус сервиса: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
+  echo "Следующий шаг: проверь логи в пункте «Логи», если замечены аномалии."
+  print_line
 
   if [[ "$mode" == "menu" ]] && has_tty; then
     info "Перезапускаю awg-tgbot, чтобы загрузить обновлённое меню..."
@@ -2073,7 +2236,7 @@ print_menu_awg_yes_bot_yes() {
   echo "Доступные действия:"
   echo "1) Статус"
   echo "2) Логи"
-  echo "3) Обновить"
+  echo "3) Безопасно обновить (pinned)"
   echo "4) Переустановить"
   echo "5) Удалить"
   echo
@@ -2193,6 +2356,10 @@ main_menu() {
     clear_if_tty
   done
 }
+
+if [[ "${AWG_TGBOT_SOURCE_ONLY:-0}" == "1" ]]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 require_root
 setup_logging

@@ -57,6 +57,16 @@ ADMIN_CONTENT_PAGE_SIZE = 8
 ADMIN_EDIT_TIMEOUT_SECONDS = 600
 
 
+async def _guard_admin_callback(cb: types.CallbackQuery) -> bool:
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return False
+    if not cb.message:
+        await cb.answer("Сообщение недоступно", show_alert=True)
+        return False
+    return True
+
+
 def _cleanup_admin_rate_limit(now) -> None:
     stale = [key for key, dt in admin_command_rate_limit.items() if (now - dt).total_seconds() > 3600]
     for key in stale:
@@ -601,6 +611,8 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_CANCEL_CLEAN_ORPHANS)
 async def cancel_clean_orphans(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans")
     await cb.message.answer("❌ Очистка потерянных peer отменена")
     await cb.answer("Отменено")
@@ -624,6 +636,8 @@ async def admin_users_page(cb: types.CallbackQuery):
         page = int(cb.data.removeprefix(CB_ADMIN_USERS_PAGE_PREFIX))
         await _render_users_page(cb.message, page)
         await cb.answer("Открыто")
+    except ValueError:
+        await cb.answer("Некорректный номер страницы", show_alert=True)
     except Exception as e:
         logger.exception("Ошибка admin_users_page: %s", e)
         await cb.answer("❌ Не удалось открыть страницу", show_alert=True)
@@ -658,6 +672,8 @@ async def admin_manage_user(cb: types.CallbackQuery):
             reply_markup=_user_manage_kb(uid, page),
         )
         await cb.answer("Открыто")
+    except ValueError:
+        await cb.answer("Некорректный user_id", show_alert=True)
     except Exception as e:
         logger.exception("Ошибка admin_manage_user: %s", e)
         await cb.answer("❌ Не удалось открыть карточку пользователя", show_alert=True)
@@ -699,9 +715,13 @@ async def admin_revoke_btn(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    _, _, uid_raw, page_raw = cb.data.split("_", 3)
-    uid = int(uid_raw)
-    page = int(page_raw)
+    try:
+        _, _, uid_raw, page_raw = cb.data.split("_", 3)
+        uid = int(uid_raw)
+        page = int(page_raw)
+    except ValueError:
+        await cb.answer("Некорректные параметры действия", show_alert=True)
+        return
     await set_pending_admin_action(ADMIN_ID, "revoke", {"action": "revoke", "target": uid, "page": page})
     await cb.message.answer(
         (
@@ -743,6 +763,8 @@ async def confirm_revoke(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_CANCEL_REVOKE)
 async def cancel_revoke(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
     await clear_pending_admin_action(ADMIN_ID, "revoke")
     await cb.message.answer("❌ Отключение отменено")
     await cb.answer("Отменено")
@@ -753,9 +775,13 @@ async def admin_del_user(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
-    _, _, uid_raw, page_raw = cb.data.split("_", 3)
-    uid = int(uid_raw)
-    page = int(page_raw)
+    try:
+        _, _, uid_raw, page_raw = cb.data.split("_", 3)
+        uid = int(uid_raw)
+        page = int(page_raw)
+    except ValueError:
+        await cb.answer("Некорректные параметры действия", show_alert=True)
+        return
     await set_pending_admin_action(ADMIN_ID, "delete_user", {"action": "delete_user", "target": uid, "page": page})
     await cb.message.answer(
         (
@@ -797,6 +823,8 @@ async def confirm_delete_user(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_CANCEL_DELETE_USER)
 async def cancel_delete_user(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
     await clear_pending_admin_action(ADMIN_ID, "delete_user")
     await cb.message.answer("❌ Удаление отменено")
     await cb.answer("Отменено")
@@ -1185,6 +1213,8 @@ async def confirm_clean_orphans_force(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_CANCEL_CLEAN_ORPHANS_FORCE)
 async def cancel_clean_orphans_force(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force")
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force_word")
     await cb.message.answer("❌ Force-очистка потерянных peer отменена")

@@ -44,7 +44,7 @@ from database import (
 )
 from handlers_admin import router as admin_router
 from handlers_user import router as user_router
-from middlewares import DuplicateCallbackGuardMiddleware, DuplicateMessageGuardMiddleware
+from middlewares import DuplicateCallbackGuardMiddleware, DuplicateMessageGuardMiddleware, RateLimitMiddleware
 from network_policy import denylist_should_refresh, denylist_sync
 from payments import payment_recovery_worker
 from payments import router as payments_router
@@ -70,6 +70,8 @@ dp = Dispatcher()
 fallback_router = Router()
 
 
+dp.message.middleware(RateLimitMiddleware(ttl_seconds=2.0, max_hits=6))
+dp.callback_query.middleware(RateLimitMiddleware(ttl_seconds=2.0, max_hits=8))
 dp.message.middleware(DuplicateMessageGuardMiddleware())
 dp.callback_query.middleware(DuplicateCallbackGuardMiddleware())
 

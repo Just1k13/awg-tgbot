@@ -2034,6 +2034,32 @@ print_file_tail_tty_safe() {
   fi
 }
 
+get_service_active_since() {
+  if ! service_exists; then
+    return 0
+  fi
+  local active="" started_at=""
+  active="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
+  if [[ "$active" != "active" ]]; then
+    return 0
+  fi
+  started_at="$(systemctl show -p ActiveEnterTimestamp --value "$SERVICE_NAME" 2>/dev/null | tr -d '\r' || true)"
+  if [[ -n "$started_at" && "$started_at" != "n/a" ]]; then
+    printf '%s' "$started_at"
+  fi
+}
+
+read_service_journal() {
+  local limit="${1:-400}"
+  local since=""
+  since="$(get_service_active_since)"
+  if [[ -n "$since" ]]; then
+    journalctl -u "$SERVICE_NAME" --since "$since" -n "$limit" --no-pager 2>/dev/null || true
+  else
+    journalctl -u "$SERVICE_NAME" -n "$limit" --no-pager 2>/dev/null || true
+  fi
+}
+
 
 print_journal_tail_tty_safe() {
   local lines="${1:-50}"
@@ -2062,11 +2088,13 @@ print_journal_tail_tty_safe() {
 
 print_journal_matches_tty_safe() {
   local pattern="$1" lines="${2:-20}"
+  local raw_logs=""
   if service_exists; then
+    raw_logs="$(read_service_journal 400)"
     if has_tty; then
-      journalctl -u "$SERVICE_NAME" -n 200 --no-pager | grep -Ei "$pattern" | tail -n "$lines" >&3 2>/dev/null || true
+      printf '%s\n' "$raw_logs" | grep -Ei "$pattern" | tail -n "$lines" >&3 2>/dev/null || true
     else
-      journalctl -u "$SERVICE_NAME" -n 200 --no-pager | grep -Ei "$pattern" | tail -n "$lines" 2>/dev/null || true
+      printf '%s\n' "$raw_logs" | grep -Ei "$pattern" | tail -n "$lines" 2>/dev/null || true
     fi
   else
     screen_warn "Сервис $SERVICE_NAME не найден."

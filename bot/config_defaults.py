@@ -52,7 +52,7 @@ DEFAULT_ENV: dict[str, str] = {
         'gosuslugi.ru,www.gosuslugi.ru,esia.gosuslugi.ru,pos.gosuslugi.ru,gosweb.gosuslugi.ru,'
         'госуслуги.рф,rkn.gov.ru,pd.rkn.gov.ru,service.rkn.gov.ru,nalog.gov.ru,www.nalog.gov.ru,'
         'lkfl2.nalog.ru,fssp.gov.ru,www.fssp.gov.ru,mvd.ru,www.mvd.ru,мвд.рф,gibdd.ru,www.gibdd.ru,'
-        'sfr.gov.ru,pfr.gov.ru,rosreestr.gov.ru,www.rosreestr.gov.ru,zakupki.gov.ru,'
+        'sfr.gov.ru,pfr.gov.ru,rosreestr.gov.ru,www.rosreestr.gov.ru,goszakaz.gov.ru,zakupki.gov.ru,'
         'pravo.gov.ru,max.ru,www.max.ru'
     ),
     'EGRESS_DENYLIST_CIDRS': '',

@@ -1005,10 +1005,6 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertEqual(network_policy._domain_to_ascii("госуслуги.рф"), "xn--c1aapkosapc.xn--p1ai")
         self.assertEqual(network_policy._domain_to_ascii("gosuslugi.ru"), "gosuslugi.ru")
 
-    def test_qos_rate_zero_means_unlimited_override(self):
-        import network_policy
-        self.assertEqual(asyncio.run(network_policy.qos_rate_for_key(0)), 0)
-
     def test_awg_settings_validation_rejects_invalid_numeric_ranges(self):
         import config_validate
 

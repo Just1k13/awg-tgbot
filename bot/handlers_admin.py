@@ -18,14 +18,6 @@ from config import (
     BACKUP_SECURE_MODE,
     logger,
 )
-from config import (
-    ADMIN_COMMAND_COOLDOWN_SECONDS,
-    ADMIN_ID,
-    BACKUP_ALLOW_INSECURE_SEND,
-    BACKUP_ENCRYPTION_KEY,
-    BACKUP_SECURE_MODE,
-    logger,
-)
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone,
     get_app_setting,
@@ -240,7 +232,10 @@ async def build_ref_stats_text() -> str:
     stats = await get_referral_admin_stats()
     recent = "\n".join([f"• invitee={r[0]} inviter={r[1]} pay={r[2]}" for r in stats["recent"]]) or "—"
     top = "\n".join([f"• inviter={row[0]} rewards={row[1]}" for row in stats["top"]]) or "—"
-    total_bonus_days = sum((int(row[1]) for row in stats["top"]), 0)
+    total_bonus_row = await fetchone(
+        "SELECT COALESCE(SUM(invitee_bonus_days + inviter_bonus_days), 0) FROM referral_rewards"
+    )
+    total_bonus_days = int(total_bonus_row[0]) if total_bonus_row else 0
     return (
         "🎁 <b>Referral admin summary</b>\n\n"
         f"pending=<b>{stats['pending']}</b>\n"

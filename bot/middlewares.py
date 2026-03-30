@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
@@ -11,14 +12,40 @@ from config import logger
 Handler = Callable[[Any, dict[str, Any]], Awaitable[Any]]
 
 
+class _TTLIdentityCache:
+    """Small bounded TTL cache for duplicate-suppression identities."""
+
+    def __init__(self, ttl_seconds: float, max_entries: int = 4096) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.max_entries = max_entries
+        self._store: OrderedDict[tuple[int, int, str], float] = OrderedDict()
+
+    def is_duplicate(self, key: tuple[int, int, str], now: float) -> bool:
+        self._evict_expired(now)
+        last_seen = self._store.get(key)
+        self._store[key] = now
+        self._store.move_to_end(key)
+        if len(self._store) > self.max_entries:
+            self._store.popitem(last=False)
+
+        return last_seen is not None and (now - last_seen) < self.ttl_seconds
+
+    def _evict_expired(self, now: float) -> None:
+        cutoff = now - self.ttl_seconds
+        while self._store:
+            oldest_key = next(iter(self._store))
+            if self._store[oldest_key] >= cutoff:
+                break
+            self._store.popitem(last=False)
+
+
 class _BaseDuplicateGuardMiddleware(BaseMiddleware):
-    """Drops repeated updates with same payload in a small time window."""
+    """Drops repeated updates with same payload in a bounded time window."""
 
     event_name: str
 
-    def __init__(self, ttl_seconds: float = 1.5) -> None:
-        self.ttl_seconds = ttl_seconds
-        self._seen: dict[tuple[int, int, str], float] = {}
+    def __init__(self, ttl_seconds: float = 1.5, max_entries: int = 4096) -> None:
+        self._cache = _TTLIdentityCache(ttl_seconds=ttl_seconds, max_entries=max_entries)
 
     def _extract_identity(self, event: Any) -> tuple[int, int, str] | None:
         raise NotImplementedError
@@ -31,14 +58,7 @@ class _BaseDuplicateGuardMiddleware(BaseMiddleware):
         if identity is None:
             return await handler(event, data)
 
-        now = monotonic()
-        stale_keys = [key for key, ts in self._seen.items() if now - ts > self.ttl_seconds]
-        for key in stale_keys:
-            self._seen.pop(key, None)
-
-        last_seen = self._seen.get(identity)
-        self._seen[identity] = now
-        if last_seen is not None and (now - last_seen) < self.ttl_seconds:
+        if self._cache.is_duplicate(identity, monotonic()):
             chat_id, user_id, payload = identity
             logger.info(
                 "Подавлен дубль %s: chat=%s user=%s payload=%r",

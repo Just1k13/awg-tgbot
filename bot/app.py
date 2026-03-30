@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.exceptions import TelegramUnauthorizedError
@@ -37,6 +38,7 @@ from database import (
     db_health_info,
     ensure_db_ready,
     get_broadcast_recipients,
+    get_shared_db,
     update_broadcast_job_progress,
     write_audit_log,
 )
@@ -48,6 +50,21 @@ from payments import payment_recovery_worker
 from payments import router as payments_router
 from ui_constants import is_admin_callback_data
 from workers import WorkerPool, WorkerSpec
+
+
+@dataclass(frozen=True)
+class RuntimeSettings:
+    cleanup_interval_seconds: int
+    reconciliation_interval_seconds: int
+    broadcast_batch_delay_seconds: float
+    broadcast_batch_size: int
+
+
+@dataclass(frozen=True)
+class RuntimeDeps:
+    bot: Bot
+    settings: RuntimeSettings
+
 
 dp = Dispatcher()
 fallback_router = Router()
@@ -71,7 +88,7 @@ dp.include_router(user_router)
 dp.include_router(fallback_router)
 
 
-async def process_one_broadcast_job(bot: Bot) -> bool:
+async def process_one_broadcast_job(deps: RuntimeDeps) -> bool:
     claimed = await claim_next_broadcast_job()
     if not claimed:
         return False
@@ -79,7 +96,7 @@ async def process_one_broadcast_job(bot: Bot) -> bool:
     job_id, admin_id, text, total = claimed
     cursor = 0
     while True:
-        recipients = await get_broadcast_recipients(job_id, cursor, BROADCAST_BATCH_SIZE)
+        recipients = await get_broadcast_recipients(job_id, cursor, deps.settings.broadcast_batch_size)
         if not recipients:
             break
 
@@ -87,7 +104,7 @@ async def process_one_broadcast_job(bot: Bot) -> bool:
         batch_failed = 0
         for uid in recipients:
             try:
-                await bot.send_message(uid, text, disable_web_page_preview=True)
+                await deps.bot.send_message(uid, text, disable_web_page_preview=True)
                 batch_delivered += 1
             except Exception as send_error:
                 batch_failed += 1
@@ -95,7 +112,7 @@ async def process_one_broadcast_job(bot: Bot) -> bool:
 
         cursor += len(recipients)
         await update_broadcast_job_progress(job_id, batch_delivered, batch_failed, cursor)
-        await asyncio.sleep(BROADCAST_BATCH_DELAY_SECONDS)
+        await asyncio.sleep(deps.settings.broadcast_batch_delay_seconds)
 
     _, done_delivered, done_failed = await complete_broadcast_job(job_id, "finished")
     await write_audit_log(
@@ -103,7 +120,7 @@ async def process_one_broadcast_job(bot: Bot) -> bool:
         "broadcast",
         f"job_id={job_id}; total={total}; delivered={done_delivered}; failed={done_failed}",
     )
-    await bot.send_message(
+    await deps.bot.send_message(
         admin_id,
         (
             "📢 <b>Рассылка завершена</b>\n\n"
@@ -116,48 +133,64 @@ async def process_one_broadcast_job(bot: Bot) -> bool:
     return True
 
 
-async def _payments_worker(bot: Bot) -> None:
-    while True:
-        try:
-            repaired = await payment_recovery_worker(bot)
-            if repaired:
-                logger.info("Payment recovery: успешно обработано %s зависших платежей", repaired)
-        except Exception as error:
-            logger.exception("Payment recovery worker error: %s", error)
-        await asyncio.sleep(15)
+async def _payments_worker(deps: RuntimeDeps) -> None:
+    try:
+        while True:
+            try:
+                repaired = await payment_recovery_worker(deps.bot)
+                if repaired:
+                    logger.info("Payment recovery: успешно обработано %s зависших платежей", repaired)
+            except Exception as error:
+                logger.exception("Payment recovery worker error: %s", error)
+            await asyncio.sleep(15)
+    except asyncio.CancelledError:
+        logger.info("Payment recovery worker cancelled")
+        raise
 
 
-async def _reconciliation_worker() -> None:
-    while True:
-        try:
-            stats = await reconcile_pending_awg_state()
-            if any(stats.values()):
-                logger.info("Reconciliation stats: %s", stats)
-        except Exception as error:
-            logger.exception("Reconciliation worker error: %s", error)
-        await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
+async def _reconciliation_worker(deps: RuntimeDeps) -> None:
+    try:
+        while True:
+            try:
+                stats = await reconcile_pending_awg_state()
+                if any(stats.values()):
+                    logger.info("Reconciliation stats: %s", stats)
+            except Exception as error:
+                logger.exception("Reconciliation worker error: %s", error)
+            await asyncio.sleep(deps.settings.reconciliation_interval_seconds)
+    except asyncio.CancelledError:
+        logger.info("Reconciliation worker cancelled")
+        raise
 
 
-async def _broadcast_worker(bot: Bot) -> None:
-    while True:
-        try:
-            processed = await process_one_broadcast_job(bot)
-            if not processed:
-                await asyncio.sleep(1)
-                continue
-        except Exception as error:
-            logger.exception("Broadcast worker error: %s", error)
-            await asyncio.sleep(2)
+async def _broadcast_worker(deps: RuntimeDeps) -> None:
+    try:
+        while True:
+            try:
+                processed = await process_one_broadcast_job(deps)
+                if not processed:
+                    await asyncio.sleep(1)
+                    continue
+            except Exception as error:
+                logger.exception("Broadcast worker error: %s", error)
+                await asyncio.sleep(2)
+    except asyncio.CancelledError:
+        logger.info("Broadcast worker cancelled")
+        raise
 
 
 async def _denylist_refresh_worker() -> None:
-    while True:
-        try:
-            if await denylist_should_refresh():
-                await denylist_sync(run_docker)
-        except Exception as error:
-            logger.exception("Denylist refresh worker error: %s", error)
-        await asyncio.sleep(60)
+    try:
+        while True:
+            try:
+                if await denylist_should_refresh():
+                    await denylist_sync(run_docker)
+            except Exception as error:
+                logger.exception("Denylist refresh worker error: %s", error)
+            await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        logger.info("Denylist refresh worker cancelled")
+        raise
 
 
 async def _startup_checks(bot: Bot) -> None:
@@ -172,6 +205,7 @@ async def _startup_checks(bot: Bot) -> None:
         raise RuntimeError("Неверный API_TOKEN") from error
 
     await ensure_db_ready()
+    await get_shared_db()
 
     try:
         marked_pending = await cleanup_stale_pending_keys(PENDING_KEY_TTL_SECONDS)
@@ -221,16 +255,28 @@ async def _startup_checks(bot: Bot) -> None:
 
 async def main() -> None:
     bot = Bot(token=API_TOKEN)
+    deps = RuntimeDeps(
+        bot=bot,
+        settings=RuntimeSettings(
+            cleanup_interval_seconds=CLEANUP_INTERVAL_SECONDS,
+            reconciliation_interval_seconds=RECONCILIATION_INTERVAL_SECONDS,
+            broadcast_batch_delay_seconds=BROADCAST_BATCH_DELAY_SECONDS,
+            broadcast_batch_size=BROADCAST_BATCH_SIZE,
+        ),
+    )
     worker_pool = WorkerPool()
 
     try:
         await _startup_checks(bot)
         worker_pool.start(
             [
-                WorkerSpec("expired_subscriptions", lambda: expired_subscriptions_worker(CLEANUP_INTERVAL_SECONDS)),
-                WorkerSpec("payment_recovery", lambda: _payments_worker(bot)),
-                WorkerSpec("reconciliation", _reconciliation_worker),
-                WorkerSpec("broadcast", lambda: _broadcast_worker(bot)),
+                WorkerSpec(
+                    "expired_subscriptions",
+                    lambda: expired_subscriptions_worker(deps.settings.cleanup_interval_seconds),
+                ),
+                WorkerSpec("payment_recovery", lambda: _payments_worker(deps)),
+                WorkerSpec("reconciliation", lambda: _reconciliation_worker(deps)),
+                WorkerSpec("broadcast", lambda: _broadcast_worker(deps)),
                 WorkerSpec("denylist_refresh", _denylist_refresh_worker),
             ]
         )

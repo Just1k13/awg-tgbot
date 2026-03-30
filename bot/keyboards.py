@@ -53,11 +53,15 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
 
 
 def get_instruction_inline_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[_guide_row()])
+    return _single_button_kb(_guide_row())
 
 
 def _guide_row() -> list[InlineKeyboardButton]:
     return [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)]
+
+
+def _single_button_kb(row: list[InlineKeyboardButton]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 def get_configs_devices_kb(configs: list[tuple[int, int, str, str]]) -> InlineKeyboardMarkup:

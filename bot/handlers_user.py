@@ -22,7 +22,11 @@ from keyboards import (
     get_main_menu,
     get_profile_inline_kb,
 )
-from texts import get_instruction_text
+from texts import (
+    get_activation_status_text,
+    get_instruction_with_policy_text,
+    get_support_full_text,
+)
 from ui_constants import (
     BTN_BUY,
     BTN_CONFIGS,
@@ -37,7 +41,7 @@ from ui_constants import (
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
 )
-from content_settings import get_text, get_setting
+from content_settings import get_text
 from referrals import capture_referral_start, get_referral_screen_data
 
 router = Router()
@@ -156,7 +160,7 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     try:
         key_id = int(cb.data.removeprefix(CB_CONFIG_DEVICE_PREFIX))
     except ValueError:
-        await cb.answer("Некорректный выбор устройства", show_alert=True)
+        await cb.answer(await get_text("config_invalid_device"), show_alert=True)
         return
 
     selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
@@ -188,7 +192,7 @@ async def send_selected_device_conf(cb: types.CallbackQuery):
     try:
         key_id = int(cb.data.removeprefix(CB_CONFIG_CONF_PREFIX))
     except ValueError:
-        await cb.answer("Некорректный запрос .conf", show_alert=True)
+        await cb.answer(await get_text("config_invalid_conf_request"), show_alert=True)
         return
 
     selected = await _find_user_config_by_key_id(cb.from_user.id, key_id)
@@ -227,17 +231,14 @@ async def open_configs_from_profile(cb: types.CallbackQuery):
         maybe_set_support_username(cb.from_user.username)
     await cb.answer()
     if not cb.message:
-        await cb.answer("Сообщение недоступно", show_alert=True)
+        await cb.answer(await get_text("callback_message_unavailable"), show_alert=True)
         return
     await _send_configs_menu(cb.message, cb.from_user)
 
 
 @router.message(F.text == BTN_GUIDE)
 async def guide(message: types.Message):
-    extra = ""
-    if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
-        extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
-    await message.answer(await get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer(await get_instruction_with_policy_text(), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(F.text == BTN_SUPPORT)
@@ -245,12 +246,7 @@ async def support(message: types.Message):
     support_username = get_support_username()
     if not support_username:
         logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
-        await message.answer(await get_text("support_unavailable"))
-        return
-    await message.answer(
-        await get_text("support_contact", support_username=escape_html(support_username)),
-        parse_mode="HTML",
-    )
+    await message.answer(await get_support_full_text(), parse_mode="HTML")
 
 
 @router.callback_query(F.data == CB_CHECK_ACTIVATION_STATUS)
@@ -261,13 +257,7 @@ async def check_activation_status(cb: types.CallbackQuery):
         await cb.message.answer(await get_text("activation_status_no_payments"))
         return
     status = payment_summary["last_provision_status"] or payment_summary["status"]
-    if status == "ready":
-        await cb.message.answer(await get_text("activation_status_ready"))
-        return
-    if status in {"provisioning", "payment_received"}:
-        await cb.message.answer(await get_text("activation_status_pending"))
-        return
-    await cb.message.answer(await get_text("activation_status_delayed"))
+    await cb.message.answer(await get_activation_status_text(status))
 
 
 @router.message(F.text == BTN_BUY)
@@ -292,7 +282,7 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
     await ensure_user_exists(cb.from_user.id, cb.from_user.username, cb.from_user.first_name)
     await cb.answer()
     if not cb.message:
-        await cb.answer("Сообщение недоступно", show_alert=True)
+        await cb.answer(await get_text("callback_message_unavailable"), show_alert=True)
         return
     await _send_buy_menu(cb.message, cb.from_user.id)
 
@@ -301,10 +291,7 @@ async def show_buy_menu_callback(cb: types.CallbackQuery):
 async def show_instruction_callback(cb: types.CallbackQuery):
     await cb.answer()
     if cb.message:
-        extra = ""
-        if int(await get_setting("TORRENT_POLICY_TEXT_ENABLED", int) or 0) == 1:
-            extra = f"\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
-        await cb.message.answer(await get_instruction_text() + extra, parse_mode="HTML", disable_web_page_preview=True)
+        await cb.message.answer(await get_instruction_with_policy_text(), parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message()

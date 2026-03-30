@@ -45,6 +45,7 @@ from payments import payment_recovery_worker
 from network_policy import denylist_should_refresh
 from awg_backend import run_docker
 from network_policy import denylist_sync
+from ui_constants import is_admin_callback_data
 
 dp = Dispatcher()
 bg_worker_task: asyncio.Task | None = None
@@ -123,6 +124,9 @@ dp.callback_query.middleware(DuplicateCallbackGuardMiddleware())
 
 @fallback_router.callback_query()
 async def fallback_callback(cb: types.CallbackQuery):
+    if is_admin_callback_data(cb.data):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
     await cb.answer(await get_text("unknown_callback_action"))
 
 

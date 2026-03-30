@@ -19,7 +19,7 @@ from config import (
     logger,
 )
 from database import (
-    clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone,
+    clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone, fetchval,
     get_app_setting,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
     get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_text_override, get_user_meta, list_app_settings,
@@ -41,6 +41,10 @@ from ui_constants import (
     CB_ADMIN_SETTINGS_PAGE_PREFIX, CB_ADMIN_STATS, CB_ADMIN_SYNC, CB_ADMIN_TEXT_EDIT_PREFIX, CB_ADMIN_TEXT_KEY_PREFIX,
     CB_ADMIN_TEXT_RESET_PREFIX, CB_ADMIN_TEXTS, CB_ADMIN_TEXTS_PAGE_PREFIX,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
+    CB_ADMIN_USERS_PAGE_PREFIX, CB_ADMIN_MANAGE_USER_PREFIX, CB_ADMIN_ADD_DAYS_PREFIX,
+    CB_ADMIN_REVOKE_PREFIX, CB_ADMIN_DELETE_PREFIX, CB_CONFIRM_CLEAN_ORPHANS,
+    CB_CANCEL_CLEAN_ORPHANS, CB_CONFIRM_REVOKE, CB_CANCEL_REVOKE, CB_CONFIRM_DELETE_USER,
+    CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE,
 )
 from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
 from network_policy import denylist_sync, policy_metrics
@@ -121,16 +125,14 @@ async def build_awg_sync_text() -> str:
 
 
 async def build_stats_text() -> str:
-    total_users = (await fetchone("SELECT COUNT(*) FROM users"))[0]
-    total_with_sub = (await fetchone("SELECT COUNT(*) FROM users WHERE sub_until != '0'"))[0]
-    active_users = (await fetchone("SELECT COUNT(*) FROM users WHERE sub_until > ?", (utc_now_naive().isoformat(),)))[0]
-    total_keys = (await fetchone("SELECT COUNT(*) FROM keys"))[0]
-    new_24h = (
-        await fetchone(
-            "SELECT COUNT(*) FROM users WHERE created_at >= ?",
-            ((utc_now_naive() - timedelta(days=1)).isoformat(),),
-        )
-    )[0]
+    total_users = await fetchval("SELECT COUNT(*) FROM users")
+    total_with_sub = await fetchval("SELECT COUNT(*) FROM users WHERE sub_until != '0'")
+    active_users = await fetchval("SELECT COUNT(*) FROM users WHERE sub_until > ?", (utc_now_naive().isoformat(),))
+    total_keys = await fetchval("SELECT COUNT(*) FROM keys")
+    new_24h = await fetchval(
+        "SELECT COUNT(*) FROM users WHERE created_at >= ?",
+        ((utc_now_naive() - timedelta(days=1)).isoformat(),),
+    )
     free_slots = await count_free_ip_slots()
     orphans = await get_orphan_awg_peers()
     return (
@@ -243,10 +245,9 @@ async def build_ref_stats_text() -> str:
     stats = await get_referral_admin_stats()
     recent = "\n".join([f"• invitee={r[0]} inviter={r[1]} pay={r[2]}" for r in stats["recent"]]) or "—"
     top = "\n".join([f"• inviter={row[0]} rewards={row[1]}" for row in stats["top"]]) or "—"
-    total_bonus_row = await fetchone(
+    total_bonus_days = int(await fetchval(
         "SELECT COALESCE(SUM(invitee_bonus_days + inviter_bonus_days), 0) FROM referral_rewards"
-    )
-    total_bonus_days = int(total_bonus_row[0]) if total_bonus_row else 0
+    ))
     return (
         "🎁 <b>Referral admin summary</b>\n\n"
         f"pending=<b>{stats['pending']}</b>\n"
@@ -289,15 +290,15 @@ def _users_page_kb(rows: list[tuple[int, str]], page: int, total_pages: int) -> 
     keyboard: list[list[types.InlineKeyboardButton]] = []
     for uid, label in rows:
         keyboard.append([
-            types.InlineKeyboardButton(text=f"👤 {label}", callback_data=f"admin_manage_user_{uid}_{page}"),
+            types.InlineKeyboardButton(text=f"👤 {label}", callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_{page}"),
         ])
 
     nav_row: list[types.InlineKeyboardButton] = []
     if page > 0:
-        nav_row.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_page_{page - 1}"))
+        nav_row.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page - 1}"))
     nav_row.append(types.InlineKeyboardButton(text=f"📄 {page + 1}/{max(total_pages, 1)}", callback_data="noop"))
     if page + 1 < total_pages:
-        nav_row.append(types.InlineKeyboardButton(text="➡️ Далее", callback_data=f"admin_users_page_{page + 1}"))
+        nav_row.append(types.InlineKeyboardButton(text="➡️ Далее", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page + 1}"))
     keyboard.append(nav_row)
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -306,15 +307,15 @@ def _user_manage_kb(uid: int, page: int) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                types.InlineKeyboardButton(text="+1 день", callback_data=f"admin_add_days_{uid}_1_{page}"),
-                types.InlineKeyboardButton(text="+7 дней", callback_data=f"admin_add_days_{uid}_7_{page}"),
-                types.InlineKeyboardButton(text="+30 дней", callback_data=f"admin_add_days_{uid}_30_{page}"),
+                types.InlineKeyboardButton(text="+1 день", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_1_{page}"),
+                types.InlineKeyboardButton(text="+7 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_7_{page}"),
+                types.InlineKeyboardButton(text="+30 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_30_{page}"),
             ],
             [
-                types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"admin_revoke_{uid}_{page}"),
-                types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin_delete_{uid}_{page}"),
+                types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"{CB_ADMIN_REVOKE_PREFIX}{uid}_{page}"),
+                types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CB_ADMIN_DELETE_PREFIX}{uid}_{page}"),
             ],
-            [types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"admin_users_page_{page}")],
+            [types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")],
         ]
     )
 
@@ -574,7 +575,7 @@ async def admin_clean_orphans(cb: types.CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data == "confirm_clean_orphans")
+@router.callback_query(F.data == CB_CONFIRM_CLEAN_ORPHANS)
 async def confirm_clean_orphans(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -598,7 +599,7 @@ async def confirm_clean_orphans(cb: types.CallbackQuery):
         await cb.answer(str(e), show_alert=True)
 
 
-@router.callback_query(F.data == "cancel_clean_orphans")
+@router.callback_query(F.data == CB_CANCEL_CLEAN_ORPHANS)
 async def cancel_clean_orphans(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans")
     await cb.message.answer("❌ Очистка потерянных peer отменена")
@@ -614,13 +615,13 @@ async def admin_list_all(cb: types.CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("admin_users_page_"))
+@router.callback_query(F.data.startswith(CB_ADMIN_USERS_PAGE_PREFIX))
 async def admin_users_page(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return
     try:
-        page = int(cb.data.removeprefix("admin_users_page_"))
+        page = int(cb.data.removeprefix(CB_ADMIN_USERS_PAGE_PREFIX))
         await _render_users_page(cb.message, page)
         await cb.answer("Открыто")
     except Exception as e:
@@ -628,7 +629,7 @@ async def admin_users_page(cb: types.CallbackQuery):
         await cb.answer("❌ Не удалось открыть страницу", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("admin_manage_user_"))
+@router.callback_query(F.data.startswith(CB_ADMIN_MANAGE_USER_PREFIX))
 async def admin_manage_user(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -662,7 +663,7 @@ async def admin_manage_user(cb: types.CallbackQuery):
         await cb.answer("❌ Не удалось открыть карточку пользователя", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("admin_add_days_"))
+@router.callback_query(F.data.startswith(CB_ADMIN_ADD_DAYS_PREFIX))
 async def admin_add_days_btn(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -693,7 +694,7 @@ async def admin_add_days_btn(cb: types.CallbackQuery):
         await cb.answer("❌ Не удалось продлить доступ", show_alert=True)
 
 
-@router.callback_query(F.data.startswith("admin_revoke_"))
+@router.callback_query(F.data.startswith(CB_ADMIN_REVOKE_PREFIX))
 async def admin_revoke_btn(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -713,7 +714,7 @@ async def admin_revoke_btn(cb: types.CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data == "confirm_revoke")
+@router.callback_query(F.data == CB_CONFIRM_REVOKE)
 async def confirm_revoke(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -740,14 +741,14 @@ async def confirm_revoke(cb: types.CallbackQuery):
         await cb.answer("❌ Не удалось отключить пользователя", show_alert=True)
 
 
-@router.callback_query(F.data == "cancel_revoke")
+@router.callback_query(F.data == CB_CANCEL_REVOKE)
 async def cancel_revoke(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "revoke")
     await cb.message.answer("❌ Отключение отменено")
     await cb.answer("Отменено")
 
 
-@router.callback_query(F.data.startswith("admin_delete_"))
+@router.callback_query(F.data.startswith(CB_ADMIN_DELETE_PREFIX))
 async def admin_del_user(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -767,7 +768,7 @@ async def admin_del_user(cb: types.CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data == "confirm_delete_user")
+@router.callback_query(F.data == CB_CONFIRM_DELETE_USER)
 async def confirm_delete_user(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -794,7 +795,7 @@ async def confirm_delete_user(cb: types.CallbackQuery):
         await cb.answer(f"❌ Не удалось удалить пользователя: {str(e)[:120]}", show_alert=True)
 
 
-@router.callback_query(F.data == "cancel_delete_user")
+@router.callback_query(F.data == CB_CANCEL_DELETE_USER)
 async def cancel_delete_user(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "delete_user")
     await cb.message.answer("❌ Удаление отменено")
@@ -1164,7 +1165,7 @@ async def clean_orphans_force_cmd(message: types.Message):
         await message.answer("❌ Не удалось подготовить принудительную очистку потерянных peer.")
 
 
-@router.callback_query(F.data == "confirm_clean_orphans_force")
+@router.callback_query(F.data == CB_CONFIRM_CLEAN_ORPHANS_FORCE)
 async def confirm_clean_orphans_force(cb: types.CallbackQuery):
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
@@ -1182,7 +1183,7 @@ async def confirm_clean_orphans_force(cb: types.CallbackQuery):
     await cb.answer("Ожидаю кодовое слово")
 
 
-@router.callback_query(F.data == "cancel_clean_orphans_force")
+@router.callback_query(F.data == CB_CANCEL_CLEAN_ORPHANS_FORCE)
 async def cancel_clean_orphans_force(cb: types.CallbackQuery):
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force")
     await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force_word")

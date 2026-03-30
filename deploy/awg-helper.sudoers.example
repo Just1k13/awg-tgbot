@@ -1,0 +1,21 @@
+# /etc/sudoers.d/awg-helper
+# Replace awg-bot with the runtime user of the bot process.
+User_Alias AWG_BOT = awg-bot
+Cmnd_Alias AWG_HELPER_CMDS = \
+  /usr/local/libexec/awg-bot-helper check-awg, \
+  /usr/local/libexec/awg-bot-helper show, \
+  /usr/local/libexec/awg-bot-helper genkey, \
+  /usr/local/libexec/awg-bot-helper pubkey, \
+  /usr/local/libexec/awg-bot-helper genpsk, \
+  /usr/local/libexec/awg-bot-helper add-peer *, \
+  /usr/local/libexec/awg-bot-helper remove-peer *, \
+  /usr/local/libexec/awg-bot-helper qos-check, \
+  /usr/local/libexec/awg-bot-helper qos-set *, \
+  /usr/local/libexec/awg-bot-helper qos-clear *, \
+  /usr/local/libexec/awg-bot-helper qos-sync, \
+  /usr/local/libexec/awg-bot-helper denylist-check, \
+  /usr/local/libexec/awg-bot-helper denylist-sync *, \
+  /usr/local/libexec/awg-bot-helper denylist-clear *
+
+Defaults!AWG_HELPER_CMDS !requiretty
+AWG_BOT ALL=(root) NOPASSWD: AWG_HELPER_CMDS

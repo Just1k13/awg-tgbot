@@ -1,4 +1,5 @@
 import json
+import io
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -36,8 +37,11 @@ from database import (
     payment_already_processed,
     persistent_guard_hit,
     save_payment,
+    upsert_payment_precheck,
+    mark_payment_precheck_status,
     update_payment_status,
     write_audit_log,
+    get_user_keys,
 )
 from helpers import utc_now_naive
 from keyboards import get_post_payment_kb
@@ -50,6 +54,12 @@ router = Router()
 purchase_rate_limit: dict[int, object] = {}
 _checkout_readiness_cache = {"ok": True, "reason": "", "expires_at": None}
 CHECKOUT_READINESS_TTL_SECONDS = 12
+CRITICAL_ERRORS_LOG = Path("critical_errors.log")
+
+try:
+    import qrcode
+except Exception:  # pragma: no cover - optional dependency
+    qrcode = None
 
 
 TARIFFS = {
@@ -172,7 +182,52 @@ async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
             error_message=await get_text("precheckout_unavailable"),
         )
         return
+    try:
+        q_user = getattr(q, "from_user", None)
+        q_user_id = int(getattr(q_user, "id", 0) or 0)
+        q_username = getattr(q_user, "username", None)
+        q_first_name = getattr(q_user, "first_name", None)
+        if q_user_id > 0:
+            await ensure_user_exists(q_user_id, q_username, q_first_name)
+            await upsert_payment_precheck(q.id, q_user_id, q.invoice_payload, status="precheck_passed")
+            # Security & Reliability: helper path is checked before pre-checkout confirmation
+            await check_awg_container()
+    except Exception as e:
+        logger.exception("pre_checkout precheck failed: %s", e)
+        if "q_user_id" in locals() and q_user_id > 0:
+            await upsert_payment_precheck(q.id, q_user_id, q.invoice_payload, status="failed", error_message=str(e)[:400])
+        await bot.answer_pre_checkout_query(q.id, ok=False, error_message=await get_text("precheckout_unavailable"))
+        return
     await bot.answer_pre_checkout_query(q.id, ok=True)
+    await mark_payment_precheck_status(q.id, "confirmed")
+
+
+async def _log_critical_delivery_error(payment_id: str, user_id: int, error: str) -> None:
+    line = f"{utc_now_naive().isoformat()} payment_id={payment_id} user_id={user_id} error={error}\n"
+    CRITICAL_ERRORS_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with CRITICAL_ERRORS_LOG.open("a", encoding="utf-8") as fp:
+        fp.write(line)
+
+
+async def _send_user_active_config(message: types.Message, user_id: int) -> bool:
+    configs = await get_user_keys(user_id)
+    if not configs:
+        return False
+    key_id, device_num, cfg, vpn_key = configs[0]
+    filename = f"config_{key_id}_device_{device_num}.conf"
+    await message.answer_document(types.BufferedInputFile(cfg.encode("utf-8"), filename=filename))
+    if vpn_key:
+        await message.answer(f"<code>{vpn_key}</code>", parse_mode="HTML")
+        if qrcode is not None:
+            qr = qrcode.QRCode(border=1, box_size=8)
+            qr.add_data(vpn_key)
+            qr.make(fit=True)
+            image = qr.make_image(fill_color="black", back_color="white")
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            buffer.seek(0)
+            await message.answer_photo(types.BufferedInputFile(buffer.read(), filename=f"{filename}.png"), caption="QR для быстрого импорта")
+    return True
 
 
 @router.message(F.successful_payment)
@@ -230,6 +285,13 @@ async def success_pay(message: types.Message):
         if applied:
             await update_last_provision_status(payment.telegram_payment_charge_id, "ready")
             await mark_ready_notification_sent(payment.telegram_payment_charge_id)
+            try:
+                sent = await _send_user_active_config(message, message.from_user.id)
+                if not sent:
+                    raise RuntimeError("active config not found after applied payment")
+            except Exception as delivery_error:
+                await _log_critical_delivery_error(payment.telegram_payment_charge_id, message.from_user.id, str(delivery_error)[:500])
+                logger.exception("Критическая ошибка отправки конфига после оплаты: %s", delivery_error)
             await message.answer(
                 await get_payment_result_text("ready"),
                 parse_mode="HTML",

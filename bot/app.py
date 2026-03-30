@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from awg_backend import (
     bootstrap_protected_peers,
@@ -39,6 +41,9 @@ from database import (
     ensure_db_ready,
     get_broadcast_recipients,
     get_shared_db,
+    get_subscriptions_expiring_within,
+    has_subscription_notification,
+    mark_subscription_notification_sent,
     update_broadcast_job_progress,
     write_audit_log,
 )
@@ -49,6 +54,7 @@ from network_policy import denylist_should_refresh, denylist_sync
 from payments import payment_recovery_worker
 from payments import router as payments_router
 from ui_constants import is_admin_callback_data
+from ui_constants import CB_SHOW_BUY_MENU
 from workers import WorkerPool, WorkerSpec
 
 
@@ -255,8 +261,27 @@ async def _startup_checks(bot: Bot) -> None:
         logger.exception("Ошибка стартовой очистки: %s", error)
 
 
+async def _notify_expiring_subscriptions(bot: Bot) -> None:
+    rows = await get_subscriptions_expiring_within(24)
+    for user_id, sub_until in rows:
+        if await has_subscription_notification(user_id, sub_until, "24h_before"):
+            continue
+        kb = InlineKeyboardBuilder()
+        kb.button(text="Продлить подписку", callback_data=CB_SHOW_BUY_MENU)
+        try:
+            await bot.send_message(
+                user_id,
+                f"⏰ Подписка истекает менее чем через 24 часа.\nОкончание: {sub_until[:16].replace('T', ' ')}",
+                reply_markup=kb.as_markup(),
+            )
+            await mark_subscription_notification_sent(user_id, sub_until, "24h_before")
+        except Exception as error:
+            logger.warning("Не удалось отправить напоминание user_id=%s: %s", user_id, error)
+
+
 async def main() -> None:
     bot = Bot(token=API_TOKEN)
+    scheduler = AsyncIOScheduler(timezone="UTC")
     deps = RuntimeDeps(
         bot=bot,
         settings=RuntimeSettings(
@@ -270,6 +295,8 @@ async def main() -> None:
 
     try:
         await _startup_checks(bot)
+        scheduler.add_job(_notify_expiring_subscriptions, "interval", minutes=30, kwargs={"bot": bot}, id="expiring-24h", replace_existing=True)
+        scheduler.start()
         worker_pool.start(
             [
                 WorkerSpec(
@@ -284,6 +311,7 @@ async def main() -> None:
         )
         await dp.start_polling(bot)
     finally:
+        scheduler.shutdown(wait=False)
         await worker_pool.stop()
         await close_shared_db()
         await bot.session.close()

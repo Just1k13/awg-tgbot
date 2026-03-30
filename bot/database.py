@@ -962,6 +962,10 @@ async def list_app_settings() -> list[tuple[str, str, str, int | None]]:
     return await fetchall("SELECT key, value, updated_at, updated_by FROM app_settings ORDER BY key")
 
 
+async def reset_app_setting(key: str) -> None:
+    await execute("DELETE FROM app_settings WHERE key = ?", (key,))
+
+
 async def set_text_override(key: str, value: str, updated_by: int | None = None) -> None:
     await execute(
         """

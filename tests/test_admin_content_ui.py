@@ -29,6 +29,13 @@ class DummyMessage:
         self.sent.append((text, kwargs))
 
 
+
+
+class DummyNoUserMessage:
+    def __init__(self):
+        self.from_user = None
+
+
 class DummyCallback:
     def __init__(self, user_id: int, data: str):
         self.from_user = DummyUser(user_id)
@@ -54,6 +61,24 @@ class AdminContentUiTests(unittest.IsolatedAsyncioTestCase):
 
         await database.close_shared_db()
         self.tmp.cleanup()
+
+    async def test_pending_edit_filter_only_matches_when_state_exists(self):
+        import database
+        import handlers_admin
+
+        msg = DummyMessage()
+        msg.from_user = DummyUser(1)
+
+        filt = handlers_admin.HasPendingAdminEdit()
+        self.assertFalse(await filt(msg))
+
+        await database.set_pending_admin_action(1, "edit_text", {"key": "start", "started_at": "2026-01-01T00:00:00"})
+        self.assertTrue(await filt(msg))
+
+        await database.clear_pending_admin_action(1, "edit_text")
+        self.assertFalse(await filt(msg))
+
+        self.assertFalse(await filt(DummyNoUserMessage()))
 
     async def test_admin_only_access_for_texts_menu(self):
         import handlers_admin

@@ -62,6 +62,23 @@ def _run_nft_script(script: str) -> str:
     return _run(["nft", "-f", "-"], stdin_text=script)
 
 
+def _nft_exists(kind: str, family: str, table: str, name: str | None = None) -> bool:
+    args = ["nft", "list", kind, family, table]
+    if name is not None:
+        args.append(name)
+    proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    return proc.returncode == 0
+
+
+def _ensure_denylist_primitives() -> None:
+    if not _nft_exists("table", "inet", "filter"):
+        _run(["nft", "add", "table", "inet", "filter"])
+    if not _nft_exists("chain", "inet", "filter", "awg_forward"):
+        _run_nft_script('add chain inet filter awg_forward { type filter hook forward priority 0; policy accept; }\n')
+    if not _nft_exists("set", "inet", "filter", "awg_denylist"):
+        _run_nft_script('add set inet filter awg_denylist { type ipv4_addr; flags interval; }\n')
+
+
 def _load_policy(path: Path | None = None) -> tuple[str, str]:
     policy_path = path or POLICY_PATH
     try:
@@ -198,32 +215,23 @@ def main() -> int:
             return 0
         if args.op == "denylist-clear":
             ipaddress.ip_network(args.vpn_subnet.strip(), strict=False)
-            script = (
-                "add table inet filter\n"
-                "add chain inet filter awg_forward { type filter hook forward priority 0; policy accept; }\n"
-                "add set inet filter awg_denylist { type ipv4_addr; flags interval; }\n"
-                "flush chain inet filter awg_forward\n"
-                "flush set inet filter awg_denylist\n"
-            )
-            _run_nft_script(script)
+            _ensure_denylist_primitives()
+            _run(["nft", "flush", "chain", "inet", "filter", "awg_forward"])
+            _run(["nft", "flush", "set", "inet", "filter", "awg_denylist"])
             print("denylist cleared")
             return 0
         if args.op == "denylist-sync":
             subnet = ipaddress.ip_network(args.vpn_subnet.strip(), strict=False)
             cidrs = [line.strip() for line in sys.stdin.read().splitlines() if line.strip()]
             validated = [str(ipaddress.ip_network(c, strict=False)) for c in cidrs]
-            elements = ", ".join(validated) if validated else ""
-            script = (
-                "add table inet filter\n"
-                "add chain inet filter awg_forward { type filter hook forward priority 0; policy accept; }\n"
-                "add set inet filter awg_denylist { type ipv4_addr; flags interval; }\n"
-                "flush chain inet filter awg_forward\n"
-                f"flush set inet filter awg_denylist\n"
+            _ensure_denylist_primitives()
+            _run(["nft", "flush", "chain", "inet", "filter", "awg_forward"])
+            _run(["nft", "flush", "set", "inet", "filter", "awg_denylist"])
+            if validated:
+                _run_nft_script(f"add element inet filter awg_denylist {{ {', '.join(validated)} }}\n")
+            _run_nft_script(
+                f'add rule inet filter awg_forward ip saddr {subnet} ip daddr @awg_denylist drop comment "awg_denylist"\n'
             )
-            if elements:
-                script += f"add element inet filter awg_denylist {{ {elements} }}\n"
-            script += f"add rule inet filter awg_forward ip saddr {subnet} ip daddr @awg_denylist drop comment \"awg_denylist\"\n"
-            _run_nft_script(script)
             print(f"denylist synced {len(cidrs)}")
             return 0
     except Exception as e:

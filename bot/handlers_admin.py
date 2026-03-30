@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 from cryptography.fernet import Fernet
 
 
@@ -18,27 +18,28 @@ from config import (
     BACKUP_SECURE_MODE,
     logger,
 )
-from config import (
-    ADMIN_COMMAND_COOLDOWN_SECONDS,
-    ADMIN_ID,
-    BACKUP_ALLOW_INSECURE_SEND,
-    BACKUP_ENCRYPTION_KEY,
-    BACKUP_SECURE_MODE,
-    logger,
-)
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone,
     get_app_setting,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
     get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_text_override, get_user_meta, list_app_settings,
     list_text_overrides, pop_pending_admin_action, reset_text_override,
-    set_app_setting, set_text_override,
+    reset_app_setting, set_app_setting, set_text_override,
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
-from keyboards import get_admin_confirm_kb, get_admin_force_confirm_kb, get_admin_inline_kb, get_broadcast_confirm_kb
+from keyboards import (
+    get_admin_confirm_kb, get_admin_edit_mode_kb, get_admin_force_confirm_kb, get_admin_inline_kb,
+    get_admin_setting_detail_kb, get_admin_settings_list_kb, get_admin_simple_back_kb, get_admin_text_detail_kb,
+    get_admin_texts_list_kb, get_broadcast_confirm_kb,
+)
 from ui_constants import (
-    BTN_ADMIN, CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
+    BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BACK_SETTINGS, CB_ADMIN_BACK_TEXTS, CB_ADMIN_BROADCAST,
+    CB_ADMIN_CANCEL_EDIT, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
+    CB_ADMIN_REFRESH_HEALTH, CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_REFRESH_SETTINGS, CB_ADMIN_REFRESH_TEXTS,
+    CB_ADMIN_SETTING_EDIT_PREFIX, CB_ADMIN_SETTING_KEY_PREFIX, CB_ADMIN_SETTING_RESET_PREFIX, CB_ADMIN_SETTINGS,
+    CB_ADMIN_SETTINGS_PAGE_PREFIX, CB_ADMIN_STATS, CB_ADMIN_SYNC, CB_ADMIN_TEXT_EDIT_PREFIX, CB_ADMIN_TEXT_KEY_PREFIX,
+    CB_ADMIN_TEXT_RESET_PREFIX, CB_ADMIN_TEXTS, CB_ADMIN_TEXTS_PAGE_PREFIX,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
 )
 from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
@@ -48,6 +49,8 @@ from content_settings import get_setting
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
 ADMIN_USERS_PAGE_SIZE = 10
+ADMIN_CONTENT_PAGE_SIZE = 8
+ADMIN_EDIT_TIMEOUT_SECONDS = 600
 
 
 def _cleanup_admin_rate_limit(now) -> None:
@@ -131,6 +134,146 @@ async def build_stats_text() -> str:
     )
 
 
+def _truncate_preview(value: str, limit: int = 700) -> str:
+    text = value or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n…<i>обрезано</i>"
+
+
+def _chunk_keys(keys: list[str], page: int, page_size: int = ADMIN_CONTENT_PAGE_SIZE) -> tuple[list[str], int, int]:
+    total_pages = max(1, (len(keys) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = start + page_size
+    return keys[start:end], page, total_pages
+
+
+def _is_stale_edit(payload: dict) -> bool:
+    started_at = payload.get("started_at")
+    if not started_at:
+        return False
+    try:
+        ts = datetime.fromisoformat(started_at)
+    except Exception:
+        return False
+    return (utc_now_naive() - ts).total_seconds() > ADMIN_EDIT_TIMEOUT_SECONDS
+
+
+def _all_text_keys() -> list[str]:
+    return sorted(TEXT_DEFAULTS.keys())
+
+
+def _all_setting_keys() -> list[str]:
+    return sorted(SETTING_DEFAULTS.keys())
+
+
+def _value_type_hint(default_value) -> str:
+    if isinstance(default_value, int):
+        return "int"
+    if isinstance(default_value, float):
+        return "float"
+    return "str"
+
+
+async def _render_texts_list(target_message: types.Message, page: int = 0) -> None:
+    keys = _all_text_keys()
+    chunk, page, total_pages = _chunk_keys(keys, page)
+    await target_message.answer(
+        "📝 <b>Тексты</b>\nВыберите ключ для просмотра/редактирования.",
+        parse_mode="HTML",
+        reply_markup=get_admin_texts_list_kb(chunk, page, total_pages),
+    )
+
+
+async def _render_settings_list(target_message: types.Message, page: int = 0) -> None:
+    keys = _all_setting_keys()
+    chunk, page, total_pages = _chunk_keys(keys, page)
+    await target_message.answer(
+        "⚙️ <b>Настройки</b>\nВыберите ключ для просмотра/редактирования.",
+        parse_mode="HTML",
+        reply_markup=get_admin_settings_list_kb(chunk, page, total_pages),
+    )
+
+
+async def _render_text_detail(target_message: types.Message, key: str, index: int, page: int) -> None:
+    current_value = await get_text_override(key) or TEXT_DEFAULTS.get(key, "")
+    default_value = TEXT_DEFAULTS.get(key, "")
+    await target_message.answer(
+        (
+            "📝 <b>Карточка текста</b>\n\n"
+            f"key=<code>{key}</code>\n"
+            f"current:\n<blockquote>{escape_html(_truncate_preview(str(current_value)))}</blockquote>\n"
+            f"default:\n<blockquote>{escape_html(_truncate_preview(str(default_value), 280))}</blockquote>"
+        ),
+        parse_mode="HTML",
+        reply_markup=get_admin_text_detail_kb(index, page),
+    )
+
+
+async def _render_setting_detail(target_message: types.Message, key: str, index: int, page: int) -> None:
+    raw_current = await get_app_setting(key)
+    default_value = SETTING_DEFAULTS.get(key)
+    current_value = raw_current if raw_current is not None else default_value
+    await target_message.answer(
+        (
+            "⚙️ <b>Карточка настройки</b>\n\n"
+            f"key=<code>{key}</code>\n"
+            f"type=<b>{_value_type_hint(default_value)}</b>\n"
+            f"current=<code>{escape_html(str(current_value))}</code>\n"
+            f"default=<code>{escape_html(str(default_value))}</code>"
+        ),
+        parse_mode="HTML",
+        reply_markup=get_admin_setting_detail_kb(index, page),
+    )
+
+
+async def build_ref_stats_text() -> str:
+    stats = await get_referral_admin_stats()
+    recent = "\n".join([f"• invitee={r[0]} inviter={r[1]} pay={r[2]}" for r in stats["recent"]]) or "—"
+    top = "\n".join([f"• inviter={row[0]} rewards={row[1]}" for row in stats["top"]]) or "—"
+    total_bonus_row = await fetchone(
+        "SELECT COALESCE(SUM(invitee_bonus_days + inviter_bonus_days), 0) FROM referral_rewards"
+    )
+    total_bonus_days = int(total_bonus_row[0]) if total_bonus_row else 0
+    return (
+        "🎁 <b>Referral admin summary</b>\n\n"
+        f"pending=<b>{stats['pending']}</b>\n"
+        f"rewarded=<b>{stats['rewarded']}</b>\n"
+        f"total_bonus_days=<b>{total_bonus_days}</b>\n\n"
+        f"<b>Последние начисления</b>\n{recent}\n\n"
+        f"<b>Top inviters</b>\n{top}"
+    )
+
+
+async def build_health_text() -> str:
+    stats = await get_pending_jobs_stats()
+    lag = await get_recovery_lag_seconds()
+    helper_failures = await get_metric("awg_helper_failures")
+    policy_stats = await policy_metrics()
+    denylist_enabled = int(await get_setting("EGRESS_DENYLIST_ENABLED", int) or 0)
+    denylist_mode = await get_setting("EGRESS_DENYLIST_MODE", str) or "soft"
+    qos_enabled = int(await get_setting("QOS_ENABLED", int) or 0)
+    qos_strict = int(await get_setting("QOS_STRICT", int) or 0)
+    return (
+        "🩺 <b>Отчёт о состоянии</b>\n\n"
+        f"jobs.received=<b>{stats['received']}</b>\n"
+        f"jobs.provisioning=<b>{stats['provisioning']}</b>\n"
+        f"jobs.needs_repair=<b>{stats['needs_repair']}</b>\n"
+        f"jobs.stuck_manual=<b>{stats['stuck_manual']}</b>\n"
+        f"recovery_lag_sec=<b>{lag}</b>\n"
+        f"awg_helper_failures=<b>{helper_failures}</b>\n"
+        f"qos_enabled=<b>{qos_enabled}</b> strict=<b>{qos_strict}</b>\n"
+        f"qos_errors=<b>{policy_stats['qos_errors']}</b>\n"
+        f"qos_last_sync_ok=<b>{policy_stats['qos_last_sync_ok']}</b>\n"
+        f"denylist_enabled=<b>{denylist_enabled}</b> mode=<b>{denylist_mode}</b>\n"
+        f"denylist_errors=<b>{policy_stats['denylist_errors']}</b>\n"
+        f"denylist_last_sync_ok=<b>{policy_stats['denylist_last_sync_ok']}</b>\n"
+        f"denylist_last_sync_ts=<b>{policy_stats['denylist_last_sync_ts']}</b>\n"
+        f"denylist_entries=<b>{policy_stats['denylist_entries']}</b>"
+    )
+
+
 def _users_page_kb(rows: list[tuple[int, str]], page: int, total_pages: int) -> types.InlineKeyboardMarkup:
     keyboard: list[list[types.InlineKeyboardButton]] = []
     for uid, label in rows:
@@ -208,6 +351,173 @@ async def admin_panel(message: types.Message):
         reply_markup=get_admin_inline_kb(),
     )
 
+
+@router.callback_query(F.data == CB_ADMIN_BACK_MAIN)
+async def admin_back_main(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await cb.message.answer("⚙️ Админ-меню", reply_markup=get_admin_inline_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == CB_ADMIN_TEXTS)
+async def admin_texts_menu(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await _render_texts_list(cb.message, 0)
+    await cb.answer("Открыто")
+
+
+@router.callback_query(F.data == CB_ADMIN_SETTINGS)
+async def admin_settings_menu(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await _render_settings_list(cb.message, 0)
+    await cb.answer("Открыто")
+
+
+@router.callback_query(F.data == CB_ADMIN_BACK_TEXTS)
+@router.callback_query(F.data == CB_ADMIN_REFRESH_TEXTS)
+async def admin_texts_back_refresh(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await _render_texts_list(cb.message, 0)
+    await cb.answer("Готово")
+
+
+@router.callback_query(F.data == CB_ADMIN_BACK_SETTINGS)
+@router.callback_query(F.data == CB_ADMIN_REFRESH_SETTINGS)
+async def admin_settings_back_refresh(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await _render_settings_list(cb.message, 0)
+    await cb.answer("Готово")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_TEXTS_PAGE_PREFIX))
+async def admin_texts_page(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    page = int(cb.data.removeprefix(CB_ADMIN_TEXTS_PAGE_PREFIX))
+    await _render_texts_list(cb.message, page)
+    await cb.answer("Готово")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_SETTINGS_PAGE_PREFIX))
+async def admin_settings_page(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    page = int(cb.data.removeprefix(CB_ADMIN_SETTINGS_PAGE_PREFIX))
+    await _render_settings_list(cb.message, page)
+    await cb.answer("Готово")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_TEXT_KEY_PREFIX))
+async def admin_text_key_detail(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    raw = cb.data.removeprefix(CB_ADMIN_TEXT_KEY_PREFIX)
+    index_raw, page_raw = raw.split("_", 1)
+    idx = int(index_raw)
+    page = int(page_raw)
+    chunk, _, _ = _chunk_keys(_all_text_keys(), page)
+    if idx < 0 or idx >= len(chunk):
+        await cb.answer("Ключ не найден", show_alert=True)
+        return
+    key = chunk[idx]
+    await _render_text_detail(cb.message, key, idx, page)
+    await cb.answer("Открыто")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_SETTING_KEY_PREFIX))
+async def admin_setting_key_detail(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    raw = cb.data.removeprefix(CB_ADMIN_SETTING_KEY_PREFIX)
+    index_raw, page_raw = raw.split("_", 1)
+    idx = int(index_raw)
+    page = int(page_raw)
+    chunk, _, _ = _chunk_keys(_all_setting_keys(), page)
+    if idx < 0 or idx >= len(chunk):
+        await cb.answer("Ключ не найден", show_alert=True)
+        return
+    key = chunk[idx]
+    await _render_setting_detail(cb.message, key, idx, page)
+    await cb.answer("Открыто")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_TEXT_EDIT_PREFIX))
+async def admin_text_edit_start(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    raw = cb.data.removeprefix(CB_ADMIN_TEXT_EDIT_PREFIX)
+    index_raw, page_raw = raw.split("_", 1)
+    idx = int(index_raw)
+    page = int(page_raw)
+    chunk, _, _ = _chunk_keys(_all_text_keys(), page)
+    if idx < 0 or idx >= len(chunk):
+        await cb.answer("Ключ не найден", show_alert=True)
+        return
+    key = chunk[idx]
+    await set_pending_admin_action(
+        cb.from_user.id,
+        "edit_text",
+        {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
+    )
+    await cb.message.answer(
+        f"✏️ Отправьте новое значение для <code>{key}</code>.\nДля отмены нажмите кнопку ниже.",
+        parse_mode="HTML",
+        reply_markup=get_admin_edit_mode_kb(),
+    )
+    await cb.answer("Режим редактирования")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_SETTING_EDIT_PREFIX))
+async def admin_setting_edit_start(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    raw = cb.data.removeprefix(CB_ADMIN_SETTING_EDIT_PREFIX)
+    index_raw, page_raw = raw.split("_", 1)
+    idx = int(index_raw)
+    page = int(page_raw)
+    chunk, _, _ = _chunk_keys(_all_setting_keys(), page)
+    if idx < 0 or idx >= len(chunk):
+        await cb.answer("Ключ не найден", show_alert=True)
+        return
+    key = chunk[idx]
+    await set_pending_admin_action(
+        cb.from_user.id,
+        "edit_setting",
+        {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
+    )
+    await cb.message.answer(
+        f"✏️ Отправьте новое значение для <code>{key}</code>.\nДля отмены нажмите кнопку ниже.",
+        parse_mode="HTML",
+        reply_markup=get_admin_edit_mode_kb(),
+    )
+    await cb.answer("Режим редактирования")
+
+
+@router.callback_query(F.data == CB_ADMIN_CANCEL_EDIT)
+async def admin_cancel_edit(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await clear_pending_admin_action(cb.from_user.id, "edit_text")
+    await clear_pending_admin_action(cb.from_user.id, "edit_setting")
+    await cb.message.answer("❌ Редактирование отменено.")
+    await cb.answer("Отменено")
 
 @router.callback_query(F.data == CB_ADMIN_STATS)
 async def admin_stats_cb(cb: types.CallbackQuery):
@@ -531,6 +841,136 @@ async def broadcast_cancel(cb: types.CallbackQuery):
     await cb.answer("Отменено")
 
 
+@router.callback_query(F.data.startswith(CB_ADMIN_TEXT_RESET_PREFIX))
+async def admin_text_reset_btn(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    raw = cb.data.removeprefix(CB_ADMIN_TEXT_RESET_PREFIX)
+    index_raw, page_raw = raw.split("_", 1)
+    idx = int(index_raw)
+    page = int(page_raw)
+    chunk, _, _ = _chunk_keys(_all_text_keys(), page)
+    if idx < 0 or idx >= len(chunk):
+        await cb.answer("Ключ не найден", show_alert=True)
+        return
+    key = chunk[idx]
+    await reset_text_override(key)
+    await write_audit_log(cb.from_user.id, "text_reset", f"key={key}")
+    await cb.message.answer(f"♻️ Сброшен override для <code>{key}</code>.", parse_mode="HTML")
+    await _render_text_detail(cb.message, key, idx, page)
+    await cb.answer("Сброшено")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_SETTING_RESET_PREFIX))
+async def admin_setting_reset_btn(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    raw = cb.data.removeprefix(CB_ADMIN_SETTING_RESET_PREFIX)
+    index_raw, page_raw = raw.split("_", 1)
+    idx = int(index_raw)
+    page = int(page_raw)
+    chunk, _, _ = _chunk_keys(_all_setting_keys(), page)
+    if idx < 0 or idx >= len(chunk):
+        await cb.answer("Ключ не найден", show_alert=True)
+        return
+    key = chunk[idx]
+    await reset_app_setting(key)
+    await write_audit_log(cb.from_user.id, "setting_reset", f"key={key}")
+    await cb.message.answer(f"♻️ Сброшена настройка <code>{key}</code> к default.", parse_mode="HTML")
+    await _render_setting_detail(cb.message, key, idx, page)
+    await cb.answer("Сброшено")
+
+
+@router.callback_query(F.data == CB_ADMIN_REFERRALS)
+@router.callback_query(F.data == CB_ADMIN_REFRESH_REFERRALS)
+async def admin_referrals_summary(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await cb.message.answer(
+        await build_ref_stats_text(),
+        parse_mode="HTML",
+        reply_markup=get_admin_simple_back_kb(CB_ADMIN_BACK_MAIN, CB_ADMIN_REFRESH_REFERRALS),
+    )
+    await cb.answer("Готово")
+
+
+@router.callback_query(F.data == CB_ADMIN_HEALTH)
+@router.callback_query(F.data == CB_ADMIN_REFRESH_HEALTH)
+async def admin_health_summary(cb: types.CallbackQuery):
+    if cb.from_user.id != ADMIN_ID:
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    await cb.message.answer(
+        await build_health_text(),
+        parse_mode="HTML",
+        reply_markup=get_admin_simple_back_kb(CB_ADMIN_BACK_MAIN, CB_ADMIN_REFRESH_HEALTH),
+    )
+    await cb.answer("Готово")
+
+
+@router.message(Command("cancel_edit"), IsAdmin())
+async def cancel_edit_cmd(message: types.Message):
+    await clear_pending_admin_action(message.from_user.id, "edit_text")
+    await clear_pending_admin_action(message.from_user.id, "edit_setting")
+    await message.answer("❌ Редактирование отменено.")
+
+
+@router.message(IsAdmin(), F.text, ~F.text.startswith("/"))
+async def admin_pending_edit_consumer(message: types.Message):
+    edit_text_state = await pop_pending_admin_action(message.from_user.id, "edit_text")
+    if edit_text_state:
+        if _is_stale_edit(edit_text_state):
+            await message.answer("⌛ Сессия редактирования текста устарела. Запустите заново.")
+            return
+        key = str(edit_text_state.get("key") or "")
+        valid, err = await validate_text_template(key, message.text)
+        if not valid:
+            await message.answer(f"❌ {err}\nОтправьте значение снова или нажмите ❌ Отмена.", reply_markup=get_admin_edit_mode_kb())
+            await set_pending_admin_action(message.from_user.id, "edit_text", edit_text_state)
+            return
+        await set_text_override(key, message.text, updated_by=message.from_user.id)
+        await write_audit_log(message.from_user.id, "text_set", f"key={key}; via=ui")
+        await message.answer("✅ Текст сохранён.")
+        await _render_text_detail(
+            message,
+            key,
+            int(edit_text_state.get("index", 0)),
+            int(edit_text_state.get("page", 0)),
+        )
+        return
+
+    edit_setting_state = await pop_pending_admin_action(message.from_user.id, "edit_setting")
+    if not edit_setting_state:
+        return
+    if _is_stale_edit(edit_setting_state):
+        await message.answer("⌛ Сессия редактирования настройки устарела. Запустите заново.")
+        return
+    key = str(edit_setting_state.get("key") or "")
+    default_value = SETTING_DEFAULTS.get(key)
+    cast_type = type(default_value) if default_value is not None else str
+    try:
+        cast_type(message.text)
+    except Exception:
+        await message.answer(
+            f"❌ Некорректный тип: ожидается {_value_type_hint(default_value)}.\nОтправьте значение снова или нажмите ❌ Отмена.",
+            reply_markup=get_admin_edit_mode_kb(),
+        )
+        await set_pending_admin_action(message.from_user.id, "edit_setting", edit_setting_state)
+        return
+    await set_app_setting(key, message.text, updated_by=message.from_user.id)
+    await write_audit_log(message.from_user.id, "setting_set", f"key={key}; via=ui")
+    await message.answer("✅ Настройка сохранена.")
+    await _render_setting_detail(
+        message,
+        key,
+        int(edit_setting_state.get("index", 0)),
+        int(edit_setting_state.get("page", 0)),
+    )
+
+
 @router.message(Command("give"), IsAdmin())
 async def give_manual(message: types.Message, command: CommandObject):
     if admin_command_limited("give", message.from_user.id):
@@ -837,33 +1277,7 @@ async def broadcast_prepare(message: types.Message, command: CommandObject):
 
 @router.message(Command("health"), IsAdmin())
 async def health_cmd(message: types.Message):
-    stats = await get_pending_jobs_stats()
-    lag = await get_recovery_lag_seconds()
-    helper_failures = await get_metric("awg_helper_failures")
-    policy_stats = await policy_metrics()
-    denylist_enabled = int(await get_setting("EGRESS_DENYLIST_ENABLED", int) or 0)
-    denylist_mode = await get_setting("EGRESS_DENYLIST_MODE", str) or "soft"
-    qos_enabled = int(await get_setting("QOS_ENABLED", int) or 0)
-    qos_strict = int(await get_setting("QOS_STRICT", int) or 0)
-    await message.answer(
-        (
-            "🩺 <b>Отчёт о состоянии</b>\n\n"
-            f"jobs.received=<b>{stats['received']}</b>\n"
-            f"jobs.provisioning=<b>{stats['provisioning']}</b>\n"
-            f"jobs.needs_repair=<b>{stats['needs_repair']}</b>\n"
-            f"jobs.stuck_manual=<b>{stats['stuck_manual']}</b>\n"
-            f"recovery_lag_sec=<b>{lag}</b>\n"
-            f"awg_helper_failures=<b>{helper_failures}</b>\n"
-            f"qos_enabled=<b>{qos_enabled}</b> strict=<b>{qos_strict}</b>\n"
-            f"qos_errors=<b>{policy_stats['qos_errors']}</b>\n"
-            f"denylist_enabled=<b>{denylist_enabled}</b> mode=<b>{denylist_mode}</b>\n"
-            f"denylist_errors=<b>{policy_stats['denylist_errors']}</b>\n"
-            f"denylist_last_sync_ok=<b>{policy_stats['denylist_last_sync_ok']}</b>\n"
-            f"denylist_last_sync_ts=<b>{policy_stats['denylist_last_sync_ts']}</b>\n"
-            f"denylist_entries=<b>{policy_stats['denylist_entries']}</b>"
-        ),
-        parse_mode="HTML",
-    )
+    await message.answer(await build_health_text(), parse_mode="HTML")
 
 
 @router.message(Command("text_list"), IsAdmin())
@@ -945,16 +1359,4 @@ async def setting_set_cmd(message: types.Message, command: CommandObject):
 
 @router.message(Command("ref_stats"), IsAdmin())
 async def ref_stats_cmd(message: types.Message):
-    stats = await get_referral_admin_stats()
-    recent = "\n".join([f"• invitee={r[0]} inviter={r[1]} pay={r[2]}" for r in stats["recent"]]) or "—"
-    top = "\n".join([f"• inviter={row[0]} rewards={row[1]}" for row in stats["top"]]) or "—"
-    await message.answer(
-        (
-            "🎁 <b>Referral admin summary</b>\n\n"
-            f"pending=<b>{stats['pending']}</b>\n"
-            f"rewarded=<b>{stats['rewarded']}</b>\n\n"
-            f"<b>Последние начисления</b>\n{recent}\n\n"
-            f"<b>Top inviters</b>\n{top}"
-        ),
-        parse_mode="HTML",
-    )
+    await message.answer(await build_ref_stats_text(), parse_mode="HTML")

@@ -3,7 +3,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS
 from ui_constants import (
     BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_GUIDE, BTN_PROFILE, BTN_REFERRALS, BTN_SUPPORT,
-    CB_ADMIN_BROADCAST, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_LIST, CB_ADMIN_STATS, CB_ADMIN_SYNC,
+    CB_ADMIN_BACK_MAIN, CB_ADMIN_BACK_SETTINGS, CB_ADMIN_BACK_TEXTS, CB_ADMIN_BROADCAST, CB_ADMIN_CANCEL_EDIT,
+    CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS, CB_ADMIN_REFRESH_HEALTH,
+    CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_REFRESH_SETTINGS, CB_ADMIN_REFRESH_TEXTS, CB_ADMIN_SETTING_EDIT_PREFIX,
+    CB_ADMIN_SETTING_KEY_PREFIX, CB_ADMIN_SETTING_RESET_PREFIX, CB_ADMIN_SETTINGS, CB_ADMIN_SETTINGS_PAGE_PREFIX,
+    CB_ADMIN_STATS, CB_ADMIN_SYNC, CB_ADMIN_TEXT_EDIT_PREFIX, CB_ADMIN_TEXT_KEY_PREFIX, CB_ADMIN_TEXT_RESET_PREFIX,
+    CB_ADMIN_TEXTS, CB_ADMIN_TEXTS_PAGE_PREFIX,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7,
     CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX, CB_CONFIG_DEVICE_PREFIX, CB_OPEN_CONFIGS,
@@ -87,6 +92,10 @@ def get_admin_inline_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="👥 Пользователи", callback_data=CB_ADMIN_LIST)],
             [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
+            [InlineKeyboardButton(text="📝 Тексты", callback_data=CB_ADMIN_TEXTS)],
+            [InlineKeyboardButton(text="⚙️ Настройки", callback_data=CB_ADMIN_SETTINGS)],
+            [InlineKeyboardButton(text="🎁 Рефералы", callback_data=CB_ADMIN_REFERRALS)],
+            [InlineKeyboardButton(text="❤️ Health", callback_data=CB_ADMIN_HEALTH)],
             [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC)],
             [InlineKeyboardButton(text="🧹 Очистить потерянные peer", callback_data=CB_ADMIN_CLEAN_ORPHANS)],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
@@ -118,4 +127,70 @@ def get_admin_force_confirm_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✅ Подтвердить FORCE", callback_data="confirm_clean_orphans_force")],
             [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_clean_orphans_force")],
         ]
+    )
+
+
+def get_admin_texts_list_kb(keys: list[str], page: int, total_pages: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, key in enumerate(keys):
+        rows.append([InlineKeyboardButton(text=key, callback_data=f"{CB_ADMIN_TEXT_KEY_PREFIX}{index}_{page}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{CB_ADMIN_TEXTS_PAGE_PREFIX}{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"📄 {page + 1}/{max(total_pages, 1)}", callback_data="noop"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"{CB_ADMIN_TEXTS_PAGE_PREFIX}{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔄 Refresh", callback_data=CB_ADMIN_REFRESH_TEXTS)])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_ADMIN_BACK_MAIN)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_admin_settings_list_kb(keys: list[str], page: int, total_pages: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for index, key in enumerate(keys):
+        rows.append([InlineKeyboardButton(text=key, callback_data=f"{CB_ADMIN_SETTING_KEY_PREFIX}{index}_{page}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{CB_ADMIN_SETTINGS_PAGE_PREFIX}{page - 1}"))
+    nav.append(InlineKeyboardButton(text=f"📄 {page + 1}/{max(total_pages, 1)}", callback_data="noop"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"{CB_ADMIN_SETTINGS_PAGE_PREFIX}{page + 1}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔄 Refresh", callback_data=CB_ADMIN_REFRESH_SETTINGS)])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_ADMIN_BACK_MAIN)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_admin_text_detail_kb(index: int, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"{CB_ADMIN_TEXT_EDIT_PREFIX}{index}_{page}")],
+            [InlineKeyboardButton(text="♻️ Сбросить", callback_data=f"{CB_ADMIN_TEXT_RESET_PREFIX}{index}_{page}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_ADMIN_BACK_TEXTS)],
+        ]
+    )
+
+
+def get_admin_setting_detail_kb(index: int, page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data=f"{CB_ADMIN_SETTING_EDIT_PREFIX}{index}_{page}")],
+            [InlineKeyboardButton(text="♻️ Сбросить", callback_data=f"{CB_ADMIN_SETTING_RESET_PREFIX}{index}_{page}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_ADMIN_BACK_SETTINGS)],
+        ]
+    )
+
+
+def get_admin_simple_back_kb(back_cb: str, refresh_cb: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if refresh_cb:
+        rows.append([InlineKeyboardButton(text="🔄 Refresh", callback_data=refresh_cb)])
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=back_cb)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_admin_edit_mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data=CB_ADMIN_CANCEL_EDIT)]]
     )

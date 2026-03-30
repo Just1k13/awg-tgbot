@@ -2037,8 +2037,24 @@ print_file_tail_tty_safe() {
 
 print_journal_tail_tty_safe() {
   local lines="${1:-50}"
+  local raw_logs="" filtered_logs=""
   if service_exists; then
-    screen_run journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+    raw_logs="$(journalctl -u "$SERVICE_NAME" -n 400 --no-pager 2>/dev/null || true)"
+    filtered_logs="$(
+      printf '%s\n' "$raw_logs" | grep -Eiv \
+        'sudo\[[0-9]+\]: pam_unix\(sudo:session\): session (opened|closed) for user root|sudo\[[0-9]+\]:[[:space:]]+awg-bot[[:space:]]*: .*COMMAND=/usr/local/libexec/awg-bot-helper (show|denylist-clear --vpn-subnet )' \
+        || true
+    )"
+    if [[ -n "$filtered_logs" ]]; then
+      if has_tty; then
+        printf '%s\n' "$filtered_logs" | tail -n "$lines" >&3 2>/dev/null || true
+      else
+        printf '%s\n' "$filtered_logs" | tail -n "$lines" 2>/dev/null || true
+      fi
+    else
+      screen_warn "После фильтрации служебного sudo-шума журнал пуст, показываю raw-лог."
+      screen_run journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+    fi
   else
     screen_warn "Сервис $SERVICE_NAME не найден."
   fi
@@ -2057,11 +2073,57 @@ print_journal_matches_tty_safe() {
   fi
 }
 
+print_service_error_context_tty_safe() {
+  local lines="${1:-20}"
+  local raw_logs="" filtered_logs="" meaningful_logs="" fallback_logs="" app_tail=""
+
+  if ! service_exists; then
+    screen_warn "Сервис $SERVICE_NAME не найден."
+    return 0
+  fi
+
+  raw_logs="$(journalctl -u "$SERVICE_NAME" -n 400 --no-pager 2>/dev/null || true)"
+  filtered_logs="$(printf '%s\n' "$raw_logs" | grep -Ei 'error|failed|traceback|exception|permission denied' || true)"
+  meaningful_logs="$(printf '%s\n' "$filtered_logs" | grep -Eiv "Failed with result 'exit-code'" || true)"
+
+  if [[ -n "$meaningful_logs" ]]; then
+    if has_tty; then
+      printf '%s\n' "$meaningful_logs" | tail -n "$lines" >&3 2>/dev/null || true
+    else
+      printf '%s\n' "$meaningful_logs" | tail -n "$lines" 2>/dev/null || true
+    fi
+    return 0
+  fi
+
+  screen_warn "Найдены только повторы 'Failed with result=exit-code' без причины. Показываю расширенный контекст."
+  fallback_logs="$(printf '%s\n' "$raw_logs" | tail -n "$lines")"
+  if [[ -n "$fallback_logs" ]]; then
+    if has_tty; then
+      printf '%s\n' "$fallback_logs" >&3 2>/dev/null || true
+    else
+      printf '%s\n' "$fallback_logs" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -f "$APP_LOG_FILE" ]]; then
+    app_tail="$(tail -n "$lines" "$APP_LOG_FILE" 2>/dev/null || true)"
+    if [[ -n "$app_tail" ]]; then
+      screen_line
+      screen_echo "Последние строки bot.log (для причины падения):"
+      if has_tty; then
+        printf '%s\n' "$app_tail" >&3 2>/dev/null || true
+      else
+        printf '%s\n' "$app_tail" 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+
 run_log_snapshot() {
   local mode="$1" variant="${2:-last}"
   case "$mode:$variant" in
     service:last) print_journal_tail_tty_safe 50 ;;
-    service:error) print_journal_matches_tty_safe 'error|failed|traceback|exception|permission denied' 20 ;;
+    service:error) print_service_error_context_tty_safe 20 ;;
     bot:last) print_file_tail_tty_safe "$APP_LOG_FILE" 50 ;;
     bot:warn)
       if [[ -f "$APP_LOG_FILE" ]]; then

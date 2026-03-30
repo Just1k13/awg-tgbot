@@ -46,7 +46,7 @@ from database import (
 from helpers import utc_now_naive
 from keyboards import get_post_payment_kb
 from content_settings import get_text
-from referrals import apply_referral_rewards_on_first_payment
+from referrals import apply_referral_rewards_on_first_payment, notify_inviter_about_referral_reward
 from texts import get_payment_result_text
 from ui_constants import CB_BUY_30, CB_BUY_7
 
@@ -281,6 +281,7 @@ async def success_pay(message: types.Message):
             user_id=message.from_user.id,
             payload=payment.invoice_payload,
             days=tariff["days"],
+            bot=message.bot,
         )
         if applied:
             await update_last_provision_status(payment.telegram_payment_charge_id, "ready")
@@ -317,7 +318,7 @@ async def success_pay(message: types.Message):
         )
 
 
-async def process_payment_provisioning(payment_id: str, user_id: int, payload: str, days: int) -> bool:
+async def process_payment_provisioning(payment_id: str, user_id: int, payload: str, days: int, bot: Bot | None = None) -> bool:
     lock_token = str(uuid.uuid4())
     lease_expires_at = (utc_now_naive() + timedelta(seconds=PAYMENT_PROVISIONING_LEASE_SECONDS)).isoformat()
     claimed = await claim_payment_and_job_for_provisioning(payment_id, lock_token, lease_expires_at)
@@ -336,7 +337,9 @@ async def process_payment_provisioning(payment_id: str, user_id: int, payload: s
         )
         if not finalized:
             raise RuntimeError("payment finalization lock lost")
-        await apply_referral_rewards_on_first_payment(user_id, payment_id)
+        rewarded = await apply_referral_rewards_on_first_payment(user_id, payment_id)
+        if rewarded:
+            await notify_inviter_about_referral_reward(bot, user_id)
         return True
     except Exception as e:
         retry_at = (utc_now_naive() + timedelta(seconds=PAYMENT_RETRY_DELAY_SECONDS)).isoformat()
@@ -390,7 +393,7 @@ async def payment_recovery_worker(bot: Bot | None = None) -> int:
             await update_payment_status(payment_id, "failed", error_message="unknown payload in recovery")
             continue
         try:
-            done = await process_payment_provisioning(payment_id, user_id, payload, tariff["days"])
+            done = await process_payment_provisioning(payment_id, user_id, payload, tariff["days"], bot=bot)
             repaired += int(done)
             if done:
                 await update_last_provision_status(payment_id, "ready")

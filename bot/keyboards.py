@@ -1,3 +1,5 @@
+from typing import Callable
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS
@@ -136,10 +138,16 @@ def get_admin_force_confirm_kb() -> InlineKeyboardMarkup:
     )
 
 
-def get_admin_texts_list_kb(keys: list[str], page: int, total_pages: int) -> InlineKeyboardMarkup:
+def get_admin_texts_list_kb(
+    keys: list[str],
+    page: int,
+    total_pages: int,
+    title_builder: Callable[[str], str] | None = None,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index, key in enumerate(keys):
-        rows.append([InlineKeyboardButton(text=key, callback_data=f"{CB_ADMIN_TEXT_KEY_PREFIX}{index}_{page}")])
+        title = title_builder(key) if title_builder else key
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"{CB_ADMIN_TEXT_KEY_PREFIX}{index}_{page}")])
     nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{CB_ADMIN_TEXTS_PAGE_PREFIX}{page - 1}"))
@@ -152,10 +160,16 @@ def get_admin_texts_list_kb(keys: list[str], page: int, total_pages: int) -> Inl
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def get_admin_settings_list_kb(keys: list[str], page: int, total_pages: int) -> InlineKeyboardMarkup:
+def get_admin_settings_list_kb(
+    keys: list[str],
+    page: int,
+    total_pages: int,
+    title_builder: Callable[[str], str] | None = None,
+) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for index, key in enumerate(keys):
-        rows.append([InlineKeyboardButton(text=key, callback_data=f"{CB_ADMIN_SETTING_KEY_PREFIX}{index}_{page}")])
+        title = title_builder(key) if title_builder else key
+        rows.append([InlineKeyboardButton(text=title, callback_data=f"{CB_ADMIN_SETTING_KEY_PREFIX}{index}_{page}")])
     nav: list[InlineKeyboardButton] = []
     if page > 0:
         nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"{CB_ADMIN_SETTINGS_PAGE_PREFIX}{page - 1}"))

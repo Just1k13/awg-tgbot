@@ -220,6 +220,60 @@ def _all_setting_keys() -> list[str]:
     return sorted(SETTING_DEFAULTS.keys())
 
 
+SETTING_LABELS: dict[str, tuple[str, str]] = {
+    "REFERRAL_ENABLED": ("Рефералка включена", "1 — включена, 0 — выключена."),
+    "REFERRAL_INVITEE_BONUS_DAYS": ("Бонус приглашённому (дни)", "Сколько дней получает новый пользователь после первой оплаты."),
+    "REFERRAL_INVITER_BONUS_DAYS": ("Бонус пригласившему (дни)", "Сколько дней получает пригласивший после первой оплаты приглашённого."),
+    "DEFAULT_KEY_RATE_MBIT": ("Скорость по умолчанию (Мбит/с)", "Лимит скорости для новых ключей."),
+    "QOS_ENABLED": ("Ограничение скорости включено", "1 — лимиты скорости активны."),
+    "QOS_STRICT": ("Строгий режим QoS", "1 — ошибка QoS останавливает операцию; 0 — только warning."),
+    "EGRESS_DENYLIST_ENABLED": ("Блок-лист сайтов включен", "1 — включен denylist исходящего трафика."),
+    "EGRESS_DENYLIST_MODE": ("Режим блок-листа", "strict — ошибки sync критичны; soft — только логируются."),
+    "EGRESS_DENYLIST_DOMAINS": ("Домены в блок-листе", "Список доменов через запятую."),
+    "EGRESS_DENYLIST_CIDRS": ("IP/CIDR в блок-листе", "Список сетей через запятую."),
+    "EGRESS_DENYLIST_REFRESH_MINUTES": ("Интервал обновления block-листа (мин)", "Как часто обновлять denylist в фоне."),
+    "TORRENT_POLICY_TEXT_ENABLED": ("Показывать предупреждение про P2P", "1 — в инструкции отображается блок про policy."),
+    "VPN_SUBNET_PREFIX": ("Префикс VPN подсети", "Обычно 10.8.1."),
+}
+
+TEXT_LABELS: dict[str, tuple[str, str]] = {
+    "start": ("Стартовое сообщение", "Текст после /start."),
+    "buy_menu": ("Экран покупки", "Показывается перед выбором тарифа."),
+    "renew_menu": ("Экран продления", "Показывается при активной подписке."),
+    "profile_screen": ("Экран профиля", "Карточка пользователя и статус подписки."),
+    "configs_menu": ("Экран подключения", "Объяснение, что отправляется vpn:// и .conf."),
+    "configs_empty": ("Нет подключений", "Сообщение, когда у пользователя нет ключей."),
+    "payment_success": ("Оплата: доступ готов", "Статус успешной активации."),
+    "payment_pending": ("Оплата: в обработке", "Статус, когда выдача ещё в процессе."),
+    "payment_error": ("Оплата: ошибка", "Сообщение при проблеме активации."),
+    "referral_screen": ("Экран рефералов", "Ссылка, статистика и правила начисления бонуса."),
+    "support_contact": ("Текст поддержки", "Полный текст раздела поддержки."),
+    "instruction_body": ("Инструкция подключения", "Пошаговый гайд для пользователя."),
+}
+
+
+def _humanize_setting_key(key: str) -> tuple[str, str]:
+    if key in SETTING_LABELS:
+        return SETTING_LABELS[key]
+    return key.replace("_", " ").capitalize(), "Технический параметр."
+
+
+def _humanize_text_key(key: str) -> tuple[str, str]:
+    if key in TEXT_LABELS:
+        return TEXT_LABELS[key]
+    return key.replace("_", " ").capitalize(), "Технический текстовый шаблон."
+
+
+def _compact_setting_title(key: str) -> str:
+    title, _ = _humanize_setting_key(key)
+    return f"{title} · {key}"
+
+
+def _compact_text_title(key: str) -> str:
+    title, _ = _humanize_text_key(key)
+    return f"{title} · {key}"
+
+
 def _value_type_hint(default_value) -> str:
     if isinstance(default_value, int):
         return "int"
@@ -232,9 +286,9 @@ async def _render_texts_list(target_message: types.Message, page: int = 0) -> No
     keys = _all_text_keys()
     chunk, page, total_pages = _chunk_keys(keys, page)
     await target_message.answer(
-        "📝 <b>Тексты</b>\nВыберите ключ для просмотра/редактирования.",
+        "📝 <b>Тексты</b>\nВыберите понятное название. Технический ключ показан после точки.",
         parse_mode="HTML",
-        reply_markup=get_admin_texts_list_kb(chunk, page, total_pages),
+        reply_markup=get_admin_texts_list_kb(chunk, page, total_pages, _compact_text_title),
     )
 
 
@@ -242,19 +296,22 @@ async def _render_settings_list(target_message: types.Message, page: int = 0) ->
     keys = _all_setting_keys()
     chunk, page, total_pages = _chunk_keys(keys, page)
     await target_message.answer(
-        "⚙️ <b>Настройки</b>\nВыберите ключ для просмотра/редактирования.",
+        "⚙️ <b>Настройки</b>\nВыберите понятное название. Технический ключ показан после точки.",
         parse_mode="HTML",
-        reply_markup=get_admin_settings_list_kb(chunk, page, total_pages),
+        reply_markup=get_admin_settings_list_kb(chunk, page, total_pages, _compact_setting_title),
     )
 
 
 async def _render_text_detail(target_message: types.Message, key: str, index: int, page: int) -> None:
     current_value = await get_text_override(key) or TEXT_DEFAULTS.get(key, "")
     default_value = TEXT_DEFAULTS.get(key, "")
+    title, description = _humanize_text_key(key)
     await target_message.answer(
         (
             "📝 <b>Карточка текста</b>\n\n"
-            f"key=<code>{key}</code>\n"
+            f"Название: <b>{escape_html(title)}</b>\n"
+            f"Описание: {escape_html(description)}\n"
+            f"Ключ: <code>{key}</code>\n"
             f"current:\n<blockquote>{escape_html(_truncate_preview(str(current_value)))}</blockquote>\n"
             f"default:\n<blockquote>{escape_html(_truncate_preview(str(default_value), 280))}</blockquote>"
         ),
@@ -267,13 +324,16 @@ async def _render_setting_detail(target_message: types.Message, key: str, index:
     raw_current = await get_app_setting(key)
     default_value = SETTING_DEFAULTS.get(key)
     current_value = raw_current if raw_current is not None else default_value
+    title, description = _humanize_setting_key(key)
     await target_message.answer(
         (
             "⚙️ <b>Карточка настройки</b>\n\n"
-            f"key=<code>{key}</code>\n"
-            f"type=<b>{_value_type_hint(default_value)}</b>\n"
-            f"current=<code>{escape_html(str(current_value))}</code>\n"
-            f"default=<code>{escape_html(str(default_value))}</code>"
+            f"Название: <b>{escape_html(title)}</b>\n"
+            f"Описание: {escape_html(description)}\n"
+            f"Ключ: <code>{key}</code>\n"
+            f"Тип: <b>{_value_type_hint(default_value)}</b>\n"
+            f"Текущее: <code>{escape_html(str(current_value))}</code>\n"
+            f"По умолчанию: <code>{escape_html(str(default_value))}</code>"
         ),
         parse_mode="HTML",
         reply_markup=get_admin_setting_detail_kb(index, page),
@@ -524,7 +584,7 @@ async def admin_text_edit_start(cb: types.CallbackQuery):
         {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
     )
     await cb.message.answer(
-        f"✏️ Отправьте новое значение для <code>{key}</code>.\nДля отмены нажмите кнопку ниже.",
+        f"✏️ Отправьте новое значение для <code>{key}</code> ({_humanize_text_key(key)[0]}).\nДля отмены нажмите кнопку ниже.",
         parse_mode="HTML",
         reply_markup=get_admin_edit_mode_kb(),
     )
@@ -550,7 +610,7 @@ async def admin_setting_edit_start(cb: types.CallbackQuery):
         {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
     )
     await cb.message.answer(
-        f"✏️ Отправьте новое значение для <code>{key}</code>.\nДля отмены нажмите кнопку ниже.",
+        f"✏️ Отправьте новое значение для <code>{key}</code> ({_humanize_setting_key(key)[0]}).\nДля отмены нажмите кнопку ниже.",
         parse_mode="HTML",
         reply_markup=get_admin_edit_mode_kb(),
     )

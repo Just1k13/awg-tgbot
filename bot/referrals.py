@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 from awg_backend import issue_subscription
 from config import logger
@@ -14,6 +15,7 @@ from database import (
     get_user_id_by_referral_code,
     set_referral_attribution,
     user_has_paid_subscription,
+    get_user_meta,
     write_audit_log,
 )
 
@@ -78,6 +80,35 @@ async def apply_referral_rewards_on_first_payment(invitee_user_id: int, payment_
     )
     logger.info("Referral rewards applied for payment=%s invitee=%s inviter=%s", payment_id, invitee_user_id, inviter_user_id)
     return True
+
+
+def _format_tg_mention(username: str | None, user_id: int) -> str:
+    if username:
+        return f"@{username}"
+    return f"id={user_id}"
+
+
+async def notify_inviter_about_referral_reward(bot: Any, invitee_user_id: int) -> bool:
+    if bot is None:
+        return False
+    attribution = await get_referral_attribution(invitee_user_id)
+    if not attribution:
+        return False
+    inviter_user_id, _code = attribution
+    inviter_days = int(await get_setting("REFERRAL_INVITER_BONUS_DAYS", int) or 3)
+    invitee_username, _invitee_first_name = await get_user_meta(invitee_user_id)
+    invitee_mention = _format_tg_mention(invitee_username, invitee_user_id)
+    text = (
+        "🎉 <b>Реферальный бонус начислен</b>\n\n"
+        f"По покупке пользователя {invitee_mention} (ID: <code>{invitee_user_id}</code>) "
+        f"вам начислено <b>+{inviter_days} дн.</b>"
+    )
+    try:
+        await bot.send_message(inviter_user_id, text, parse_mode="HTML")
+        return True
+    except Exception as error:
+        logger.warning("Не удалось отправить уведомление о реферальном бонусе inviter=%s: %s", inviter_user_id, error)
+        return False
 
 
 async def get_referral_screen_data(user_id: int, bot_username: str) -> dict[str, str | int]:

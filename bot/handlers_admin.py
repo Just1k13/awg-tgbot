@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import asyncio
 from cryptography.fernet import Fernet
 
 
@@ -55,6 +56,34 @@ admin_command_rate_limit: dict[str, object] = {}
 ADMIN_USERS_PAGE_SIZE = 10
 ADMIN_CONTENT_PAGE_SIZE = 8
 ADMIN_EDIT_TIMEOUT_SECONDS = 600
+
+
+def _build_redacted_backup_payload(db_path: str) -> tuple[bytes, str]:
+    from pathlib import Path
+    import sqlite3
+    import tempfile
+
+    db_file = Path(db_path)
+    if not db_file.exists():
+        raise FileNotFoundError("db_not_found")
+
+    tmp_file = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
+    tmp_file.close()
+    redacted = Path(tmp_file.name)
+    try:
+        src = sqlite3.connect(str(db_file))
+        dst = sqlite3.connect(str(redacted))
+        try:
+            src.backup(dst)
+            dst.execute("UPDATE keys SET config = '', vpn_key = '', psk_key = '', client_private_key = ''")
+            dst.commit()
+        finally:
+            dst.close()
+            src.close()
+        payload = redacted.read_bytes()
+    finally:
+        redacted.unlink(missing_ok=True)
+    return payload, db_file.name
 
 
 async def _guard_admin_callback(cb: types.CallbackQuery, *, require_message: bool = False) -> bool:
@@ -1225,41 +1254,24 @@ async def force_delete_cmd(message: types.Message, command: CommandObject):
 
 @router.message(Command("backup"), IsAdmin())
 async def backup_db(message: types.Message):
-    from pathlib import Path
-    from tempfile import NamedTemporaryFile
-    import sqlite3
     from config import DB_PATH
     try:
-        db_file = Path(DB_PATH)
-        if not db_file.exists():
+        try:
+            payload, db_name = await asyncio.to_thread(_build_redacted_backup_payload, DB_PATH)
+        except FileNotFoundError:
             await message.answer("❌ Файл базы данных не найден.")
             return
-        with NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
-            tmp_path = tmp.name
-        src = sqlite3.connect(str(db_file))
-        dst = sqlite3.connect(tmp_path)
-        try:
-            src.backup(dst)
-            dst.execute("UPDATE keys SET config = '', vpn_key = '', psk_key = '', client_private_key = ''")
-            dst.commit()
-        finally:
-            dst.close()
-            src.close()
-        redacted = Path(tmp_path)
-        payload = redacted.read_bytes()
-        filename = f"redacted_{db_file.name}"
+        filename = f"redacted_{db_name}"
         caption = (f"📦 Резервная копия базы данных без секретов\n"
                    f"📅 {utc_now_naive().strftime('%d.%m.%Y %H:%M')}")
         if BACKUP_SECURE_MODE:
             if not BACKUP_ENCRYPTION_KEY:
                 await message.answer("❌ BACKUP_SECURE_MODE=1, но BACKUP_ENCRYPTION_KEY не задан.")
-                redacted.unlink(missing_ok=True)
                 return
             payload = Fernet(BACKUP_ENCRYPTION_KEY.encode("utf-8")).encrypt(payload)
             filename = f"{filename}.enc"
             caption += "\n🔐 Secure mode: backup зашифрован (Fernet)."
         elif not BACKUP_ALLOW_INSECURE_SEND:
-            redacted.unlink(missing_ok=True)
             await message.answer("❌ Небезопасная отправка backup отключена. Включите BACKUP_SECURE_MODE=1 или явно задайте BACKUP_ALLOW_INSECURE_SEND=1.")
             return
         else:
@@ -1268,7 +1280,6 @@ async def backup_db(message: types.Message):
             types.BufferedInputFile(payload, filename=filename),
             caption=caption,
         )
-        redacted.unlink(missing_ok=True)
     except Exception as e:
         logger.exception("Ошибка /backup: %s", e)
         await message.answer("❌ Не удалось отправить backup базы.")

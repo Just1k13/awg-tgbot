@@ -125,6 +125,15 @@ def validate_awg_obfuscation_settings(
         if value and not re.fullmatch(r'\d+-\d+', value):
             raise RuntimeError(f'{field} должен быть в формате N-N')
 
+    for field, raw in (('AWG_I1', awg_i1), ('AWG_I2', awg_i2), ('AWG_I3', awg_i3), ('AWG_I4', awg_i4), ('AWG_I5', awg_i5)):
+        value = str(raw).strip()
+        if not value:
+            continue
+        if '\n' in value or '\r' in value:
+            raise RuntimeError(f'{field} не должен содержать переводы строк')
+        if len(value) > 1024:
+            raise RuntimeError(f'{field} слишком длинный (максимум 1024 символа)')
+
 
 def validate_persistent_keepalive(raw_value: str) -> str:
     value = str(raw_value).strip()

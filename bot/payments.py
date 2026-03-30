@@ -233,6 +233,9 @@ async def success_pay(message: types.Message):
                 (
                     (await get_text("payment_success"))
                     + "\nСледующий шаг — откройте подключение и импортируйте его в Amnezia."
+                    "🎉 <b>Доступ готов</b>\n\n"
+                    "Статусы: оплата получена → доступ выпускается → доступ готов ✅\n"
+                    "Следующий шаг — откройте подключение и импортируйте его в Amnezia."
                 ),
                 parse_mode="HTML",
                 reply_markup=get_post_payment_kb(),

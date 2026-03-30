@@ -8,6 +8,9 @@ from config import logger
 from content_settings import get_setting
 from database import get_metric, increment_metric, set_metric, write_audit_log
 
+DENYLIST_DNS_TIMEOUT_SECONDS = 2.0
+DENYLIST_MAX_RESOLVED_CIDRS = 4096
+
 
 def _parse_csv(value: str) -> list[str]:
     return [item.strip() for item in (value or "").split(",") if item.strip()]
@@ -23,10 +26,17 @@ def parse_cidrs(raw: str) -> list[str]:
 
 def resolve_domains(domains_raw: str) -> list[str]:
     resolved: set[str] = set()
-    for domain in _parse_csv(domains_raw):
-        for family, _, _, _, sockaddr in socket.getaddrinfo(domain, 443, type=socket.SOCK_STREAM):
-            if family == socket.AF_INET:
-                resolved.add(f"{sockaddr[0]}/32")
+    previous_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(DENYLIST_DNS_TIMEOUT_SECONDS)
+    try:
+        for domain in _parse_csv(domains_raw):
+            for family, _, _, _, sockaddr in socket.getaddrinfo(domain, 443, type=socket.SOCK_STREAM):
+                if family == socket.AF_INET:
+                    resolved.add(f"{sockaddr[0]}/32")
+                    if len(resolved) >= DENYLIST_MAX_RESOLVED_CIDRS:
+                        return sorted(resolved)
+    finally:
+        socket.setdefaulttimeout(previous_timeout)
     return sorted(resolved)
 
 

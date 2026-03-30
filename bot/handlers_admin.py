@@ -57,11 +57,11 @@ ADMIN_CONTENT_PAGE_SIZE = 8
 ADMIN_EDIT_TIMEOUT_SECONDS = 600
 
 
-async def _guard_admin_callback(cb: types.CallbackQuery) -> bool:
+async def _guard_admin_callback(cb: types.CallbackQuery, *, require_message: bool = False) -> bool:
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Нет доступа", show_alert=True)
         return False
-    if not cb.message:
+    if require_message and not cb.message:
         await cb.answer("Сообщение недоступно", show_alert=True)
         return False
     return True
@@ -273,6 +273,10 @@ async def build_health_text() -> str:
     lag = await get_recovery_lag_seconds()
     helper_failures = await get_metric("awg_helper_failures")
     policy_stats = await policy_metrics()
+    rate_drop_total = await get_metric("rate_limit_dropped_total")
+    rate_drop_message = await get_metric("rate_limit_dropped_message")
+    rate_drop_callback = await get_metric("rate_limit_dropped_callback")
+    rate_buckets = await get_metric("rate_limit_active_buckets")
     denylist_enabled = int(await get_setting("EGRESS_DENYLIST_ENABLED", int) or 0)
     denylist_mode = await get_setting("EGRESS_DENYLIST_MODE", str) or "soft"
     qos_enabled = int(await get_setting("QOS_ENABLED", int) or 0)
@@ -292,7 +296,11 @@ async def build_health_text() -> str:
         f"denylist_errors=<b>{policy_stats['denylist_errors']}</b>\n"
         f"denylist_last_sync_ok=<b>{policy_stats['denylist_last_sync_ok']}</b>\n"
         f"denylist_last_sync_ts=<b>{policy_stats['denylist_last_sync_ts']}</b>\n"
-        f"denylist_entries=<b>{policy_stats['denylist_entries']}</b>"
+        f"denylist_entries=<b>{policy_stats['denylist_entries']}</b>\n"
+        f"rate_limit_dropped_total=<b>{rate_drop_total}</b>\n"
+        f"rate_limit_dropped_message=<b>{rate_drop_message}</b>\n"
+        f"rate_limit_dropped_callback=<b>{rate_drop_callback}</b>\n"
+        f"rate_limit_active_buckets=<b>{rate_buckets}</b>"
     )
 
 
@@ -376,8 +384,7 @@ async def admin_panel(message: types.Message):
 
 @router.callback_query(F.data == CB_ADMIN_BACK_MAIN)
 async def admin_back_main(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await cb.message.answer("⚙️ Админ-меню", reply_markup=get_admin_inline_kb())
     await cb.answer()
@@ -385,8 +392,7 @@ async def admin_back_main(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_TEXTS)
 async def admin_texts_menu(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await _render_texts_list(cb.message, 0)
     await cb.answer("Открыто")
@@ -394,8 +400,7 @@ async def admin_texts_menu(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_SETTINGS)
 async def admin_settings_menu(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await _render_settings_list(cb.message, 0)
     await cb.answer("Открыто")
@@ -404,8 +409,7 @@ async def admin_settings_menu(cb: types.CallbackQuery):
 @router.callback_query(F.data == CB_ADMIN_BACK_TEXTS)
 @router.callback_query(F.data == CB_ADMIN_REFRESH_TEXTS)
 async def admin_texts_back_refresh(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await _render_texts_list(cb.message, 0)
     await cb.answer("Готово")
@@ -414,8 +418,7 @@ async def admin_texts_back_refresh(cb: types.CallbackQuery):
 @router.callback_query(F.data == CB_ADMIN_BACK_SETTINGS)
 @router.callback_query(F.data == CB_ADMIN_REFRESH_SETTINGS)
 async def admin_settings_back_refresh(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await _render_settings_list(cb.message, 0)
     await cb.answer("Готово")
@@ -423,8 +426,7 @@ async def admin_settings_back_refresh(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_TEXTS_PAGE_PREFIX))
 async def admin_texts_page(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     page = int(cb.data.removeprefix(CB_ADMIN_TEXTS_PAGE_PREFIX))
     await _render_texts_list(cb.message, page)
@@ -433,8 +435,7 @@ async def admin_texts_page(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_SETTINGS_PAGE_PREFIX))
 async def admin_settings_page(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     page = int(cb.data.removeprefix(CB_ADMIN_SETTINGS_PAGE_PREFIX))
     await _render_settings_list(cb.message, page)
@@ -443,8 +444,7 @@ async def admin_settings_page(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_TEXT_KEY_PREFIX))
 async def admin_text_key_detail(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     raw = cb.data.removeprefix(CB_ADMIN_TEXT_KEY_PREFIX)
     index_raw, page_raw = raw.split("_", 1)
@@ -461,8 +461,7 @@ async def admin_text_key_detail(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_SETTING_KEY_PREFIX))
 async def admin_setting_key_detail(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     raw = cb.data.removeprefix(CB_ADMIN_SETTING_KEY_PREFIX)
     index_raw, page_raw = raw.split("_", 1)
@@ -479,8 +478,7 @@ async def admin_setting_key_detail(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_TEXT_EDIT_PREFIX))
 async def admin_text_edit_start(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     raw = cb.data.removeprefix(CB_ADMIN_TEXT_EDIT_PREFIX)
     index_raw, page_raw = raw.split("_", 1)
@@ -506,8 +504,7 @@ async def admin_text_edit_start(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_SETTING_EDIT_PREFIX))
 async def admin_setting_edit_start(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     raw = cb.data.removeprefix(CB_ADMIN_SETTING_EDIT_PREFIX)
     index_raw, page_raw = raw.split("_", 1)
@@ -533,8 +530,7 @@ async def admin_setting_edit_start(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_CANCEL_EDIT)
 async def admin_cancel_edit(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await clear_pending_admin_action(cb.from_user.id, "edit_text")
     await clear_pending_admin_action(cb.from_user.id, "edit_setting")
@@ -543,8 +539,7 @@ async def admin_cancel_edit(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_STATS)
 async def admin_stats_cb(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await cb.message.answer(await build_stats_text(), parse_mode="HTML")
     await cb.answer("Готово")
@@ -552,8 +547,7 @@ async def admin_stats_cb(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_SYNC)
 async def admin_sync_awg(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     try:
         await sync_qos_state()
@@ -567,8 +561,7 @@ async def admin_sync_awg(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_CLEAN_ORPHANS)
 async def admin_clean_orphans(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     orphans = await get_orphan_awg_peers()
     await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans", "orphans": len(orphans)})
@@ -587,8 +580,7 @@ async def admin_clean_orphans(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_CONFIRM_CLEAN_ORPHANS)
 async def confirm_clean_orphans(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     action = await pop_pending_admin_action(ADMIN_ID, "clean_orphans")
     if not action or action.get("action") != "clean_orphans":
@@ -620,8 +612,7 @@ async def cancel_clean_orphans(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_LIST)
 async def admin_list_all(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await _render_users_page(cb.message, 0)
     await cb.answer()
@@ -629,8 +620,7 @@ async def admin_list_all(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_USERS_PAGE_PREFIX))
 async def admin_users_page(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     try:
         page = int(cb.data.removeprefix(CB_ADMIN_USERS_PAGE_PREFIX))
@@ -645,8 +635,7 @@ async def admin_users_page(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_MANAGE_USER_PREFIX))
 async def admin_manage_user(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     try:
         _, _, _, uid_raw, page_raw = cb.data.split("_", 4)
@@ -681,8 +670,7 @@ async def admin_manage_user(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_ADD_DAYS_PREFIX))
 async def admin_add_days_btn(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     try:
         _, _, _, uid_raw, days_raw, _page_raw = cb.data.split("_", 5)
@@ -712,8 +700,7 @@ async def admin_add_days_btn(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_REVOKE_PREFIX))
 async def admin_revoke_btn(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     try:
         _, _, uid_raw, page_raw = cb.data.split("_", 3)
@@ -736,8 +723,7 @@ async def admin_revoke_btn(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_CONFIRM_REVOKE)
 async def confirm_revoke(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     action = await pop_pending_admin_action(ADMIN_ID, "revoke")
     if not action or action.get("action") != "revoke":
@@ -772,8 +758,7 @@ async def cancel_revoke(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_DELETE_PREFIX))
 async def admin_del_user(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     try:
         _, _, uid_raw, page_raw = cb.data.split("_", 3)
@@ -796,8 +781,7 @@ async def admin_del_user(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_CONFIRM_DELETE_USER)
 async def confirm_delete_user(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     action = await pop_pending_admin_action(ADMIN_ID, "delete_user")
     if not action or action.get("action") != "delete_user":
@@ -832,8 +816,7 @@ async def cancel_delete_user(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_ADMIN_BROADCAST)
 async def admin_broadcast_btn(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await cb.answer()
     await cb.message.answer(
@@ -849,8 +832,7 @@ async def admin_broadcast_btn(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_BROADCAST_CONFIRM)
 async def broadcast_confirm(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     text = await get_pending_broadcast(ADMIN_ID)
     if not text:
@@ -872,8 +854,7 @@ async def broadcast_confirm(cb: types.CallbackQuery):
 
 @router.callback_query(F.data == CB_BROADCAST_CANCEL)
 async def broadcast_cancel(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await clear_pending_broadcast(ADMIN_ID)
     await write_audit_log(ADMIN_ID, "broadcast_cancel", "")
@@ -883,8 +864,7 @@ async def broadcast_cancel(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_TEXT_RESET_PREFIX))
 async def admin_text_reset_btn(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     raw = cb.data.removeprefix(CB_ADMIN_TEXT_RESET_PREFIX)
     index_raw, page_raw = raw.split("_", 1)
@@ -904,8 +884,7 @@ async def admin_text_reset_btn(cb: types.CallbackQuery):
 
 @router.callback_query(F.data.startswith(CB_ADMIN_SETTING_RESET_PREFIX))
 async def admin_setting_reset_btn(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     raw = cb.data.removeprefix(CB_ADMIN_SETTING_RESET_PREFIX)
     index_raw, page_raw = raw.split("_", 1)
@@ -926,8 +905,7 @@ async def admin_setting_reset_btn(cb: types.CallbackQuery):
 @router.callback_query(F.data == CB_ADMIN_REFERRALS)
 @router.callback_query(F.data == CB_ADMIN_REFRESH_REFERRALS)
 async def admin_referrals_summary(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await cb.message.answer(
         await build_ref_stats_text(),
@@ -940,8 +918,7 @@ async def admin_referrals_summary(cb: types.CallbackQuery):
 @router.callback_query(F.data == CB_ADMIN_HEALTH)
 @router.callback_query(F.data == CB_ADMIN_REFRESH_HEALTH)
 async def admin_health_summary(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     await cb.message.answer(
         await build_health_text(),
@@ -1195,8 +1172,7 @@ async def clean_orphans_force_cmd(message: types.Message):
 
 @router.callback_query(F.data == CB_CONFIRM_CLEAN_ORPHANS_FORCE)
 async def confirm_clean_orphans_force(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID:
-        await cb.answer("Нет доступа", show_alert=True)
+    if not await _guard_admin_callback(cb):
         return
     action = await pop_pending_admin_action(ADMIN_ID, "clean_orphans_force")
     if not action or action.get("action") != "clean_orphans_force":

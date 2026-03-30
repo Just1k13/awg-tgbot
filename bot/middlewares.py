@@ -8,6 +8,7 @@ from typing import Any
 from aiogram import BaseMiddleware, types
 
 from config import logger
+from database import increment_metric, set_metric
 
 Handler = Callable[[Any, dict[str, Any]], Awaitable[Any]]
 
@@ -98,6 +99,17 @@ class RateLimitMiddleware(BaseMiddleware):
             self._hits.popitem(last=False)
         return False
 
+    async def _record_rate_limit_drop(self, scope: str) -> None:
+        try:
+            await increment_metric("rate_limit_dropped_total")
+            if scope == "message":
+                await increment_metric("rate_limit_dropped_message")
+            elif scope == "callback":
+                await increment_metric("rate_limit_dropped_callback")
+            await set_metric("rate_limit_active_buckets", len(self._hits))
+        except Exception as error:
+            logger.debug("rate-limit metrics update failed: %s", error)
+
     async def __call__(self, handler: Handler, event: Any, data: dict[str, Any]) -> Any:
         user_id = 0
         chat_id = 0
@@ -120,6 +132,7 @@ class RateLimitMiddleware(BaseMiddleware):
         key = (chat_id, user_id, scope)
         if self._is_limited(key, monotonic()):
             logger.warning("Rate limit: dropped %s from user=%s chat=%s", scope, user_id, chat_id)
+            await self._record_rate_limit_drop(scope)
             if isinstance(event, types.CallbackQuery):
                 await event.answer("Слишком часто. Подождите секунду.")
             return None

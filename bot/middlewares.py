@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
@@ -68,6 +68,60 @@ class _BaseDuplicateGuardMiddleware(BaseMiddleware):
                 payload,
             )
             await self._on_duplicate(event)
+            return None
+
+        return await handler(event, data)
+
+
+class RateLimitMiddleware(BaseMiddleware):
+    """Simple per-user sliding-window limiter for flood protection."""
+
+    def __init__(self, ttl_seconds: float, max_hits: int, max_entries: int = 8192) -> None:
+        self.ttl_seconds = ttl_seconds
+        self.max_hits = max_hits
+        self.max_entries = max_entries
+        self._hits: OrderedDict[tuple[int, int, str], deque[float]] = OrderedDict()
+
+    def _is_limited(self, key: tuple[int, int, str], now: float) -> bool:
+        bucket = self._hits.get(key)
+        if bucket is None:
+            bucket = deque()
+            self._hits[key] = bucket
+        self._hits.move_to_end(key)
+        cutoff = now - self.ttl_seconds
+        while bucket and bucket[0] < cutoff:
+            bucket.popleft()
+        if len(bucket) >= self.max_hits:
+            return True
+        bucket.append(now)
+        if len(self._hits) > self.max_entries:
+            self._hits.popitem(last=False)
+        return False
+
+    async def __call__(self, handler: Handler, event: Any, data: dict[str, Any]) -> Any:
+        user_id = 0
+        chat_id = 0
+        scope = type(event).__name__
+
+        if isinstance(event, types.Message):
+            user_id = event.from_user.id if event.from_user else 0
+            chat_id = event.chat.id if event.chat else 0
+            scope = "message"
+        elif isinstance(event, types.CallbackQuery):
+            user_id = event.from_user.id if event.from_user else 0
+            chat_id = event.message.chat.id if event.message and event.message.chat else 0
+            scope = "callback"
+        elif hasattr(event, "from_user") and getattr(event, "from_user"):
+            user_id = int(getattr(event.from_user, "id", 0) or 0)
+
+        if user_id <= 0:
+            return await handler(event, data)
+
+        key = (chat_id, user_id, scope)
+        if self._is_limited(key, monotonic()):
+            logger.warning("Rate limit: dropped %s from user=%s chat=%s", scope, user_id, chat_id)
+            if isinstance(event, types.CallbackQuery):
+                await event.answer("Слишком часто. Подождите секунду.")
             return None
 
         return await handler(event, data)

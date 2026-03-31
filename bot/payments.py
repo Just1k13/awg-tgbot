@@ -27,6 +27,7 @@ from database import (
     claim_payment_and_job_for_provisioning,
     db_health_info,
     ensure_user_exists,
+    fetchone,
     finalize_payment_and_job,
     mark_ready_notification_sent,
     get_provisioning_attempt_count,
@@ -417,3 +418,45 @@ async def payment_recovery_worker(bot: Bot | None = None) -> int:
                 await write_audit_log(user_id, "payment_recovery_stuck_manual", f"payment_id={payment_id}; {reason}")
                 await _notify_admin_stuck(bot, payment_id, user_id, reason)
     return repaired
+
+
+async def manual_retry_activation(payment_id: str, bot: Bot | None = None) -> dict[str, str]:
+    row = await fetchone(
+        """
+        SELECT user_id, payload, status
+        FROM payments
+        WHERE telegram_payment_charge_id = ?
+        """,
+        (payment_id,),
+    )
+    if not row:
+        return {"result": "no_payment", "message": "Платёж не найден."}
+
+    user_id = int(row[0])
+    payload = str(row[1] or "")
+    status = str(row[2] or "")
+    if status == "applied":
+        return {"result": "already_applied", "message": "Платёж уже применён, повтор не требуется."}
+    if status == "provisioning":
+        return {"result": "in_progress", "message": "Активация уже выполняется recovery-процессом."}
+    if status not in {"received", "needs_repair", "failed", "stuck_manual"}:
+        return {"result": "not_retryable", "message": f"Текущий статус не подходит для retry: {status}"}
+
+    tariff = TARIFFS.get(payload)
+    if not tariff:
+        return {"result": "unknown_payload", "message": f"Неизвестный payload={payload}. Нужна ручная проверка."}
+
+    try:
+        done = await process_payment_provisioning(payment_id, user_id, payload, tariff["days"], bot=bot)
+        if done:
+            await update_last_provision_status(payment_id, "ready")
+            return {"result": "succeeded", "message": "Retry выполнен успешно, доступ выдан."}
+        current_status = await get_payment_status(payment_id)
+        if current_status == "applied":
+            return {"result": "already_applied", "message": "Платёж уже применён."}
+        if current_status == "provisioning":
+            return {"result": "in_progress", "message": "Активация уже в процессе, повтор не запущен."}
+        return {"result": "no_op", "message": "Нечего повторять: кейс не перешёл в provisioning."}
+    except Exception as e:
+        logger.warning("manual retry failed for payment=%s: %s", payment_id, e)
+        return {"result": "failed", "message": f"Retry завершился ошибкой: {str(e)[:200]}"}

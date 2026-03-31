@@ -44,6 +44,7 @@ from ui_constants import (
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
     CB_ADMIN_USERS_PAGE_PREFIX, CB_ADMIN_MANAGE_USER_PREFIX, CB_ADMIN_ADD_DAYS_PREFIX,
     CB_ADMIN_SET_RATE_PREFIX,
+    CB_ADMIN_RETRY_ACTIVATION_PREFIX,
     CB_ADMIN_REVOKE_PREFIX, CB_ADMIN_DELETE_PREFIX, CB_CONFIRM_CLEAN_ORPHANS,
     CB_CANCEL_CLEAN_ORPHANS, CB_CONFIRM_REVOKE, CB_CANCEL_REVOKE, CB_CONFIRM_DELETE_USER,
     CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE,
@@ -51,6 +52,7 @@ from ui_constants import (
 from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
 from network_policy import denylist_sync, policy_metrics
 from content_settings import get_setting
+from payments import manual_retry_activation
 
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
@@ -411,22 +413,42 @@ def _users_page_kb(rows: list[tuple[int, str]], page: int, total_pages: int) -> 
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def _user_manage_kb(uid: int, page: int) -> types.InlineKeyboardMarkup:
-    return types.InlineKeyboardMarkup(
-        inline_keyboard=[
+def _user_manage_kb(uid: int, page: int, *, show_retry_activation: bool = False) -> types.InlineKeyboardMarkup:
+    rows: list[list[types.InlineKeyboardButton]] = [
+        [
+            types.InlineKeyboardButton(text="+1 день", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_1_{page}"),
+            types.InlineKeyboardButton(text="+7 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_7_{page}"),
+            types.InlineKeyboardButton(text="+30 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_30_{page}"),
+        ],
+        [
+            types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"{CB_ADMIN_REVOKE_PREFIX}{uid}_{page}"),
+            types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CB_ADMIN_DELETE_PREFIX}{uid}_{page}"),
+        ],
+    ]
+    if show_retry_activation:
+        rows.append(
             [
-                types.InlineKeyboardButton(text="+1 день", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_1_{page}"),
-                types.InlineKeyboardButton(text="+7 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_7_{page}"),
-                types.InlineKeyboardButton(text="+30 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_30_{page}"),
-            ],
-            [
-                types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"{CB_ADMIN_REVOKE_PREFIX}{uid}_{page}"),
-                types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CB_ADMIN_DELETE_PREFIX}{uid}_{page}"),
-            ],
-            [types.InlineKeyboardButton(text="🔄 Обновить карточку", callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_{page}")],
-            [types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")],
-        ]
-    )
+                types.InlineKeyboardButton(
+                    text="🛠 Retry activation now",
+                    callback_data=f"{CB_ADMIN_RETRY_ACTIVATION_PREFIX}{uid}_{page}",
+                ),
+            ]
+        )
+    rows.extend([
+        [types.InlineKeyboardButton(text="🔄 Обновить карточку", callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_{page}")],
+        [types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")],
+    ])
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _is_retry_activation_relevant(payment_summary: dict | None, has_keys: bool) -> bool:
+    if not payment_summary or has_keys:
+        return False
+    payment_status = str(payment_summary.get("status") or "")
+    activation_status = str(payment_summary.get("last_provision_status") or "")
+    retryable_payment_statuses = {"received", "provisioning", "needs_repair", "failed", "stuck_manual"}
+    retryable_activation_statuses = {"payment_received", "provisioning", "ready_config_pending", "needs_repair", "failed", "stuck_manual"}
+    return payment_status in retryable_payment_statuses or activation_status in retryable_activation_statuses
 
 
 def _operator_next_step(payment_status: str | None, activation_status: str | None, has_keys: bool) -> str:
@@ -756,12 +778,15 @@ async def admin_manage_user(cb: types.CallbackQuery):
         payment_line = "нет платежей"
         activation_line = "нет данных"
         operator_step = "wait"
+        show_retry_activation = False
         if payment_summary:
             payment_line = (
                 f"{payment_summary['status']} · {payment_summary['amount']} {payment_summary['currency']}"
             )
             activation_line = payment_summary["last_provision_status"] or "—"
             operator_step = _operator_next_step(payment_summary["status"], activation_line, bool(keys))
+            show_retry_activation = _is_retry_activation_relevant(payment_summary, bool(keys))
+        retry_hint = "\n🧰 Retry: <b>доступен</b> для ручной повторной активации" if show_retry_activation else ""
         await cb.message.answer(
             (
                 "🛠 <b>Управление пользователем</b>\n\n"
@@ -775,9 +800,10 @@ async def admin_manage_user(cb: types.CallbackQuery):
                 f"🚦 Активация: <b>{activation_line}</b>\n"
                 f"➡️ Шаг оператора: <b>{operator_step}</b>\n"
                 f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}"
+                f"{retry_hint}"
             ),
             parse_mode="HTML",
-            reply_markup=_user_manage_kb(uid, page),
+            reply_markup=_user_manage_kb(uid, page, show_retry_activation=show_retry_activation),
         )
         await cb.answer("Открыто")
     except ValueError:
@@ -824,6 +850,64 @@ async def admin_set_rate_btn(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
     await cb.answer("Отключено в personal MVP", show_alert=True)
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_RETRY_ACTIVATION_PREFIX))
+async def admin_retry_activation_btn(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    try:
+        _, _, _, uid_raw, page_raw = cb.data.split("_", 4)
+        uid = int(uid_raw)
+        page = int(page_raw)
+        if admin_command_limited(f"admin_retry_activation_{uid}", cb.from_user.id):
+            await cb.answer("Слишком часто: подождите перед новым retry.", show_alert=True)
+            return
+
+        payment_summary = await get_latest_user_payment_summary(uid)
+        if not payment_summary:
+            await write_audit_log(ADMIN_ID, "manual_retry_noop", f"target={uid}; reason=no_payment")
+            await cb.message.answer(
+                "ℹ️ Нет платежей для retry. Нечего повторно активировать.",
+                reply_markup=_user_manage_kb(uid, page),
+            )
+            await cb.answer("Nothing to retry")
+            return
+
+        payment_id = str(payment_summary["payment_id"])
+        await write_audit_log(ADMIN_ID, "manual_retry_requested", f"target={uid}; payment_id={payment_id}")
+        result = await manual_retry_activation(payment_id, bot=cb.bot)
+        result_code = result.get("result", "unknown")
+        result_message = result.get("message", "Без деталей.")
+        if result_code == "succeeded":
+            await write_audit_log(ADMIN_ID, "manual_retry_succeeded", f"target={uid}; payment_id={payment_id}")
+            outcome = "✅ Retry succeeded"
+        elif result_code in {"no_payment", "already_applied", "in_progress", "not_retryable", "no_op"}:
+            await write_audit_log(ADMIN_ID, "manual_retry_noop", f"target={uid}; payment_id={payment_id}; result={result_code}")
+            outcome = "ℹ️ Retry no-op"
+        else:
+            await write_audit_log(ADMIN_ID, "manual_retry_failed", f"target={uid}; payment_id={payment_id}; result={result_code}")
+            outcome = "⚠️ Retry failed"
+
+        await cb.message.answer(
+            (
+                f"{outcome}\n\n"
+                f"🆔 <code>{uid}</code>\n"
+                f"💳 payment_id: <code>{payment_id}</code>\n"
+                f"🧩 Результат: <b>{escape_html(result_code)}</b>\n"
+                f"📝 Детали: {escape_html(result_message)}\n\n"
+                "Следующий шаг: обновите карточку; если статус не меняется — проверьте audit и выдайте доступ вручную."
+            ),
+            parse_mode="HTML",
+            reply_markup=_user_manage_kb(uid, page),
+        )
+        await cb.answer("Retry обработан")
+    except ValueError:
+        await cb.answer("Некорректные параметры действия", show_alert=True)
+    except Exception as e:
+        logger.exception("Ошибка admin_retry_activation_btn: %s", e)
+        await write_audit_log(ADMIN_ID, "manual_retry_failed", f"error={str(e)[:300]}")
+        await cb.answer("❌ Не удалось выполнить retry", show_alert=True)
 
 
 @router.callback_query(F.data.startswith(CB_ADMIN_REVOKE_PREFIX))

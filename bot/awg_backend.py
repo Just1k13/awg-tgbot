@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import ipaddress
-import re
 import uuid
 import zlib
 from datetime import datetime, timedelta

@@ -7,11 +7,7 @@ INSTALL_DIR="/opt/amnezia/bot"
 STATE_DIR="${INSTALL_DIR}/.state"
 REPO_BRANCH_FILE="${STATE_DIR}/repo_branch"
 REPO_BRANCH="${REPO_BRANCH:-$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)}"
-REPO_BRANCH="${REPO_BRANCH:-main}"
-case "$REPO_BRANCH" in
-  main|beta) ;;
-  *) REPO_BRANCH="main" ;;
-esac
+REPO_BRANCH="main"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
 TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
@@ -2421,8 +2417,7 @@ print_menu_awg_yes_bot_no() {
   echo "Доступные действия:"
   echo "1) Установить"
   echo "2) Диагностика"
-  echo "3) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
-  echo "4) Повторить проверку"
+  echo "3) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -2431,12 +2426,9 @@ print_menu_awg_yes_bot_yes() {
   echo "Доступные действия:"
   echo "1) Статус"
   echo "2) Логи"
-  echo "3) Безопасно обновить (pinned)"
-  echo "4) Переустановить"
-  echo "5) Удалить"
-  echo
-  echo "6) Диагностика"
-  echo "7) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
+  echo "3) Переустановить"
+  echo "4) Удалить"
+  echo "5) Диагностика"
   echo "0) Выход"
   print_line
 }
@@ -2448,8 +2440,7 @@ print_menu_awg_no_bot_yes() {
   echo "3) Переустановить"
   echo "4) Удалить"
   echo "5) Диагностика"
-  echo "6) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
-  echo "7) Повторить проверку"
+  echo "6) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -2457,8 +2448,7 @@ print_menu_awg_no_bot_yes() {
 print_menu_awg_no_bot_no() {
   echo "Доступные действия:"
   echo "1) Диагностика"
-  echo "2) Сменить ветку (сейчас: ${REPO_BRANCH} → $(target_branch_for_toggle))"
-  echo "3) Повторить проверку"
+  echo "2) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -2468,11 +2458,11 @@ run_action() {
   case "$action" in
     install) install_or_reinstall_flow install ;;
     reinstall) install_or_reinstall_flow reinstall ;;
-    update) update_bot direct ;;
-    check-updates) check_updates ;;
+    update|check-updates|choose-branch)
+      warn "Команда '$action' отключена в personal MVP. Используй reinstall для обновления."
+      ;;
     status) show_status ;;
     logs) show_logs ;;
-    choose-branch) choose_branch_menu ;;
     diagnostics) detect_install_state; refresh_update_status_quiet; print_detailed_startup_summary ;;
     preflight|detect-install-state) detect_install_state; refresh_update_status_quiet; print_detailed_startup_summary ;;
     sync-helper-policy) sync_awg_helper_policy_from_env ;;
@@ -2497,11 +2487,9 @@ main_menu() {
         case "$choice" in
           1) show_status ;;
           2) show_logs ;;
-          3) update_bot menu ;;
-          4) install_or_reinstall_flow reinstall ;;
-          5) remove_bot ;;
-          6) print_detailed_startup_summary ;;
-          7) choose_branch_menu; should_pause=0 ;;
+          3) install_or_reinstall_flow reinstall ;;
+          4) remove_bot ;;
+          5) print_detailed_startup_summary ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -2512,8 +2500,7 @@ main_menu() {
         case "$choice" in
           1) install_or_reinstall_flow install ;;
           2) print_detailed_startup_summary ;;
-          3) choose_branch_menu; should_pause=0 ;;
-          4) should_pause=0 ;;
+          3) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -2527,8 +2514,7 @@ main_menu() {
           3) install_or_reinstall_flow reinstall ;;
           4) remove_bot ;;
           5) print_detailed_startup_summary ;;
-          6) choose_branch_menu; should_pause=0 ;;
-          7) should_pause=0 ;;
+          6) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -2538,8 +2524,7 @@ main_menu() {
         prompt_menu_key "Выбери действие: " choice
         case "$choice" in
           1) print_detailed_startup_summary ;;
-          2) choose_branch_menu; should_pause=0 ;;
-          3) should_pause=0 ;;
+          2) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -2567,7 +2552,7 @@ fi
 
 if ! has_tty; then
   warn "Интерактивное меню требует TTY и не может читать ответы из stdin pipe."
-  warn "Используй action-команды (например: status, update, diagnostics, sync-helper-policy) без prompt-ов."
+  warn "Используй action-команды (например: status, reinstall, diagnostics, sync-helper-policy) без prompt-ов."
   die "Для первичной установки запусти команду в интерактивной сессии с TTY (SSH/console)."
 fi
 

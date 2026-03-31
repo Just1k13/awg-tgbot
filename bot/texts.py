@@ -45,4 +45,6 @@ async def get_activation_status_text(status: str | None, *, has_config: bool = T
 async def get_payment_result_text(status: str) -> str:
     if status == "ready":
         return f"{await get_text('payment_success')}\n{await get_text('payment_next_step')}"
+    if status == "ready_config_pending":
+        return f"{await get_text('activation_status_ready_config_pending')}\n\n{await get_text('payment_pending_followup')}"
     return f"{await get_text('payment_pending')}\n\n{await get_text('payment_pending_followup')}"

@@ -14,8 +14,10 @@ from config import (
     get_support_username,
     maybe_set_support_username,
 )
-from database import ensure_user_exists, get_latest_user_payment_summary, get_user_keys, get_user_subscription
-from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active
+from awg_backend import get_awg_peers
+from database import ensure_user_exists, fetchall, get_latest_user_payment_summary, get_user_keys, get_user_subscription
+from device_activity import render_device_activity_line
+from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active, utc_now_naive
 from keyboards import (
     get_buy_inline_kb,
     get_config_result_kb,
@@ -99,6 +101,50 @@ def _build_last_payment_fields(payment_summary: dict | None) -> dict[str, str]:
     fields["payment_amount"] = f"{payment_summary['amount']} {payment_summary['currency']}"
     fields["payment_status"] = _format_last_payment_status(str(payment_summary.get("status")))
     return fields
+
+
+async def _build_user_device_activity_lines(user_id: int) -> list[str]:
+    key_rows = await fetchall(
+        """
+        SELECT device_num, public_key
+        FROM keys
+        WHERE user_id = ?
+          AND state = 'active'
+          AND public_key NOT LIKE 'pending:%'
+        ORDER BY device_num
+        LIMIT 2
+        """,
+        (user_id,),
+    )
+    if not key_rows:
+        return ["• нет данных"]
+
+    runtime_available = True
+    peer_by_public_key: dict[str, dict] = {}
+    try:
+        runtime_peers = await get_awg_peers()
+        peer_by_public_key = {
+            str(peer.get("public_key") or "").strip(): peer
+            for peer in runtime_peers
+            if str(peer.get("public_key") or "").strip()
+        }
+    except Exception:
+        runtime_available = False
+
+    now = utc_now_naive()
+    lines: list[str] = []
+    for device_num, public_key in key_rows:
+        peer = peer_by_public_key.get(str(public_key).strip())
+        lines.append(
+            render_device_activity_line(
+                device_num=int(device_num),
+                has_runtime_peer=peer is not None,
+                last_handshake_at=peer.get("latest_handshake_at") if peer else None,
+                runtime_available=runtime_available,
+                now=now,
+            )
+        )
+    return lines
 
 
 async def _send_buy_menu(target, user_id: int):
@@ -217,6 +263,7 @@ async def profile(message: types.Message):
         next_step = "Нажмите «💳 Оплатить доступ»"
     payment_summary = await get_latest_user_payment_summary(message.from_user.id)
     payment_fields = _build_last_payment_fields(payment_summary)
+    device_activity_lines = await _build_user_device_activity_lines(message.from_user.id)
     await message.answer(
         await get_text(
             "profile_screen",
@@ -228,6 +275,7 @@ async def profile(message: types.Message):
             remaining=remaining,
             connection_status=connection_status,
             **payment_fields,
+            device_activity_block="\n".join(device_activity_lines),
             next_step=next_step,
             support_line=await get_support_short_text(),
         ),

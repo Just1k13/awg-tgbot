@@ -83,6 +83,59 @@ class RuntimeSmokecheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(helper["hint"], "синхронизируй helper policy с .env")
         self.assertEqual(report["hint"], "синхронизируй helper policy с .env")
 
+    async def test_runtime_smokecheck_helper_policy_parse_error_has_json_hint(self):
+        import handlers_admin
+
+        async def fake_db_health_info():
+            return {"is_healthy": True}
+
+        async def fake_check_awg_container():
+            return None
+
+        with (
+            patch.object(handlers_admin, "DOCKER_CONTAINER", "amnezia-awg2"),
+            patch.object(handlers_admin, "WG_INTERFACE", "awg0"),
+            patch.object(handlers_admin, "AWG_HELPER_POLICY_PATH", "/etc/awg-bot-helper.json"),
+            patch.object(handlers_admin, "db_health_info", fake_db_health_info),
+            patch.object(handlers_admin, "check_awg_container", fake_check_awg_container),
+            patch.object(
+                handlers_admin,
+                "read_helper_policy",
+                return_value=("", "", "helper policy parse failed: Expecting value: line 1 column 1 (char 0)"),
+            ),
+        ):
+            report = await handlers_admin.run_runtime_smokecheck()
+
+        helper = next(item for item in report["checks"] if item["name"] == "Helper policy")
+        self.assertEqual(helper["state"], "failed")
+        self.assertEqual(helper["detail"], "helper policy parse failed (invalid JSON)")
+        self.assertEqual(helper["hint"], "исправь формат helper policy (JSON) и перезапусти helper")
+        self.assertEqual(report["hint"], "исправь формат helper policy (JSON) и перезапусти helper")
+
+    async def test_runtime_smokecheck_helper_policy_path_error_keeps_path_hint(self):
+        import handlers_admin
+
+        async def fake_db_health_info():
+            return {"is_healthy": True}
+
+        async def fake_check_awg_container():
+            return None
+
+        with (
+            patch.object(handlers_admin, "DOCKER_CONTAINER", "amnezia-awg2"),
+            patch.object(handlers_admin, "WG_INTERFACE", "awg0"),
+            patch.object(handlers_admin, "AWG_HELPER_POLICY_PATH", "/etc/awg-bot-helper.json"),
+            patch.object(handlers_admin, "db_health_info", fake_db_health_info),
+            patch.object(handlers_admin, "check_awg_container", fake_check_awg_container),
+            patch.object(handlers_admin, "read_helper_policy", return_value=("", "", "helper policy not found: /etc/awg-bot-helper.json")),
+        ):
+            report = await handlers_admin.run_runtime_smokecheck()
+
+        helper = next(item for item in report["checks"] if item["name"] == "Helper policy")
+        self.assertEqual(helper["state"], "failed")
+        self.assertEqual(helper["hint"], "проверь путь/доступ к helper policy")
+        self.assertEqual(report["hint"], "проверь путь/доступ к helper policy")
+
     async def test_runtime_smokecheck_awg_target_failure_has_autofix_hint(self):
         import handlers_admin
 

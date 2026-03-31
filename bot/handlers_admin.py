@@ -379,6 +379,13 @@ def _hint_for_awg_target_error(error: str) -> str:
     return "проверь контейнер/helper и сервис awg-bot"
 
 
+def _hint_for_helper_policy_error(error: str) -> str:
+    lowered = error.lower()
+    if "parse failed" in lowered or "json object" in lowered:
+        return "исправь формат helper policy (JSON) и перезапусти helper"
+    return "проверь путь/доступ к helper policy"
+
+
 async def run_runtime_smokecheck() -> dict[str, object]:
     checks: list[dict[str, str]] = []
 
@@ -430,12 +437,15 @@ async def run_runtime_smokecheck() -> dict[str, object]:
     if AWG_HELPER_POLICY_PATH and DOCKER_CONTAINER and WG_INTERFACE:
         policy_container, policy_interface, policy_error = read_helper_policy(Path(AWG_HELPER_POLICY_PATH))
         if policy_error:
+            detail = policy_error
+            if "parse failed:" in policy_error:
+                detail = "helper policy parse failed (invalid JSON)"
             checks.append(
                 {
                     "name": "Helper policy",
                     "state": "failed",
-                    "detail": policy_error,
-                    "hint": "проверь путь/доступ к helper policy",
+                    "detail": detail,
+                    "hint": _hint_for_helper_policy_error(policy_error),
                 }
             )
         elif policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:

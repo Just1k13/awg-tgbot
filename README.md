@@ -44,6 +44,7 @@
 - «editable platform» с UI-редактором текстов/настроек как основной админ-путь;
 - QoS/speed-limit operator flow;
 - force/orphan cleanup operator-подсистема;
+- legacy admin-команды `/set_rate`, `/rate`, `/health`, `/text_*`, `/setting_*`, `/clean_orphans_force`, `/force_delete`;
 - перегруженная diagnostics/ops-обвязка в пользовательском интерфейсе.
 
 > Идея: меньше ручек, меньше флагов, меньше хрупкости.

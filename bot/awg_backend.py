@@ -877,6 +877,178 @@ async def issue_subscription(user_id: int, days: int, silent: bool = False, oper
         return new_until
 
 
+async def delete_user_device(user_id: int, device_num: int) -> dict[str, Any]:
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            """
+            SELECT id, public_key, ip
+            FROM keys
+            WHERE user_id = ?
+              AND device_num = ?
+              AND public_key NOT LIKE 'pending:%'
+              AND state != 'deleted'
+            """,
+            (user_id, device_num),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            await db.commit()
+            await write_audit_log(user_id, "delete_user_device_noop", f"device_num={device_num}; reason=not_found")
+            return {"status": "not_found", "removed_runtime": False}
+        key_id, public_key, ip = int(row[0]), str(row[1]), str(row[2] or "")
+        await db.execute(
+            "UPDATE keys SET state='delete_pending', state_updated_at=?, delete_reason='admin_device_delete' WHERE id = ?",
+            (utc_now_naive().isoformat(), key_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    removed_runtime = False
+    try:
+        await remove_peer_from_awg(public_key)
+        if ip:
+            await qos_clear(run_docker, ip, user_id)
+        removed_runtime = True
+    except Exception:
+        current_keys = {(peer.get("public_key") or "").strip() for peer in await get_awg_peers()}
+        if public_key and public_key not in current_keys:
+            removed_runtime = True
+        else:
+            db = await open_db()
+            try:
+                await db.execute("BEGIN IMMEDIATE")
+                await db.execute(
+                    "UPDATE keys SET state='active', state_updated_at=? WHERE id = ?",
+                    (utc_now_naive().isoformat(), key_id),
+                )
+                await db.commit()
+            finally:
+                await db.close()
+            raise
+
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        await db.execute(
+            "UPDATE keys SET state='deleted', state_updated_at=? WHERE id = ?",
+            (utc_now_naive().isoformat(), key_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+    await write_audit_log(user_id, "delete_user_device", f"device_num={device_num}; removed_runtime={int(removed_runtime)}")
+    return {"status": "deleted", "removed_runtime": removed_runtime}
+
+
+async def reissue_user_device(user_id: int, device_num: int) -> dict[str, Any]:
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            """
+            SELECT id, public_key, ip, psk_key
+            FROM keys
+            WHERE user_id = ?
+              AND device_num = ?
+              AND public_key NOT LIKE 'pending:%'
+              AND state = 'active'
+            """,
+            (user_id, device_num),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            await db.commit()
+            await write_audit_log(user_id, "reissue_user_device_noop", f"device_num={device_num}; reason=not_found")
+            return {"status": "not_found"}
+        key_id, old_public_key, ip, old_psk_enc = int(row[0]), str(row[1]), str(row[2]), str(row[3] or "")
+        await db.execute(
+            "UPDATE keys SET state='reissue_pending', state_updated_at=? WHERE id = ?",
+            (utc_now_naive().isoformat(), key_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    old_psk = decrypt_text(old_psk_enc) if old_psk_enc else ""
+    old_removed = False
+    try:
+        try:
+            await remove_peer_from_awg(old_public_key)
+            old_removed = True
+        except Exception:
+            current_keys = {(peer.get("public_key") or "").strip() for peer in await get_awg_peers()}
+            if old_public_key and old_public_key not in current_keys:
+                old_removed = True
+            else:
+                raise
+
+        client_private_key, new_public_key = await generate_keypair()
+        psk_key = await generate_psk()
+        await add_peer_to_awg(new_public_key, ip, psk_key)
+        config = build_client_config(client_private_key, ip, psk_key)
+        vpn_key = encode_vpn_key(build_vpn_payload(client_private_key, new_public_key, ip, psk_key))
+
+        db = await open_db()
+        try:
+            now_iso = utc_now_naive().isoformat()
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                UPDATE keys
+                SET public_key = ?,
+                    client_private_key = ?,
+                    psk_key = ?,
+                    config = ?,
+                    vpn_key = ?,
+                    state = 'active',
+                    state_updated_at = ?,
+                    created_at = ?
+                WHERE id = ?
+                """,
+                (
+                    new_public_key,
+                    encrypt_text(client_private_key),
+                    encrypt_text(psk_key),
+                    config,
+                    vpn_key,
+                    now_iso,
+                    now_iso,
+                    key_id,
+                ),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        await add_protected_peer(new_public_key, "admin-issued")
+        await write_audit_log(user_id, "reissue_user_device", f"device_num={device_num}")
+        return {"status": "reissued", "new_public_key": new_public_key, "old_public_key": old_public_key}
+    except Exception:
+        if "new_public_key" in locals():
+            try:
+                await remove_peer_from_awg(new_public_key)
+            except Exception as rollback_error:
+                logger.error("Rollback: не удалось удалить новый peer %s: %s", new_public_key, rollback_error)
+        if old_removed and old_psk:
+            try:
+                await add_peer_to_awg(old_public_key, ip, old_psk)
+            except Exception as restore_error:
+                logger.error("Rollback: не удалось восстановить старый peer %s: %s", old_public_key, restore_error)
+        db = await open_db()
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                "UPDATE keys SET state='active', state_updated_at=? WHERE id = ?",
+                (utc_now_naive().isoformat(), key_id),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+        raise
+
+
 async def revoke_user_access(user_id: int, only_if_expired: bool = False) -> int:
     db = await open_db()
     try:

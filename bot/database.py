@@ -579,7 +579,7 @@ async def get_payment_activation_snapshot(payment_id: str) -> tuple[str, str | N
 async def get_latest_user_payment_summary(user_id: int) -> dict[str, Any] | None:
     row = await fetchone(
         """
-        SELECT telegram_payment_charge_id, status, amount, currency, created_at, updated_at, provisioned_until, last_provision_status
+        SELECT telegram_payment_charge_id, payload, status, amount, currency, created_at, updated_at, provisioned_until, last_provision_status
         FROM payments
         WHERE user_id = ?
         ORDER BY created_at DESC
@@ -591,13 +591,14 @@ async def get_latest_user_payment_summary(user_id: int) -> dict[str, Any] | None
         return None
     return {
         "payment_id": row[0],
-        "status": row[1],
-        "amount": row[2],
-        "currency": row[3],
-        "created_at": row[4],
-        "updated_at": row[5],
-        "provisioned_until": row[6],
-        "last_provision_status": row[7],
+        "payload": row[1],
+        "status": row[2],
+        "amount": row[3],
+        "currency": row[4],
+        "created_at": row[5],
+        "updated_at": row[6],
+        "provisioned_until": row[7],
+        "last_provision_status": row[8],
     }
 
 

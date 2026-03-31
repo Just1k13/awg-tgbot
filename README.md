@@ -27,6 +27,7 @@
 - базовая статистика;
 - реферальная сводка;
 - массовая рассылка с предпросмотром и явным подтверждением.
+- компактный `/health` smoke-check для быстрой проверки готовности selfhost runtime.
 
 ### Ops / infra
 - one-command installer;
@@ -44,7 +45,7 @@
 - «editable platform» с UI-редактором текстов/настроек как основной админ-путь;
 - QoS/speed-limit operator flow;
 - force/orphan cleanup operator-подсистема;
-- legacy admin-команды `/set_rate`, `/rate`, `/health`, `/text_*`, `/setting_*`, `/clean_orphans_force`, `/force_delete`;
+- legacy admin-команды `/set_rate`, `/rate`, `/text_*`, `/setting_*`, `/clean_orphans_force`, `/force_delete`;
 - перегруженная diagnostics/ops-обвязка в пользовательском интерфейсе.
 
 > Идея: меньше ручек, меньше флагов, меньше хрупкости.

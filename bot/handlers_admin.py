@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import asyncio
+from pathlib import Path
 from cryptography.fernet import Fernet
 
 
@@ -8,15 +9,18 @@ from aiogram import Bot
 from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
-    clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
+    check_awg_container, clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
     get_orphan_awg_peers, issue_subscription, revoke_user_access, run_docker, sync_qos_state,
 )
 from config import (
     ADMIN_COMMAND_COOLDOWN_SECONDS,
     ADMIN_ID,
+    AWG_HELPER_POLICY_PATH,
     BACKUP_ALLOW_INSECURE_SEND,
     BACKUP_ENCRYPTION_KEY,
     BACKUP_SECURE_MODE,
+    DOCKER_CONTAINER,
+    WG_INTERFACE,
     logger,
 )
 from database import (
@@ -50,6 +54,7 @@ from ui_constants import (
     CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE,
 )
 from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
+from config_validate import read_helper_policy
 from network_policy import denylist_sync, policy_metrics
 from content_settings import get_setting
 from payments import manual_retry_activation
@@ -358,6 +363,118 @@ async def build_ref_stats_text() -> str:
         f"<b>Последние начисления</b>\n{recent}\n\n"
         f"<b>Top inviters</b>\n{top}"
     )
+
+
+
+
+def _smoke_status_line(name: str, state: str, detail: str) -> str:
+    icon = {"ok": "✅", "warning": "⚠️", "failed": "❌"}.get(state, "⚪")
+    return f"{icon} {name}: {detail}"
+
+
+async def run_runtime_smokecheck() -> dict[str, object]:
+    checks: list[dict[str, str]] = []
+
+    missing_env = []
+    if not DOCKER_CONTAINER:
+        missing_env.append("DOCKER_CONTAINER")
+    if not WG_INTERFACE:
+        missing_env.append("WG_INTERFACE")
+    if not AWG_HELPER_POLICY_PATH:
+        missing_env.append("AWG_HELPER_POLICY_PATH")
+    if missing_env:
+        checks.append(
+            {
+                "name": "Runtime config",
+                "state": "failed",
+                "detail": f"missing {', '.join(missing_env)}",
+                "hint": "проверь .env и перезапусти сервис",
+            }
+        )
+    else:
+        checks.append({"name": "Runtime config", "state": "ok", "detail": "ok", "hint": ""})
+
+    db_info = await db_health_info()
+    if db_info.get("is_healthy"):
+        checks.append({"name": "DB", "state": "ok", "detail": "ok", "hint": ""})
+    else:
+        checks.append(
+            {
+                "name": "DB",
+                "state": "failed",
+                "detail": "schema/db is not ready",
+                "hint": "нужна ручная проверка базы",
+            }
+        )
+
+    try:
+        await check_awg_container()
+        checks.append({"name": "AWG target", "state": "ok", "detail": "reachable", "hint": ""})
+    except Exception as e:
+        checks.append(
+            {
+                "name": "AWG target",
+                "state": "failed",
+                "detail": f"failed ({str(e)[:120]})",
+                "hint": "проверь контейнер и helper",
+            }
+        )
+
+    if AWG_HELPER_POLICY_PATH and DOCKER_CONTAINER and WG_INTERFACE:
+        policy_container, policy_interface, policy_error = read_helper_policy(Path(AWG_HELPER_POLICY_PATH))
+        if policy_error:
+            checks.append(
+                {
+                    "name": "Helper policy",
+                    "state": "failed",
+                    "detail": policy_error,
+                    "hint": "проверь helper policy",
+                }
+            )
+        elif policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:
+            checks.append(
+                {
+                    "name": "Helper policy",
+                    "state": "warning",
+                    "detail": f"mismatch env={DOCKER_CONTAINER}/{WG_INTERFACE} policy={policy_container}/{policy_interface}",
+                    "hint": "синхронизируй helper policy",
+                }
+            )
+        else:
+            checks.append({"name": "Helper policy", "state": "ok", "detail": "ok", "hint": ""})
+
+    failed = [c for c in checks if c["state"] == "failed"]
+    warnings = [c for c in checks if c["state"] == "warning"]
+    if failed:
+        overall = "failed"
+    elif warnings:
+        overall = "warning"
+    else:
+        overall = "ok"
+
+    next_hint = "готово к работе"
+    for item in checks:
+        if item["state"] != "ok" and item.get("hint"):
+            next_hint = item["hint"]
+            break
+
+    return {"overall": overall, "checks": checks, "hint": next_hint}
+
+
+async def build_runtime_smokecheck_text() -> str:
+    report = await run_runtime_smokecheck()
+    overall = str(report["overall"])
+    overall_label = {"ok": "READY", "warning": "DEGRADED", "failed": "FAILED"}.get(overall, "UNKNOWN")
+    lines = [
+        "🧪 <b>Selfhost smoke-check</b>",
+        "",
+        f"Overall: <b>{overall_label}</b>",
+    ]
+    for check in report["checks"]:
+        lines.append(_smoke_status_line(str(check["name"]), str(check["state"]), str(check["detail"])))
+    lines.append("")
+    lines.append(f"➡️ Next step: <b>{report['hint']}</b>")
+    return "\n".join(lines)
 
 
 async def build_health_text() -> str:
@@ -1143,7 +1260,8 @@ async def admin_referrals_summary(cb: types.CallbackQuery):
 async def admin_health_summary(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    await cb.answer("Отключено в personal MVP", show_alert=True)
+    await cb.message.answer(await build_runtime_smokecheck_text(), parse_mode="HTML")
+    await cb.answer("Готово")
 
 
 @router.message(Command("cancel_edit"), IsAdmin())
@@ -1452,7 +1570,7 @@ async def broadcast_prepare(message: types.Message, command: CommandObject):
 
 @router.message(Command("health"), IsAdmin())
 async def health_cmd(message: types.Message):
-    await message.answer("⚠️ /health отключена в personal MVP.")
+    await message.answer(await build_runtime_smokecheck_text(), parse_mode="HTML")
 
 
 @router.message(Command("text_list"), IsAdmin())

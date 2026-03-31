@@ -55,6 +55,7 @@ CB_ADMIN_ADD_DAYS_PREFIX = "admin_add_days_"
 CB_ADMIN_SET_RATE_PREFIX = "admin_set_rate_"
 CB_ADMIN_REVOKE_PREFIX = "admin_revoke_"
 CB_ADMIN_DELETE_PREFIX = "admin_delete_"
+CB_ADMIN_RETRY_ACTIVATION_PREFIX = "admin_retry_activation_"
 
 CB_CONFIRM_CLEAN_ORPHANS = "confirm_clean_orphans"
 CB_CANCEL_CLEAN_ORPHANS = "cancel_clean_orphans"

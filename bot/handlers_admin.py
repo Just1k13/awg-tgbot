@@ -40,7 +40,7 @@ from keyboards import (
 )
 from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BACK_SETTINGS, CB_ADMIN_BACK_TEXTS, CB_ADMIN_BROADCAST,
-    CB_ADMIN_CANCEL_EDIT, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
+    CB_ADMIN_CANCEL_EDIT, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
     CB_ADMIN_REFRESH_HEALTH, CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_REFRESH_SETTINGS, CB_ADMIN_REFRESH_TEXTS,
     CB_ADMIN_SETTING_EDIT_PREFIX, CB_ADMIN_SETTING_KEY_PREFIX, CB_ADMIN_SETTING_RESET_PREFIX, CB_ADMIN_SETTINGS,
     CB_ADMIN_SETTINGS_PAGE_PREFIX, CB_ADMIN_STATS, CB_ADMIN_SYNC, CB_ADMIN_TEXT_EDIT_PREFIX, CB_ADMIN_TEXT_KEY_PREFIX,
@@ -64,6 +64,17 @@ admin_command_rate_limit: dict[str, object] = {}
 ADMIN_USERS_PAGE_SIZE = 10
 ADMIN_CONTENT_PAGE_SIZE = 8
 ADMIN_EDIT_TIMEOUT_SECONDS = 600
+ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("/health", "быстрая проверка selfhost readiness"),
+    ("/sync_awg", "сверка AWG и БД"),
+    ("/stats", "краткая статистика"),
+    ("/users", "короткий список пользователей"),
+    ("/audit", "последние события"),
+    ("/ref_stats", "сводка по рефералам"),
+    ("/send TEXT", "рассылка (осторожно)"),
+    ("/give USER_ID DAYS", "выдать/продлить доступ вручную"),
+    ("/revoke USER_ID", "отключить доступ вручную (осторожно)"),
+)
 
 
 def _build_redacted_backup_payload(db_path: str) -> tuple[bytes, str]:
@@ -629,6 +640,13 @@ async def _render_users_page(target_message: types.Message, page: int) -> None:
     )
 
 
+def build_admin_manual_commands_text() -> str:
+    lines = ["⌨️ <b>Ручные admin-команды</b>", ""]
+    for command, description in ADMIN_MANUAL_COMMANDS:
+        lines.append(f"• <code>{command}</code> — {description}")
+    return "\n".join(lines)
+
+
 @router.message(F.text == BTN_ADMIN, IsAdmin())
 async def admin_panel(message: types.Message):
     stats_text = await build_stats_text()
@@ -647,6 +665,18 @@ async def admin_back_main(cb: types.CallbackQuery):
         return
     await cb.message.answer("⚙️ Админ-меню", reply_markup=get_admin_inline_kb())
     await cb.answer()
+
+
+@router.callback_query(F.data == CB_ADMIN_COMMANDS)
+async def admin_manual_commands(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    await cb.message.answer(
+        build_admin_manual_commands_text(),
+        parse_mode="HTML",
+        reply_markup=get_admin_simple_back_kb(CB_ADMIN_BACK_MAIN),
+    )
+    await cb.answer("Готово")
 
 
 @router.callback_query(F.data == CB_ADMIN_TEXTS)

@@ -10,7 +10,8 @@ from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
     check_awg_container, clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
-    get_awg_peers, get_orphan_awg_peers, issue_subscription, revoke_user_access, run_docker, sync_qos_state,
+    delete_user_device, get_awg_peers, get_orphan_awg_peers, issue_subscription, reissue_user_device, revoke_user_access, run_docker,
+    sync_qos_state,
 )
 from config import (
     ADMIN_COMMAND_COOLDOWN_SECONDS,
@@ -50,9 +51,11 @@ from ui_constants import (
     CB_ADMIN_USERS_PAGE_PREFIX, CB_ADMIN_MANAGE_USER_PREFIX, CB_ADMIN_ADD_DAYS_PREFIX,
     CB_ADMIN_SET_RATE_PREFIX,
     CB_ADMIN_RETRY_ACTIVATION_PREFIX,
+    CB_ADMIN_DEVICE_DELETE_PREFIX, CB_ADMIN_DEVICE_REISSUE_PREFIX,
     CB_ADMIN_REVOKE_PREFIX, CB_ADMIN_DELETE_PREFIX, CB_CONFIRM_CLEAN_ORPHANS,
     CB_CANCEL_CLEAN_ORPHANS, CB_CONFIRM_REVOKE, CB_CANCEL_REVOKE, CB_CONFIRM_DELETE_USER,
-    CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE,
+    CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE, CB_CONFIRM_DEVICE_DELETE,
+    CB_CANCEL_DEVICE_DELETE, CB_CONFIRM_DEVICE_REISSUE, CB_CANCEL_DEVICE_REISSUE,
 )
 from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
 from config_validate import read_helper_policy
@@ -559,7 +562,13 @@ def _users_page_kb(rows: list[tuple[int, str]], page: int, total_pages: int) -> 
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def _user_manage_kb(uid: int, page: int, *, show_retry_activation: bool = False) -> types.InlineKeyboardMarkup:
+def _user_manage_kb(
+    uid: int,
+    page: int,
+    *,
+    show_retry_activation: bool = False,
+    device_nums: list[int] | None = None,
+) -> types.InlineKeyboardMarkup:
     rows: list[list[types.InlineKeyboardButton]] = [
         [
             types.InlineKeyboardButton(text="+1 день", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_1_{page}"),
@@ -580,6 +589,20 @@ def _user_manage_kb(uid: int, page: int, *, show_retry_activation: bool = False)
                 ),
             ]
         )
+    if device_nums:
+        for device_num in device_nums:
+            rows.append(
+                [
+                    types.InlineKeyboardButton(
+                        text=f"🗑 Устр. {device_num}",
+                        callback_data=f"{CB_ADMIN_DEVICE_DELETE_PREFIX}{uid}_{device_num}_{page}",
+                    ),
+                    types.InlineKeyboardButton(
+                        text=f"♻️ Перевыпуск {device_num}",
+                        callback_data=f"{CB_ADMIN_DEVICE_REISSUE_PREFIX}{uid}_{device_num}_{page}",
+                    ),
+                ]
+            )
     rows.extend([
         [types.InlineKeyboardButton(text="🔄 Обновить карточку", callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_{page}")],
         [types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")],
@@ -982,6 +1005,18 @@ async def admin_manage_user(cb: types.CallbackQuery):
         keys = await get_user_keys(uid)
         payment_summary = await get_latest_user_payment_summary(uid)
         referral = await get_referral_summary(uid)
+        admin_device_rows = await fetchall(
+            """
+            SELECT device_num
+            FROM keys
+            WHERE user_id = ?
+              AND public_key NOT LIKE 'pending:%'
+              AND state = 'active'
+            ORDER BY device_num
+            """,
+            (uid,),
+        )
+        admin_device_nums = [int(row[0]) for row in admin_device_rows]
         connection_status = "готово" if keys else "нет ключа"
         payment_line = "нет платежей"
         activation_line = "нет данных"
@@ -1014,7 +1049,12 @@ async def admin_manage_user(cb: types.CallbackQuery):
                 f"{retry_hint}"
             ),
             parse_mode="HTML",
-            reply_markup=_user_manage_kb(uid, page, show_retry_activation=show_retry_activation),
+            reply_markup=_user_manage_kb(
+                uid,
+                page,
+                show_retry_activation=show_retry_activation,
+                device_nums=admin_device_nums,
+            ),
         )
         await cb.answer("Открыто")
     except ValueError:
@@ -1119,6 +1159,187 @@ async def admin_retry_activation_btn(cb: types.CallbackQuery):
         logger.exception("Ошибка admin_retry_activation_btn: %s", e)
         await write_audit_log(ADMIN_ID, "manual_retry_failed", f"error={str(e)[:300]}")
         await cb.answer("❌ Не удалось выполнить retry", show_alert=True)
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_DEVICE_DELETE_PREFIX))
+async def admin_device_delete_btn(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    try:
+        _, _, _, uid_raw, device_num_raw, page_raw = cb.data.split("_", 5)
+        uid = int(uid_raw)
+        device_num = int(device_num_raw)
+        page = int(page_raw)
+    except ValueError:
+        await cb.answer("Некорректные параметры действия", show_alert=True)
+        return
+    await set_pending_admin_action(
+        ADMIN_ID,
+        "device_delete",
+        {"action": "device_delete", "target": uid, "device_num": device_num, "page": page},
+    )
+    await cb.message.answer(
+        (
+            "⚠️ <b>Подтвердите удаление устройства</b>\n\n"
+            f"Пользователь: <code>{uid}</code>\n"
+            f"Устройство: <b>{device_num}</b>\n\n"
+            "Будет удалён только выбранный peer."
+        ),
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [types.InlineKeyboardButton(text="✅ Подтвердить", callback_data=CB_CONFIRM_DEVICE_DELETE)],
+                [types.InlineKeyboardButton(text="❌ Отмена", callback_data=CB_CANCEL_DEVICE_DELETE)],
+            ]
+        ),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == CB_CONFIRM_DEVICE_DELETE)
+async def confirm_device_delete(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    action = await pop_pending_admin_action(ADMIN_ID, "device_delete")
+    if not action or action.get("action") != "device_delete":
+        await cb.answer("Нет ожидающего действия", show_alert=True)
+        return
+    uid = int(action["target"])
+    device_num = int(action["device_num"])
+    page = int(action.get("page", 0))
+    try:
+        result = await delete_user_device(uid, device_num)
+        await write_audit_log(
+            ADMIN_ID,
+            "admin_device_delete",
+            f"target={uid}; device_num={device_num}; status={result['status']}; removed_runtime={int(result.get('removed_runtime', False))}",
+        )
+        if result["status"] == "not_found":
+            await cb.message.answer(
+                (
+                    "ℹ️ <b>Устройство уже отсутствует</b>\n\n"
+                    f"🆔 <code>{uid}</code>\n"
+                    f"📱 Device: <b>{device_num}</b>\n\n"
+                    "Обновите карточку пользователя и проверьте activity/runtime."
+                ),
+                parse_mode="HTML",
+                reply_markup=_user_manage_kb(uid, page),
+            )
+            await cb.answer("Nothing to delete")
+            return
+        await cb.message.answer(
+            (
+                "✅ <b>Устройство удалено</b>\n\n"
+                f"🆔 <code>{uid}</code>\n"
+                f"📱 Device: <b>{device_num}</b>\n\n"
+                "Дальше: обновите карточку; если не помогло — проверьте activity/runtime."
+            ),
+            parse_mode="HTML",
+            reply_markup=_user_manage_kb(uid, page),
+        )
+        await cb.answer("Готово")
+    except Exception as e:
+        logger.exception("Ошибка confirm_device_delete: %s", e)
+        await write_audit_log(ADMIN_ID, "admin_device_delete_failed", f"target={uid}; device_num={device_num}; error={str(e)[:200]}")
+        await cb.answer("❌ Не удалось удалить устройство", show_alert=True)
+
+
+@router.callback_query(F.data == CB_CANCEL_DEVICE_DELETE)
+async def cancel_device_delete(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    await clear_pending_admin_action(ADMIN_ID, "device_delete")
+    await cb.message.answer("❌ Удаление устройства отменено")
+    await cb.answer("Отменено")
+
+
+@router.callback_query(F.data.startswith(CB_ADMIN_DEVICE_REISSUE_PREFIX))
+async def admin_device_reissue_btn(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    try:
+        _, _, _, uid_raw, device_num_raw, page_raw = cb.data.split("_", 5)
+        uid = int(uid_raw)
+        device_num = int(device_num_raw)
+        page = int(page_raw)
+    except ValueError:
+        await cb.answer("Некорректные параметры действия", show_alert=True)
+        return
+    await set_pending_admin_action(
+        ADMIN_ID,
+        "device_reissue",
+        {"action": "device_reissue", "target": uid, "device_num": device_num, "page": page},
+    )
+    await cb.message.answer(
+        (
+            "⚠️ <b>Подтвердите перевыпуск конфига устройства</b>\n\n"
+            f"Пользователь: <code>{uid}</code>\n"
+            f"Устройство: <b>{device_num}</b>\n\n"
+            "Будет заменён только один peer в этом slot."
+        ),
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [types.InlineKeyboardButton(text="✅ Подтвердить", callback_data=CB_CONFIRM_DEVICE_REISSUE)],
+                [types.InlineKeyboardButton(text="❌ Отмена", callback_data=CB_CANCEL_DEVICE_REISSUE)],
+            ]
+        ),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == CB_CONFIRM_DEVICE_REISSUE)
+async def confirm_device_reissue(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    action = await pop_pending_admin_action(ADMIN_ID, "device_reissue")
+    if not action or action.get("action") != "device_reissue":
+        await cb.answer("Нет ожидающего действия", show_alert=True)
+        return
+    uid = int(action["target"])
+    device_num = int(action["device_num"])
+    page = int(action.get("page", 0))
+    try:
+        result = await reissue_user_device(uid, device_num)
+        await write_audit_log(ADMIN_ID, "admin_device_reissue", f"target={uid}; device_num={device_num}; status={result['status']}")
+        if result["status"] == "not_found":
+            await cb.message.answer(
+                (
+                    "ℹ️ <b>Перевыпуск не требуется</b>\n\n"
+                    f"🆔 <code>{uid}</code>\n"
+                    f"📱 Device: <b>{device_num}</b>\n\n"
+                    "Устройство уже отсутствует. Обновите карточку пользователя."
+                ),
+                parse_mode="HTML",
+                reply_markup=_user_manage_kb(uid, page),
+            )
+            await cb.answer("Nothing to reissue")
+            return
+        await cb.message.answer(
+            (
+                "♻️ <b>Конфиг устройства перевыпущен</b>\n\n"
+                f"🆔 <code>{uid}</code>\n"
+                f"📱 Device: <b>{device_num}</b>\n\n"
+                "Дальше: отправьте пользователю новый конфиг через existing flow «Подключение». "
+                "Если не помогло — проверьте activity/runtime."
+            ),
+            parse_mode="HTML",
+            reply_markup=_user_manage_kb(uid, page),
+        )
+        await cb.answer("Готово")
+    except Exception as e:
+        logger.exception("Ошибка confirm_device_reissue: %s", e)
+        await write_audit_log(ADMIN_ID, "admin_device_reissue_failed", f"target={uid}; device_num={device_num}; error={str(e)[:200]}")
+        await cb.answer("❌ Не удалось перевыпустить устройство", show_alert=True)
+
+
+@router.callback_query(F.data == CB_CANCEL_DEVICE_REISSUE)
+async def cancel_device_reissue(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    await clear_pending_admin_action(ADMIN_ID, "device_reissue")
+    await cb.message.answer("❌ Перевыпуск устройства отменён")
+    await cb.answer("Отменено")
 
 
 @router.callback_query(F.data.startswith(CB_ADMIN_REVOKE_PREFIX))

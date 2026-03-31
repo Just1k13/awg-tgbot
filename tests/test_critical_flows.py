@@ -56,7 +56,8 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(10, reserved)
 
     async def test_payment_recovery_worker_repairs_job(self):
-        import database, payments
+        import database
+        import payments
 
         await database.save_payment(
             telegram_payment_charge_id="tg_1",
@@ -86,7 +87,8 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "applied")
 
     async def test_safe_delete_stops_on_awg_failure(self):
-        import awg_backend, database
+        import awg_backend
+        import database
 
         db = await database.open_db()
         try:
@@ -143,7 +145,8 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(protected_calls, [("orphan-1", "orphan-quarantine")])
 
     async def test_delete_user_everywhere_retry_from_delete_pending(self):
-        import awg_backend, database
+        import awg_backend
+        import database
 
         db = await database.open_db()
         try:

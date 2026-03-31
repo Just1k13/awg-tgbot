@@ -41,7 +41,7 @@ from keyboards import (
     get_admin_texts_list_kb, get_broadcast_confirm_kb,
 )
 from ui_constants import (
-    BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BACK_SETTINGS, CB_ADMIN_BACK_TEXTS, CB_ADMIN_BROADCAST,
+    BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BACK_SETTINGS, CB_ADMIN_BACK_TEXTS, CB_ADMIN_BROADCAST, CB_ADMIN_BACKUP,
     CB_ADMIN_CANCEL_EDIT, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
     CB_ADMIN_REFRESH_HEALTH, CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_REFRESH_SETTINGS, CB_ADMIN_REFRESH_TEXTS,
     CB_ADMIN_SETTING_EDIT_PREFIX, CB_ADMIN_SETTING_KEY_PREFIX, CB_ADMIN_SETTING_RESET_PREFIX, CB_ADMIN_SETTINGS,
@@ -76,6 +76,7 @@ ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/audit", "последние события"),
     ("/ref_stats", "сводка по рефералам"),
     ("/send TEXT", "рассылка (осторожно)"),
+    ("/backup", "redacted backup в Telegram и на диск"),
     ("/give USER_ID DAYS", "выдать/продлить доступ вручную"),
     ("/revoke USER_ID", "отключить доступ вручную (осторожно)"),
 )
@@ -107,6 +108,69 @@ def _build_redacted_backup_payload(db_path: str) -> tuple[bytes, str]:
     finally:
         redacted.unlink(missing_ok=True)
     return payload, db_file.name
+
+
+def _build_backup_file_path(db_path: str, *, secure_mode: bool, now: datetime | None = None) -> Path:
+    ts = (now or utc_now_naive()).strftime("%Y%m%d_%H%M%S")
+    backup_dir = Path(db_path).resolve().parent / "backups"
+    filename = f"redacted_vpn_bot_{ts}.sqlite"
+    if secure_mode:
+        filename += ".enc"
+    return backup_dir / filename
+
+
+def _build_backup_result_message(path: Path, *, secure_mode: bool) -> str:
+    mode = "secure" if secure_mode else "insecure"
+    return (
+        "✅ Backup created\n"
+        f"💾 Saved: <code>{escape_html(str(path))}</code>\n"
+        f"🔐 Mode: <b>{mode}</b>"
+    )
+
+
+def _persist_backup_payload(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+async def _run_backup_flow(message: types.Message) -> None:
+    from config import DB_PATH
+
+    try:
+        try:
+            payload, db_name = await asyncio.to_thread(_build_redacted_backup_payload, DB_PATH)
+        except FileNotFoundError:
+            await message.answer("❌ Файл базы данных не найден.")
+            return
+        filename = f"redacted_{db_name}"
+        caption = (
+            "📦 Резервная копия базы данных без секретов\n"
+            f"📅 {utc_now_naive().strftime('%d.%m.%Y %H:%M')}"
+        )
+        if BACKUP_SECURE_MODE:
+            if not BACKUP_ENCRYPTION_KEY:
+                await message.answer("❌ BACKUP_SECURE_MODE=1, но BACKUP_ENCRYPTION_KEY не задан.")
+                return
+            payload = Fernet(BACKUP_ENCRYPTION_KEY.encode("utf-8")).encrypt(payload)
+            filename = f"{filename}.enc"
+            caption += "\n🔐 Secure mode: backup зашифрован (Fernet)."
+        elif not BACKUP_ALLOW_INSECURE_SEND:
+            await message.answer("❌ Небезопасная отправка backup отключена. Включите BACKUP_SECURE_MODE=1 или явно задайте BACKUP_ALLOW_INSECURE_SEND=1.")
+            return
+        else:
+            caption += "\n⚠️ Insecure mode: файл отправлен без шифрования (явный opt-in)."
+
+        backup_path = _build_backup_file_path(DB_PATH, secure_mode=BACKUP_SECURE_MODE)
+        await asyncio.to_thread(_persist_backup_payload, backup_path, payload)
+        await write_audit_log(ADMIN_ID, "backup_created", f"path={backup_path}; mode={'secure' if BACKUP_SECURE_MODE else 'insecure'}")
+        await message.answer(_build_backup_result_message(backup_path, secure_mode=BACKUP_SECURE_MODE), parse_mode="HTML")
+        await message.answer_document(
+            types.BufferedInputFile(payload, filename=filename),
+            caption=caption,
+        )
+    except Exception as e:
+        logger.exception("Ошибка /backup: %s", e)
+        await message.answer("❌ Не удалось отправить backup базы.")
 
 
 async def _guard_admin_callback(cb: types.CallbackQuery, *, require_message: bool = False) -> bool:
@@ -744,6 +808,14 @@ async def admin_manual_commands(cb: types.CallbackQuery):
         reply_markup=get_admin_simple_back_kb(CB_ADMIN_BACK_MAIN),
     )
     await cb.answer("Готово")
+
+
+@router.callback_query(F.data == CB_ADMIN_BACKUP)
+async def admin_backup_cb(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb, require_message=True):
+        return
+    await cb.answer()
+    await _run_backup_flow(cb.message)
 
 
 @router.callback_query(F.data == CB_ADMIN_TEXTS)
@@ -1828,35 +1900,7 @@ async def force_delete_cmd(message: types.Message, command: CommandObject):
 
 @router.message(Command("backup"), IsAdmin())
 async def backup_db(message: types.Message):
-    from config import DB_PATH
-    try:
-        try:
-            payload, db_name = await asyncio.to_thread(_build_redacted_backup_payload, DB_PATH)
-        except FileNotFoundError:
-            await message.answer("❌ Файл базы данных не найден.")
-            return
-        filename = f"redacted_{db_name}"
-        caption = (f"📦 Резервная копия базы данных без секретов\n"
-                   f"📅 {utc_now_naive().strftime('%d.%m.%Y %H:%M')}")
-        if BACKUP_SECURE_MODE:
-            if not BACKUP_ENCRYPTION_KEY:
-                await message.answer("❌ BACKUP_SECURE_MODE=1, но BACKUP_ENCRYPTION_KEY не задан.")
-                return
-            payload = Fernet(BACKUP_ENCRYPTION_KEY.encode("utf-8")).encrypt(payload)
-            filename = f"{filename}.enc"
-            caption += "\n🔐 Secure mode: backup зашифрован (Fernet)."
-        elif not BACKUP_ALLOW_INSECURE_SEND:
-            await message.answer("❌ Небезопасная отправка backup отключена. Включите BACKUP_SECURE_MODE=1 или явно задайте BACKUP_ALLOW_INSECURE_SEND=1.")
-            return
-        else:
-            caption += "\n⚠️ Insecure mode: файл отправлен без шифрования (явный opt-in)."
-        await message.answer_document(
-            types.BufferedInputFile(payload, filename=filename),
-            caption=caption,
-        )
-    except Exception as e:
-        logger.exception("Ошибка /backup: %s", e)
-        await message.answer("❌ Не удалось отправить backup базы.")
+    await _run_backup_flow(message)
 
 
 @router.message(Command("send"), IsAdmin())

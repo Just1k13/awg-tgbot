@@ -6,7 +6,7 @@ from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS
 from ui_constants import (
     BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_GUIDE, BTN_PROFILE, BTN_REFERRALS, BTN_SUPPORT,
     CB_ADMIN_BACK_MAIN, CB_ADMIN_BACK_SETTINGS, CB_ADMIN_BACK_TEXTS, CB_ADMIN_BROADCAST, CB_ADMIN_CANCEL_EDIT,
-    CB_ADMIN_COMMANDS, CB_ADMIN_LIST, CB_ADMIN_REFERRALS, CB_ADMIN_REFRESH_SETTINGS, CB_ADMIN_REFRESH_TEXTS, CB_ADMIN_SETTING_EDIT_PREFIX,
+    CB_ADMIN_COMMANDS, CB_ADMIN_BACKUP, CB_ADMIN_LIST, CB_ADMIN_REFERRALS, CB_ADMIN_REFRESH_SETTINGS, CB_ADMIN_REFRESH_TEXTS, CB_ADMIN_SETTING_EDIT_PREFIX,
     CB_ADMIN_SETTING_KEY_PREFIX, CB_ADMIN_SETTING_RESET_PREFIX, CB_ADMIN_SETTINGS_PAGE_PREFIX,
     CB_ADMIN_STATS, CB_ADMIN_SYNC, CB_ADMIN_TEXT_EDIT_PREFIX, CB_ADMIN_TEXT_KEY_PREFIX, CB_ADMIN_TEXT_RESET_PREFIX,
     CB_ADMIN_TEXTS_PAGE_PREFIX,
@@ -101,6 +101,7 @@ def get_admin_inline_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
             [InlineKeyboardButton(text="🎁 Рефералы", callback_data=CB_ADMIN_REFERRALS)],
             [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC)],
+            [InlineKeyboardButton(text="💾 Бэкап", callback_data=CB_ADMIN_BACKUP)],
             [InlineKeyboardButton(text="⌨️ Команды", callback_data=CB_ADMIN_COMMANDS)],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
         ]

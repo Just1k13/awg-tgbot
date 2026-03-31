@@ -305,12 +305,15 @@ async def check_activation_status(cb: types.CallbackQuery):
     sub_until = await get_user_subscription(cb.from_user.id)
     is_active = subscription_is_active(sub_until)
     payment_summary = await get_latest_user_payment_summary(cb.from_user.id)
+    has_config = bool(await get_user_keys(cb.from_user.id))
     if not payment_summary:
         await cb.message.answer(await get_text("activation_status_no_payments"), reply_markup=get_buy_inline_kb())
         return
     status = payment_summary["last_provision_status"] or payment_summary["status"]
+    if payment_summary["status"] in {"needs_repair", "stuck_manual", "failed"}:
+        status = payment_summary["status"]
     await cb.message.answer(
-        f"{await get_activation_status_text(status)}\n\n{await get_support_short_text()}",
+        f"{await get_activation_status_text(status, has_config=has_config)}\n\n{await get_support_short_text()}",
         parse_mode="HTML",
         reply_markup=get_profile_inline_kb(subscription_active=is_active),
     )

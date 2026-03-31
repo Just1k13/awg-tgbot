@@ -48,7 +48,7 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
     else:
         rows.append([InlineKeyboardButton(text="💳 Оплатить доступ", callback_data=CB_SHOW_BUY_MENU)])
     rows.append([InlineKeyboardButton(text="🔑 Подключение", callback_data=CB_OPEN_CONFIGS)])
-    rows.append([InlineKeyboardButton(text="⏱ Проверить статус активации", callback_data=CB_CHECK_ACTIVATION_STATUS)])
+    rows.append([InlineKeyboardButton(text="⏱ Статус активации", callback_data=CB_CHECK_ACTIVATION_STATUS)])
     rows.append([InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

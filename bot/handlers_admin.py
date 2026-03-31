@@ -23,7 +23,7 @@ from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone, fetchval,
     get_app_setting,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
-    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_text_override, get_user_meta, pop_pending_admin_action, reset_text_override,
+    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_text_override, get_user_keys, get_user_meta, pop_pending_admin_action, reset_text_override,
     reset_app_setting, set_app_setting, set_text_override,
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
@@ -422,6 +422,7 @@ def _user_manage_kb(uid: int, page: int) -> types.InlineKeyboardMarkup:
                 types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"{CB_ADMIN_REVOKE_PREFIX}{uid}_{page}"),
                 types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CB_ADMIN_DELETE_PREFIX}{uid}_{page}"),
             ],
+            [types.InlineKeyboardButton(text="🔄 Обновить карточку", callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_{page}")],
             [types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")],
         ]
     )
@@ -735,6 +736,9 @@ async def admin_manage_user(cb: types.CallbackQuery):
         sub_until = row[0]
         status_text, until_text = get_status_text(sub_until)
         tg_username, first_name = await get_user_meta(uid)
+        keys = await get_user_keys(uid)
+        referral = await get_referral_summary(uid)
+        connection_status = "готово" if keys else "нет ключа"
         await cb.message.answer(
             (
                 "🛠 <b>Управление пользователем</b>\n\n"
@@ -742,7 +746,9 @@ async def admin_manage_user(cb: types.CallbackQuery):
                 f"👤 Имя: {escape_html(first_name)}\n"
                 f"✈️ Telegram: {format_tg_username(tg_username)}\n"
                 f"📌 Статус: {status_text}\n"
-                f"📅 До: <b>{until_text}</b>"
+                f"📅 До: <b>{until_text}</b>\n"
+                f"🔑 Подключение: <b>{connection_status}</b> (устройств: {len(keys)})\n"
+                f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}"
             ),
             parse_mode="HTML",
             reply_markup=_user_manage_kb(uid, page),
@@ -760,9 +766,10 @@ async def admin_add_days_btn(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
     try:
-        _, _, _, uid_raw, days_raw, _page_raw = cb.data.split("_", 5)
+        _, _, _, uid_raw, days_raw, page_raw = cb.data.split("_", 5)
         uid = int(uid_raw)
         days = int(days_raw)
+        page = int(page_raw)
         if admin_command_limited(f"admin_add_{days}", cb.from_user.id):
             await cb.answer("Слишком часто", show_alert=True)
             return
@@ -777,6 +784,7 @@ async def admin_add_days_btn(cb: types.CallbackQuery):
                 f"📅 До: <b>{new_until.strftime('%d.%m.%Y %H:%M')}</b>"
             ),
             parse_mode="HTML",
+            reply_markup=_user_manage_kb(uid, page),
         )
         if not notified:
             await cb.message.answer("⚠️ Доступ выдан, но уведомление пользователю отправить не удалось.")
@@ -824,6 +832,7 @@ async def confirm_revoke(cb: types.CallbackQuery):
         await cb.answer("Нет ожидающего действия", show_alert=True)
         return
     uid = int(action["target"])
+    page = int(action.get("page", 0))
     try:
         removed = await revoke_user_access(uid)
         await write_audit_log(ADMIN_ID, "admin_revoke", f"target={uid}; removed={removed}")
@@ -834,6 +843,9 @@ async def confirm_revoke(cb: types.CallbackQuery):
                 f"🔌 Удалено peer: <b>{removed}</b>"
             ),
             parse_mode="HTML",
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")]]
+            ),
         )
         await cb.answer("Готово")
     except Exception as e:
@@ -882,6 +894,7 @@ async def confirm_delete_user(cb: types.CallbackQuery):
         await cb.answer("Нет ожидающего действия", show_alert=True)
         return
     uid = int(action["target"])
+    page = int(action.get("page", 0))
     try:
         peers_count, _ = await delete_user_everywhere(uid)
         await write_audit_log(ADMIN_ID, "admin_delete_user", f"target={uid}; removed={peers_count}")
@@ -892,6 +905,9 @@ async def confirm_delete_user(cb: types.CallbackQuery):
                 f"🔌 Удалено peer: <b>{peers_count}</b>"
             ),
             parse_mode="HTML",
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(text="⬅️ К списку", callback_data=f"{CB_ADMIN_USERS_PAGE_PREFIX}{page}")]]
+            ),
         )
         await cb.answer("Готово")
     except Exception as e:
@@ -913,12 +929,14 @@ async def admin_broadcast_btn(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
     await cb.answer()
+    users_total = int(await fetchval("SELECT COUNT(*) FROM users"))
     await cb.message.answer(
         (
             "📢 <b>Рассылка</b>\n\n"
             "Используйте команду:\n"
             "<code>/send Ваш текст</code>\n\n"
-            "Перед отправкой будет подтверждение."
+            f"Сейчас в базе: <b>{users_total}</b> пользователей.\n"
+            "Перед отправкой будет обязательное подтверждение."
         ),
         parse_mode="HTML",
     )
@@ -939,7 +957,8 @@ async def broadcast_confirm(cb: types.CallbackQuery):
         (
             "📢 <b>Рассылка поставлена в очередь</b>\n\n"
             f"job_id: <code>{job_id}</code>\n"
-            "Отправка идёт в фоне; итог придёт отдельным сообщением."
+            "Отправка идёт в фоне; итог придёт отдельным сообщением.\n"
+            "Снимок получателей будет зафиксирован воркером при старте задачи."
         ),
         parse_mode="HTML",
     )
@@ -1306,10 +1325,15 @@ async def broadcast_prepare(message: types.Message, command: CommandObject):
         await message.answer("Напишите текст после <code>/send</code>", parse_mode="HTML")
         return
     await set_pending_broadcast(ADMIN_ID, command.args)
+    users_total = int(await fetchval("SELECT COUNT(*) FROM users"))
+    preview = command.args.strip()
+    if len(preview) > 500:
+        preview = f"{preview[:500]}…"
     await message.answer(
         (
             "📢 <b>Подтвердите рассылку</b>\n\n"
-            f"{escape_html(command.args)}"
+            f"Получателей (по текущей базе): <b>{users_total}</b>\n\n"
+            f"Текст:\n{escape_html(preview)}"
         ),
         parse_mode="HTML",
         reply_markup=get_broadcast_confirm_kb(),

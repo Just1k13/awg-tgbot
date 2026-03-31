@@ -27,6 +27,7 @@ from texts import (
     get_activation_status_text,
     get_instruction_with_policy_text,
     get_support_full_text,
+    get_support_short_text,
 )
 from ui_constants import (
     BTN_BUY,
@@ -158,6 +159,15 @@ async def profile(message: types.Message):
     first_name = escape_html(message.from_user.first_name)
     is_active = subscription_is_active(sub_until)
     remaining = format_remaining_time(sub_until) if is_active else "—"
+    configs = await get_user_keys(message.from_user.id)
+    has_connection = bool(configs)
+    connection_status = "готово ✅" if has_connection else "ещё не выдано"
+    if has_connection:
+        next_step = "Откройте «🔑 Подключение» и импортируйте vpn://"
+    elif is_active:
+        next_step = "Нажмите «⏱ Проверить статус активации» или откройте «🔑 Подключение»"
+    else:
+        next_step = "Нажмите «💳 Оплатить доступ»"
     payment_summary = await get_latest_user_payment_summary(message.from_user.id)
     payment_line = "нет данных"
     activation_line = "нет данных"
@@ -174,8 +184,11 @@ async def profile(message: types.Message):
             status_text=status_text,
             until_text=until_text,
             remaining=remaining,
+            connection_status=connection_status,
             payment_line=payment_line,
             activation_line=activation_line,
+            next_step=next_step,
+            support_line=await get_support_short_text(),
         ),
         parse_mode="HTML",
         reply_markup=get_profile_inline_kb(is_active),
@@ -289,12 +302,18 @@ async def support(message: types.Message):
 @router.callback_query(F.data == CB_CHECK_ACTIVATION_STATUS)
 async def check_activation_status(cb: types.CallbackQuery):
     await cb.answer()
+    sub_until = await get_user_subscription(cb.from_user.id)
+    is_active = subscription_is_active(sub_until)
     payment_summary = await get_latest_user_payment_summary(cb.from_user.id)
     if not payment_summary:
-        await cb.message.answer(await get_text("activation_status_no_payments"))
+        await cb.message.answer(await get_text("activation_status_no_payments"), reply_markup=get_buy_inline_kb())
         return
     status = payment_summary["last_provision_status"] or payment_summary["status"]
-    await cb.message.answer(await get_activation_status_text(status))
+    await cb.message.answer(
+        f"{await get_activation_status_text(status)}\n\n{await get_support_short_text()}",
+        parse_mode="HTML",
+        reply_markup=get_profile_inline_kb(subscription_active=is_active),
+    )
 
 
 @router.message(F.text == BTN_BUY)

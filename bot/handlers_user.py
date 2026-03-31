@@ -1,4 +1,5 @@
 import re
+from datetime import datetime
 
 from aiogram import F, Router, types
 from aiogram.filters import Command, CommandObject
@@ -52,6 +53,52 @@ router = Router()
 def _config_filename_prefix() -> str:
     base = re.sub(r"[^\w.-]+", "_", (SERVER_NAME or "configs").strip(), flags=re.UNICODE).strip("._")
     return base or "configs"
+
+
+def _format_last_payment_status(status: str | None) -> str:
+    mapped = {
+        "applied": "успешно",
+        "received": "в обработке",
+        "provisioning": "в обработке",
+        "needs_repair": "нужна проверка",
+        "stuck_manual": "нужна проверка",
+        "failed": "нужна проверка",
+    }
+    return mapped.get(str(status or "").strip(), "в обработке")
+
+
+def _format_last_payment_tariff(payload: str | None) -> str:
+    if payload == "sub_7":
+        return "7 дней"
+    if payload == "sub_30":
+        return "30 дней"
+    return "—"
+
+
+def _format_last_payment_date(created_at: str | None) -> str:
+    if not created_at:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(str(created_at))
+        return parsed.strftime("%d.%m.%Y %H:%M")
+    except ValueError:
+        return str(created_at).replace("T", " ")[:16]
+
+
+def _build_last_payment_fields(payment_summary: dict | None) -> dict[str, str]:
+    fields = {
+        "payment_tariff": "нет данных",
+        "payment_date": "—",
+        "payment_amount": "—",
+        "payment_status": "—",
+    }
+    if not payment_summary:
+        return fields
+    fields["payment_tariff"] = _format_last_payment_tariff(payment_summary.get("payload"))
+    fields["payment_date"] = _format_last_payment_date(payment_summary.get("created_at"))
+    fields["payment_amount"] = f"{payment_summary['amount']} {payment_summary['currency']}"
+    fields["payment_status"] = _format_last_payment_status(str(payment_summary.get("status")))
+    return fields
 
 
 async def _send_buy_menu(target, user_id: int):
@@ -169,12 +216,7 @@ async def profile(message: types.Message):
     else:
         next_step = "Нажмите «💳 Оплатить доступ»"
     payment_summary = await get_latest_user_payment_summary(message.from_user.id)
-    payment_line = "нет данных"
-    activation_line = "нет данных"
-    if payment_summary:
-        created_at = str(payment_summary["created_at"]).replace("T", " ")[:16]
-        payment_line = f"{payment_summary['amount']} {payment_summary['currency']} ({created_at})"
-        activation_line = payment_summary["last_provision_status"] or payment_summary["status"]
+    payment_fields = _build_last_payment_fields(payment_summary)
     await message.answer(
         await get_text(
             "profile_screen",
@@ -185,8 +227,7 @@ async def profile(message: types.Message):
             until_text=until_text,
             remaining=remaining,
             connection_status=connection_status,
-            payment_line=payment_line,
-            activation_line=activation_line,
+            **payment_fields,
             next_step=next_step,
             support_line=await get_support_short_text(),
         ),

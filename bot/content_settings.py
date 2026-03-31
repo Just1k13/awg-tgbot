@@ -55,8 +55,10 @@ TEXT_DEFAULTS: dict[str, str] = {
         "📅 <b>Действует до:</b> {until_text}\n"
         "⏳ <b>Осталось:</b> {remaining}\n"
         "🔑 <b>Подключение:</b> {connection_status}\n"
-        "💸 <b>Последний платёж:</b> {payment_line}\n"
-        "🚦 <b>Последняя активация:</b> {activation_line}\n\n"
+        "💸 <b>Последняя оплата:</b> {payment_tariff}\n"
+        "📅 <b>Дата:</b> {payment_date}\n"
+        "💰 <b>Сумма:</b> {payment_amount}\n"
+        "🚦 <b>Статус:</b> {payment_status}\n\n"
         "➡️ <b>Дальше:</b> {next_step}\n"
         "{support_line}"
     ),

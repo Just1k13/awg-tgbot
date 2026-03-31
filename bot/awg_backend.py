@@ -5,6 +5,7 @@ import ipaddress
 import uuid
 import zlib
 from datetime import datetime, timedelta
+import re
 from typing import Any
 
 from config import (
@@ -74,18 +75,58 @@ async def run_docker(args: list[str], input_data: str | None = None, timeout: in
 
 
 def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
+    def flush_peer() -> dict[str, str | datetime | None]:
+        return {"public_key": current_pub, "ip": current_ip, "latest_handshake_at": current_handshake_at}
+
+    def parse_latest_handshake(raw_value: str) -> datetime | None:
+        value = raw_value.strip().lower()
+        if not value or value in {"(none)", "none", "never", "n/a"}:
+            return None
+        if value.endswith("ago"):
+            value = value[:-3].strip()
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        if not parts:
+            return None
+
+        delta_seconds = 0
+        for part in parts:
+            match = re.match(r"^(\d+)\s+([a-z]+)", part)
+            if not match:
+                return None
+            amount = int(match.group(1))
+            unit = match.group(2)
+            if unit.startswith("second"):
+                delta_seconds += amount
+            elif unit.startswith("minute"):
+                delta_seconds += amount * 60
+            elif unit.startswith("hour"):
+                delta_seconds += amount * 3600
+            elif unit.startswith("day"):
+                delta_seconds += amount * 86400
+            elif unit.startswith("week"):
+                delta_seconds += amount * 7 * 86400
+            elif unit.startswith("month"):
+                delta_seconds += amount * 30 * 86400
+            elif unit.startswith("year"):
+                delta_seconds += amount * 365 * 86400
+            else:
+                return None
+        return utc_now_naive() - timedelta(seconds=delta_seconds)
+
     lines = show_output.splitlines()
     peers: list[dict[str, str | None]] = []
     current_pub: str | None = None
     current_ip: str | None = None
+    current_handshake_at: datetime | None = None
     for raw_line in lines:
         line = raw_line.strip()
         lowered = line.lower()
         if lowered.startswith("peer:"):
             if current_pub:
-                peers.append({"public_key": current_pub, "ip": current_ip})
+                peers.append(flush_peer())
             current_pub = line.split(":", 1)[1].strip()
             current_ip = None
+            current_handshake_at = None
             continue
         if lowered.startswith("allowed ips:"):
             allowed = line.split(":", 1)[1].strip()
@@ -103,8 +144,10 @@ def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
                     continue
                 current_ip = host_ip
                 break
+        if lowered.startswith("latest handshake:"):
+            current_handshake_at = parse_latest_handshake(line.split(":", 1)[1])
     if current_pub:
-        peers.append({"public_key": current_pub, "ip": current_ip})
+        peers.append(flush_peer())
     return peers
 
 

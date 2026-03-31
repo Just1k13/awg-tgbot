@@ -10,7 +10,7 @@ from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
     check_awg_container, clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
-    get_orphan_awg_peers, issue_subscription, revoke_user_access, run_docker, sync_qos_state,
+    get_awg_peers, get_orphan_awg_peers, issue_subscription, revoke_user_access, run_docker, sync_qos_state,
 )
 from config import (
     ADMIN_COMMAND_COOLDOWN_SECONDS,
@@ -33,6 +33,7 @@ from database import (
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
+from device_activity import render_device_activity_line
 from keyboards import (
     get_admin_confirm_kb, get_admin_edit_mode_kb, get_admin_inline_kb,
     get_admin_setting_detail_kb, get_admin_settings_list_kb, get_admin_simple_back_kb, get_admin_text_detail_kb,
@@ -608,6 +609,49 @@ def _operator_next_step(payment_status: str | None, activation_status: str | Non
     return "wait/sync: обновить карточку после /sync_awg"
 
 
+async def _build_admin_device_activity_lines(uid: int) -> list[str]:
+    key_rows = await fetchall(
+        """
+        SELECT device_num, public_key
+        FROM keys
+        WHERE user_id = ?
+          AND state = 'active'
+          AND public_key NOT LIKE 'pending:%'
+        ORDER BY device_num
+        """,
+        (uid,),
+    )
+    if not key_rows:
+        return ["• нет активных устройств"]
+
+    runtime_available = True
+    peer_by_public_key: dict[str, dict] = {}
+    try:
+        runtime_peers = await get_awg_peers()
+        peer_by_public_key = {
+            str(peer.get("public_key") or "").strip(): peer
+            for peer in runtime_peers
+            if str(peer.get("public_key") or "").strip()
+        }
+    except Exception:
+        runtime_available = False
+
+    now = utc_now_naive()
+    lines: list[str] = []
+    for device_num, public_key in key_rows:
+        peer = peer_by_public_key.get(str(public_key).strip())
+        lines.append(
+            render_device_activity_line(
+                device_num=int(device_num),
+                has_runtime_peer=peer is not None,
+                last_handshake_at=peer.get("latest_handshake_at") if peer else None,
+                runtime_available=runtime_available,
+                now=now,
+            )
+        )
+    return lines
+
+
 async def _render_users_page(target_message: types.Message, page: int) -> None:
     total_users = (await fetchone("SELECT COUNT(*) FROM users"))[0]
     if total_users == 0:
@@ -951,6 +995,7 @@ async def admin_manage_user(cb: types.CallbackQuery):
             operator_step = _operator_next_step(payment_summary["status"], activation_line, bool(keys))
             show_retry_activation = _is_retry_activation_relevant(payment_summary, bool(keys))
         retry_hint = "\n🧰 Retry: <b>доступен</b> для ручной повторной активации" if show_retry_activation else ""
+        activity_lines = await _build_admin_device_activity_lines(uid)
         await cb.message.answer(
             (
                 "🛠 <b>Управление пользователем</b>\n\n"
@@ -963,7 +1008,9 @@ async def admin_manage_user(cb: types.CallbackQuery):
                 f"💸 Последний платёж: <b>{payment_line}</b>\n"
                 f"🚦 Активация: <b>{activation_line}</b>\n"
                 f"➡️ Шаг оператора: <b>{operator_step}</b>\n"
-                f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}"
+                f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}\n\n"
+                "📶 Активность устройств:\n"
+                f"{'\n'.join(activity_lines)}"
                 f"{retry_hint}"
             ),
             parse_mode="HTML",

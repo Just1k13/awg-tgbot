@@ -30,11 +30,15 @@ async def get_instruction_with_policy_text() -> str:
     return f"{text}\n\n{await get_text('policy_torrent')}\n{await get_text('policy_sensitive')}"
 
 
-async def get_activation_status_text(status: str | None) -> str:
-    if status == "ready":
+async def get_activation_status_text(status: str | None, *, has_config: bool = True) -> str:
+    if status == "ready" and has_config:
         return await get_text("activation_status_ready")
+    if status == "ready" and not has_config:
+        return await get_text("activation_status_ready_config_pending")
     if status in {"provisioning", "payment_received"}:
         return await get_text("activation_status_pending")
+    if status in {"needs_repair", "stuck_manual", "failed"}:
+        return await get_text("activation_status_problem")
     return await get_text("activation_status_delayed")
 
 

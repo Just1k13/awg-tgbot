@@ -22,6 +22,7 @@ from config import (
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone, fetchval,
     get_app_setting,
+    get_latest_user_payment_summary,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
     get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_text_override, get_user_keys, get_user_meta, pop_pending_admin_action, reset_text_override,
     reset_app_setting, set_app_setting, set_text_override,
@@ -428,6 +429,18 @@ def _user_manage_kb(uid: int, page: int) -> types.InlineKeyboardMarkup:
     )
 
 
+def _operator_next_step(payment_status: str | None, activation_status: str | None, has_keys: bool) -> str:
+    if has_keys:
+        return "wait/close: доступ уже выдан"
+    if payment_status in {"stuck_manual", "failed"} or activation_status in {"stuck_manual", "failed", "needs_repair"}:
+        return "investigate: проверить audit + при необходимости выдать вручную"
+    if payment_status in {"needs_repair", "provisioning", "received"} or activation_status in {"payment_received", "provisioning", "ready_config_pending"}:
+        return "sync/wait: дождаться recovery, затем обновить карточку"
+    if payment_status == "applied" and not has_keys:
+        return "manual give: подписка активна, но ключа нет"
+    return "wait/sync: обновить карточку после /sync_awg"
+
+
 async def _render_users_page(target_message: types.Message, page: int) -> None:
     total_users = (await fetchone("SELECT COUNT(*) FROM users"))[0]
     if total_users == 0:
@@ -737,8 +750,18 @@ async def admin_manage_user(cb: types.CallbackQuery):
         status_text, until_text = get_status_text(sub_until)
         tg_username, first_name = await get_user_meta(uid)
         keys = await get_user_keys(uid)
+        payment_summary = await get_latest_user_payment_summary(uid)
         referral = await get_referral_summary(uid)
         connection_status = "готово" if keys else "нет ключа"
+        payment_line = "нет платежей"
+        activation_line = "нет данных"
+        operator_step = "wait"
+        if payment_summary:
+            payment_line = (
+                f"{payment_summary['status']} · {payment_summary['amount']} {payment_summary['currency']}"
+            )
+            activation_line = payment_summary["last_provision_status"] or "—"
+            operator_step = _operator_next_step(payment_summary["status"], activation_line, bool(keys))
         await cb.message.answer(
             (
                 "🛠 <b>Управление пользователем</b>\n\n"
@@ -748,6 +771,9 @@ async def admin_manage_user(cb: types.CallbackQuery):
                 f"📌 Статус: {status_text}\n"
                 f"📅 До: <b>{until_text}</b>\n"
                 f"🔑 Подключение: <b>{connection_status}</b> (устройств: {len(keys)})\n"
+                f"💸 Последний платёж: <b>{payment_line}</b>\n"
+                f"🚦 Активация: <b>{activation_line}</b>\n"
+                f"➡️ Шаг оператора: <b>{operator_step}</b>\n"
                 f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}"
             ),
             parse_mode="HTML",

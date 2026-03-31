@@ -36,10 +36,14 @@ class TextLayerRefactorTests(unittest.IsolatedAsyncioTestCase):
         ready = await texts.get_activation_status_text("ready")
         pending = await texts.get_activation_status_text("provisioning")
         delayed = await texts.get_activation_status_text("failed")
+        ready_pending = await texts.get_activation_status_text("ready", has_config=False)
+        problem = await texts.get_activation_status_text("stuck_manual")
 
         self.assertIn("доступ готов", ready.lower())
         self.assertIn("выпускается", pending.lower())
-        self.assertIn("задерж", delayed.lower())
+        self.assertIn("провер", delayed.lower())
+        self.assertIn("ключ", ready_pending.lower())
+        self.assertIn("требует проверки", problem.lower())
 
     async def test_payment_result_text_consolidated(self):
         import texts

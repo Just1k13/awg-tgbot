@@ -289,6 +289,12 @@ async def success_pay(message: types.Message):
             try:
                 sent = await _send_user_active_config(message, message.from_user.id)
                 if not sent:
+                    await update_last_provision_status(payment.telegram_payment_charge_id, "ready_config_pending")
+                    await write_audit_log(
+                        message.from_user.id,
+                        "payment_config_pending_after_apply",
+                        f"payment_id={payment.telegram_payment_charge_id}",
+                    )
                     raise RuntimeError("active config not found after applied payment")
             except Exception as delivery_error:
                 await _log_critical_delivery_error(payment.telegram_payment_charge_id, message.from_user.id, str(delivery_error)[:500])

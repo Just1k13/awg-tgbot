@@ -60,6 +60,12 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("🔄 Обновить карточку", labels)
         self.assertIn("⬅️ К списку", labels)
 
+    async def test_admin_operator_step_hint_for_stuck_payment(self):
+        import handlers_admin
+
+        hint = handlers_admin._operator_next_step("stuck_manual", "stuck_manual", False)
+        self.assertIn("investigate", hint)
+
     async def test_broadcast_prepare_shows_recipients_and_trimmed_preview(self):
         import database
         import handlers_admin

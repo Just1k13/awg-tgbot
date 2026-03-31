@@ -372,6 +372,13 @@ def _smoke_status_line(name: str, state: str, detail: str) -> str:
     return f"{icon} {name}: {detail}"
 
 
+def _hint_for_awg_target_error(error: str) -> str:
+    lowered = error.lower()
+    if "not configured" in lowered or "missing" in lowered:
+        return "проверь .env target и перезапусти сервис"
+    return "проверь контейнер/helper и сервис awg-bot"
+
+
 async def run_runtime_smokecheck() -> dict[str, object]:
     checks: list[dict[str, str]] = []
 
@@ -388,7 +395,7 @@ async def run_runtime_smokecheck() -> dict[str, object]:
                 "name": "Runtime config",
                 "state": "failed",
                 "detail": f"missing {', '.join(missing_env)}",
-                "hint": "проверь .env и перезапусти сервис",
+                "hint": "дополни .env selfhost и перезапусти сервис",
             }
         )
     else:
@@ -403,7 +410,7 @@ async def run_runtime_smokecheck() -> dict[str, object]:
                 "name": "DB",
                 "state": "failed",
                 "detail": "schema/db is not ready",
-                "hint": "нужна ручная проверка базы",
+                "hint": "проверь БД вручную: init/migrations/права",
             }
         )
 
@@ -416,7 +423,7 @@ async def run_runtime_smokecheck() -> dict[str, object]:
                 "name": "AWG target",
                 "state": "failed",
                 "detail": f"failed ({str(e)[:120]})",
-                "hint": "проверь контейнер и helper",
+                "hint": _hint_for_awg_target_error(str(e)),
             }
         )
 
@@ -428,7 +435,7 @@ async def run_runtime_smokecheck() -> dict[str, object]:
                     "name": "Helper policy",
                     "state": "failed",
                     "detail": policy_error,
-                    "hint": "проверь helper policy",
+                    "hint": "проверь путь/доступ к helper policy",
                 }
             )
         elif policy_container != DOCKER_CONTAINER or policy_interface != WG_INTERFACE:
@@ -437,7 +444,7 @@ async def run_runtime_smokecheck() -> dict[str, object]:
                     "name": "Helper policy",
                     "state": "warning",
                     "detail": f"mismatch env={DOCKER_CONTAINER}/{WG_INTERFACE} policy={policy_container}/{policy_interface}",
-                    "hint": "синхронизируй helper policy",
+                    "hint": "синхронизируй helper policy с .env",
                 }
             )
         else:

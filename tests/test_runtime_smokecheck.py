@@ -80,6 +80,56 @@ class RuntimeSmokecheckTests(unittest.IsolatedAsyncioTestCase):
         helper = next(item for item in report["checks"] if item["name"] == "Helper policy")
         self.assertEqual(helper["state"], "warning")
         self.assertIn("mismatch", helper["detail"])
+        self.assertEqual(helper["hint"], "синхронизируй helper policy с .env")
+        self.assertEqual(report["hint"], "синхронизируй helper policy с .env")
+
+    async def test_runtime_smokecheck_awg_target_failure_has_autofix_hint(self):
+        import handlers_admin
+
+        async def fake_db_health_info():
+            return {"is_healthy": True}
+
+        async def fake_check_awg_container():
+            raise RuntimeError("container amnezia-awg2 is down")
+
+        with (
+            patch.object(handlers_admin, "DOCKER_CONTAINER", "amnezia-awg2"),
+            patch.object(handlers_admin, "WG_INTERFACE", "awg0"),
+            patch.object(handlers_admin, "AWG_HELPER_POLICY_PATH", "/etc/awg-bot-helper.json"),
+            patch.object(handlers_admin, "db_health_info", fake_db_health_info),
+            patch.object(handlers_admin, "check_awg_container", fake_check_awg_container),
+            patch.object(handlers_admin, "read_helper_policy", return_value=("amnezia-awg2", "awg0", "")),
+        ):
+            report = await handlers_admin.run_runtime_smokecheck()
+
+        awg_target = next(item for item in report["checks"] if item["name"] == "AWG target")
+        self.assertEqual(awg_target["state"], "failed")
+        self.assertEqual(awg_target["hint"], "проверь контейнер/helper и сервис awg-bot")
+        self.assertEqual(report["hint"], "проверь контейнер/helper и сервис awg-bot")
+
+    async def test_runtime_smokecheck_missing_runtime_config_has_autofix_hint(self):
+        import handlers_admin
+
+        async def fake_db_health_info():
+            return {"is_healthy": True}
+
+        async def fake_check_awg_container():
+            return None
+
+        with (
+            patch.object(handlers_admin, "DOCKER_CONTAINER", ""),
+            patch.object(handlers_admin, "WG_INTERFACE", ""),
+            patch.object(handlers_admin, "AWG_HELPER_POLICY_PATH", ""),
+            patch.object(handlers_admin, "db_health_info", fake_db_health_info),
+            patch.object(handlers_admin, "check_awg_container", fake_check_awg_container),
+        ):
+            report = await handlers_admin.run_runtime_smokecheck()
+
+        runtime_config = next(item for item in report["checks"] if item["name"] == "Runtime config")
+        self.assertEqual(runtime_config["state"], "failed")
+        self.assertIn("DOCKER_CONTAINER", runtime_config["detail"])
+        self.assertEqual(runtime_config["hint"], "дополни .env selfhost и перезапусти сервис")
+        self.assertEqual(report["hint"], "дополни .env selfhost и перезапусти сервис")
 
     async def test_health_command_returns_smokecheck_text(self):
         import handlers_admin

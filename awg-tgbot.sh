@@ -3,11 +3,12 @@ set -Eeuo pipefail
 
 REPO_OWNER="Just1k13"
 REPO_NAME="awg-tgbot"
+DEFAULT_REPO_BRANCH="selfhost"
 INSTALL_DIR="/opt/amnezia/bot"
 STATE_DIR="${INSTALL_DIR}/.state"
 REPO_BRANCH_FILE="${STATE_DIR}/repo_branch"
 REPO_BRANCH="${REPO_BRANCH:-$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n' || true)}"
-REPO_BRANCH="main"
+REPO_BRANCH="${REPO_BRANCH:-$DEFAULT_REPO_BRANCH}"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
 TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"

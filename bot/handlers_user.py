@@ -15,7 +15,18 @@ from config import (
     maybe_set_support_username,
 )
 from awg_backend import get_awg_peers
-from database import ensure_user_exists, fetchall, get_latest_user_payment_summary, get_user_keys, get_user_subscription
+from awg_backend import issue_subscription
+from database import (
+    activate_promo_code,
+    ensure_user_exists,
+    fetchall,
+    get_latest_user_payment_summary,
+    get_user_keys,
+    get_user_subscription,
+    normalize_promo_code,
+    rollback_promo_activation_reservation,
+    write_audit_log,
+)
 from device_activity import render_device_activity_line
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active, utc_now_naive
 from keyboards import (
@@ -239,6 +250,52 @@ async def help_cmd(message: types.Message):
         "Выберите официальный клиент AmneziaWG для установки:",
         reply_markup=_help_clients_kb(),
     )
+
+
+@router.message(Command("promo"))
+async def promo_cmd(message: types.Message, command: CommandObject):
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    code = normalize_promo_code(command.args or "")
+    if not code:
+        await message.answer("Формат: <code>/promo CODE</code>", parse_mode="HTML")
+        return
+    try:
+        activation = await activate_promo_code(message.from_user.id, code)
+        status = activation["status"]
+        if status == "not_found":
+            await write_audit_log(message.from_user.id, "promo_activation_failed", f"code={code}; reason=not_found")
+            await message.answer("❌ Промокод не найден.")
+            return
+        if status == "inactive":
+            await write_audit_log(message.from_user.id, "promo_activation_failed", f"code={code}; reason=inactive")
+            await message.answer("❌ Промокод выключен.")
+            return
+        if status == "exhausted":
+            await write_audit_log(message.from_user.id, "promo_activation_failed", f"code={code}; reason=exhausted")
+            await message.answer("❌ Лимит активаций исчерпан.")
+            return
+        if status == "already_used":
+            await write_audit_log(message.from_user.id, "promo_activation_failed", f"code={code}; reason=already_used")
+            await message.answer("❌ Этот промокод уже нельзя применить.")
+            return
+
+        bonus_days = int(activation["bonus_days"])
+        operation_id = f"promo-{code}-{message.from_user.id}"
+        new_until = await issue_subscription(message.from_user.id, bonus_days, operation_id=operation_id)
+        await write_audit_log(
+            message.from_user.id,
+            "promo_activated",
+            f"code={code}; days={bonus_days}; until={new_until.isoformat()}",
+        )
+        await message.answer(
+            f"✅ Промокод применён: +{bonus_days} дней.\n📅 Доступ до: <b>{new_until.strftime('%d.%m.%Y %H:%M')}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Ошибка /promo: %s", e)
+        await rollback_promo_activation_reservation(message.from_user.id, code)
+        await write_audit_log(message.from_user.id, "promo_activation_failed", f"code={code}; reason=internal_error")
+        await message.answer("❌ Не удалось применить промокод. Попробуйте позже.")
 
 
 @router.message(F.text == BTN_PROFILE)

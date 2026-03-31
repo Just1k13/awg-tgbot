@@ -341,6 +341,30 @@ async def init_db() -> None:
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_codes (
+                code TEXT PRIMARY KEY,
+                bonus_days INTEGER NOT NULL,
+                max_activations INTEGER,
+                used_count INTEGER NOT NULL DEFAULT 0,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                created_by INTEGER
+            )
+            """
+        )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS promo_activations (
+                code TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                activated_at TEXT NOT NULL,
+                PRIMARY KEY (code, user_id),
+                FOREIGN KEY (code) REFERENCES promo_codes(code) ON DELETE CASCADE
+            )
+            """
+        )
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_users_sub_until ON users(sub_until)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_keys_user_id ON keys(user_id)")
@@ -357,6 +381,8 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_inviter ON referral_rewards(inviter_user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_invitee ON referral_rewards(invitee_user_id, created_at)")
         await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_reward_once_per_invitee ON referral_rewards(invitee_user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_codes_created_at ON promo_codes(created_at DESC)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_activations_user ON promo_activations(user_id, activated_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_jobs_status ON broadcast_jobs(status, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_targets_job ON broadcast_job_targets(job_id, user_id)")
 
@@ -1236,6 +1262,118 @@ async def get_referral_admin_stats(limit: int = 5) -> dict[str, Any]:
         "recent": recent,
         "top": top,
     }
+
+
+def normalize_promo_code(raw_code: str) -> str:
+    return (raw_code or "").strip().upper()
+
+
+async def create_promo_code(code: str, bonus_days: int, max_activations: int | None, created_by: int | None = None) -> bool:
+    safe_code = normalize_promo_code(code)
+    if not safe_code:
+        raise ValueError("empty promo code")
+    if bonus_days <= 0:
+        raise ValueError("bonus_days must be > 0")
+    if max_activations is not None and max_activations <= 0:
+        raise ValueError("max_activations must be > 0")
+    db = await open_db()
+    try:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO promo_codes (code, bonus_days, max_activations, used_count, is_active, created_at, created_by)
+            VALUES (?, ?, ?, 0, 1, ?, ?)
+            """,
+            (safe_code, bonus_days, max_activations, utc_now_naive().isoformat(), created_by),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) == 1
+    finally:
+        await db.close()
+
+
+async def list_promo_codes(limit: int = 20) -> list[tuple[str, int, int | None, int, int, str]]:
+    return await fetchall(
+        """
+        SELECT code, bonus_days, max_activations, used_count, is_active, created_at
+        FROM promo_codes
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+
+
+async def disable_promo_code(code: str) -> bool:
+    safe_code = normalize_promo_code(code)
+    if not safe_code:
+        return False
+    db = await open_db()
+    try:
+        cur = await db.execute("UPDATE promo_codes SET is_active = 0 WHERE code = ? AND is_active = 1", (safe_code,))
+        await db.commit()
+        return (cur.rowcount or 0) == 1
+    finally:
+        await db.close()
+
+
+async def activate_promo_code(user_id: int, code: str) -> dict[str, Any]:
+    safe_code = normalize_promo_code(code)
+    if not safe_code:
+        return {"status": "not_found"}
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT bonus_days, max_activations, used_count, is_active FROM promo_codes WHERE code = ?",
+            (safe_code,),
+        ) as cursor:
+            promo = await cursor.fetchone()
+        if not promo:
+            await db.rollback()
+            return {"status": "not_found"}
+        bonus_days, max_activations, used_count, is_active = int(promo[0]), promo[1], int(promo[2]), int(promo[3])
+        if not is_active:
+            await db.rollback()
+            return {"status": "inactive"}
+        async with db.execute(
+            "SELECT 1 FROM promo_activations WHERE code = ? AND user_id = ?",
+            (safe_code, user_id),
+        ) as cursor:
+            already_used = await cursor.fetchone()
+        if already_used:
+            await db.rollback()
+            return {"status": "already_used"}
+        if max_activations is not None and used_count >= int(max_activations):
+            await db.rollback()
+            return {"status": "exhausted"}
+        await db.execute(
+            "INSERT INTO promo_activations (code, user_id, activated_at) VALUES (?, ?, ?)",
+            (safe_code, user_id, now_iso),
+        )
+        await db.execute("UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?", (safe_code,))
+        await db.commit()
+        return {"status": "reserved", "bonus_days": bonus_days}
+    finally:
+        await db.close()
+
+
+async def rollback_promo_activation_reservation(user_id: int, code: str) -> None:
+    safe_code = normalize_promo_code(code)
+    if not safe_code:
+        return
+    db = await open_db()
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("DELETE FROM promo_activations WHERE code = ? AND user_id = ?", (safe_code, user_id))
+        if (cur.rowcount or 0) == 1:
+            await db.execute(
+                "UPDATE promo_codes SET used_count = CASE WHEN used_count > 0 THEN used_count - 1 ELSE 0 END WHERE code = ?",
+                (safe_code,),
+            )
+        await db.commit()
+    finally:
+        await db.close()
 
 
 async def create_broadcast_job(admin_id: int, text: str) -> int:

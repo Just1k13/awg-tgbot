@@ -956,7 +956,7 @@ print_recommended_actions() {
   case "$STARTUP_STATE_CODE" in
     awg_yes_bot_yes)
       echo "• Открой «Статус», чтобы проверить сервис и ветку."
-      echo "• Если доступно обновление — запусти «Безопасно обновить (pinned)»."
+      echo "• Если доступно обновление — запусти «Переустановить» (пункт 3 в меню)."
       echo "• Если есть проблемы — открой «Логи» → «Что не так?»."
       ;;
     awg_yes_bot_no)
@@ -981,10 +981,10 @@ print_update_status_line() {
   case "$UPDATE_STATUS" in
     available)
       echo
-      printf '%s\n' "$(color_red '[!] ДОСТУПНО БЕЗОПАСНОЕ ОБНОВЛЕНИЕ (PINNED)')"
+      printf '%s\n' "$(color_red '[!] ДОСТУПНО ОБНОВЛЕНИЕ')"
       echo "    Локальная версия: ${UPDATE_LOCAL_SHA:0:12}"
       echo "    Новая версия:    ${UPDATE_REMOTE_SHA:0:12}"
-      printf '    %s\n' "$(color_red 'Открой пункт меню: 3) Безопасно обновить (pinned)')"
+      printf '    %s\n' "$(color_red 'Открой пункт меню: 3) Переустановить')"
       ;;
     current) echo "Обновление: версия актуальна" ;;
     unknown) echo "Обновление: не удалось подготовить pinned commit" ;;
@@ -1490,7 +1490,7 @@ check_updates() {
       ok "Обновления не найдены. Установлена актуальная версия."
       ;;
     available)
-      warn "Доступно безопасное обновление по pinned commit. Открой пункт «Безопасно обновить (pinned)»."
+      warn "Доступно обновление. В personal selfhost используй пункт «Переустановить» в меню."
       if [[ "$UPDATE_SAFE_READY" == "1" ]]; then
         echo "Готовая команда: sudo REPO_UPDATE_REF=${UPDATE_REMOTE_SHA} awg-tgbot update"
       fi

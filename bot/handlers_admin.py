@@ -25,11 +25,12 @@ from config import (
     logger,
 )
 from database import (
-    clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone, fetchval,
+    clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, create_promo_code, db_health_info, disable_promo_code, fetchall, fetchone, fetchval,
     get_app_setting,
     get_latest_user_payment_summary,
+    list_promo_codes,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
-    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_text_override, get_user_keys, get_user_meta, pop_pending_admin_action, reset_text_override,
+    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_text_override, get_user_keys, get_user_meta, normalize_promo_code, pop_pending_admin_action, reset_text_override,
     reset_app_setting, set_app_setting, set_text_override,
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
@@ -78,6 +79,9 @@ ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/send TEXT", "рассылка (осторожно)"),
     ("/backup", "redacted backup в Telegram и на диск"),
     ("/give USER_ID DAYS", "выдать/продлить доступ вручную"),
+    ("/promo_create CODE DAYS [MAX]", "создать промокод"),
+    ("/promo_list", "краткий список промокодов"),
+    ("/promo_disable CODE", "отключить промокод"),
     ("/revoke USER_ID", "отключить доступ вручную (осторожно)"),
 )
 
@@ -1743,6 +1747,72 @@ async def give_manual(message: types.Message, command: CommandObject):
     except Exception as e:
         logger.exception("Ошибка /give: %s", e)
         await message.answer("❌ Не удалось выдать доступ.")
+
+
+@router.message(Command("promo_create"), IsAdmin())
+async def promo_create_cmd(message: types.Message, command: CommandObject):
+    if not command.args:
+        await message.answer("Формат: <code>/promo_create CODE DAYS [MAX]</code>", parse_mode="HTML")
+        return
+    try:
+        parts = command.args.split()
+        if len(parts) < 2:
+            raise ValueError
+        code = normalize_promo_code(parts[0])
+        days = int(parts[1])
+        max_activations = int(parts[2]) if len(parts) > 2 else None
+        if days <= 0 or (max_activations is not None and max_activations <= 0):
+            raise ValueError
+        created = await create_promo_code(code, days, max_activations, created_by=message.from_user.id)
+        if not created:
+            await message.answer("⚠️ Такой промокод уже существует.")
+            return
+        await write_audit_log(message.from_user.id, "promo_created", f"code={code}; days={days}; max={max_activations or 0}")
+        max_text = str(max_activations) if max_activations is not None else "∞"
+        await message.answer(f"✅ Промокод <code>{code}</code> создан: +{days} дней, лимит: {max_text}.", parse_mode="HTML")
+    except ValueError:
+        await message.answer("Ошибка формата. Пример: <code>/promo_create SPRING10 10 50</code>", parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Ошибка /promo_create: %s", e)
+        await message.answer("❌ Не удалось создать промокод.")
+
+
+@router.message(Command("promo_list"), IsAdmin())
+async def promo_list_cmd(message: types.Message, command: CommandObject):
+    limit = 20
+    if command.args:
+        try:
+            limit = max(1, min(50, int(command.args)))
+        except ValueError:
+            pass
+    rows = await list_promo_codes(limit=limit)
+    if not rows:
+        await message.answer("Промокодов пока нет.")
+        return
+    lines = [f"🎟 <b>Промокоды ({len(rows)})</b>\n"]
+    for code, days, max_activations, used_count, is_active, _created_at in rows:
+        max_text = str(max_activations) if max_activations is not None else "∞"
+        status = "on" if int(is_active) == 1 else "off"
+        lines.append(f"• <code>{code}</code> | +{int(days)}д | {int(used_count)}/{max_text} | {status}")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("promo_disable"), IsAdmin())
+async def promo_disable_cmd(message: types.Message, command: CommandObject):
+    code = normalize_promo_code(command.args or "")
+    if not code:
+        await message.answer("Формат: <code>/promo_disable CODE</code>", parse_mode="HTML")
+        return
+    try:
+        disabled = await disable_promo_code(code)
+        if not disabled:
+            await message.answer("⚠️ Промокод не найден или уже выключен.")
+            return
+        await write_audit_log(message.from_user.id, "promo_disabled", f"code={code}")
+        await message.answer(f"✅ Промокод <code>{code}</code> отключён.", parse_mode="HTML")
+    except Exception as e:
+        logger.exception("Ошибка /promo_disable: %s", e)
+        await message.answer("❌ Не удалось отключить промокод.")
 
 
 @router.message(Command("set_rate"), IsAdmin())

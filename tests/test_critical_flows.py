@@ -773,6 +773,13 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertIn('update_backup_dir="$(create_update_backup)"', update_body)
         self.assertIn('rollback_update_backup "$update_backup_dir"', update_body)
 
+    def test_installer_repo_branch_priority_and_selfhost_default(self):
+        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
+        self.assertIn('DEFAULT_REPO_BRANCH="selfhost"', script)
+        self.assertIn('REPO_BRANCH="${REPO_BRANCH:-$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d \'\\r\\n\' || true)}"', script)
+        self.assertIn('REPO_BRANCH="${REPO_BRANCH:-$DEFAULT_REPO_BRANCH}"', script)
+        self.assertNotIn('REPO_BRANCH="main"', script)
+
     def test_clean_orphans_command_does_not_promise_physical_delete(self):
         admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")
         self.assertIn("quarantine", admin_handler)

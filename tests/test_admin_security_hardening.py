@@ -97,3 +97,10 @@ class AdminSecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(state_force)
         self.assertIsNotNone(state_force_word)
         self.assertTrue(answers and answers[-1][0] == "Нет доступа")
+
+    async def test_admin_manage_keyboard_has_no_qos_buttons(self):
+        import handlers_admin
+
+        kb = handlers_admin._user_manage_kb(123, 0)
+        serialized = str(kb.model_dump())
+        self.assertNotIn("admin_set_rate_", serialized)

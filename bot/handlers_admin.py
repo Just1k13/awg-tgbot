@@ -9,7 +9,7 @@ from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
     clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
-    get_orphan_awg_peers, issue_subscription, list_orphan_delete_candidates_force, revoke_user_access, run_docker, sync_qos_state,
+    get_orphan_awg_peers, issue_subscription, revoke_user_access, run_docker, sync_qos_state,
 )
 from config import (
     ADMIN_COMMAND_COOLDOWN_SECONDS,
@@ -21,17 +21,15 @@ from config import (
 )
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, db_health_info, fetchall, fetchone, fetchval,
-    execute,
     get_app_setting,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
-    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_text_override, get_user_meta, list_app_settings,
-    list_text_overrides, pop_pending_admin_action, reset_text_override,
+    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_text_override, get_user_meta, pop_pending_admin_action, reset_text_override,
     reset_app_setting, set_app_setting, set_text_override,
     set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
 from keyboards import (
-    get_admin_confirm_kb, get_admin_edit_mode_kb, get_admin_force_confirm_kb, get_admin_inline_kb,
+    get_admin_confirm_kb, get_admin_edit_mode_kb, get_admin_inline_kb,
     get_admin_setting_detail_kb, get_admin_settings_list_kb, get_admin_simple_back_kb, get_admin_text_detail_kb,
     get_admin_texts_list_kb, get_broadcast_confirm_kb,
 )
@@ -421,10 +419,6 @@ def _user_manage_kb(uid: int, page: int) -> types.InlineKeyboardMarkup:
                 types.InlineKeyboardButton(text="+30 дней", callback_data=f"{CB_ADMIN_ADD_DAYS_PREFIX}{uid}_30_{page}"),
             ],
             [
-                types.InlineKeyboardButton(text="🚦 100 Мбит", callback_data=f"{CB_ADMIN_SET_RATE_PREFIX}{uid}_100_{page}"),
-                types.InlineKeyboardButton(text="♾ Без лимита", callback_data=f"{CB_ADMIN_SET_RATE_PREFIX}{uid}_off_{page}"),
-            ],
-            [
                 types.InlineKeyboardButton(text="⛔ Отключить", callback_data=f"{CB_ADMIN_REVOKE_PREFIX}{uid}_{page}"),
                 types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"{CB_ADMIN_DELETE_PREFIX}{uid}_{page}"),
             ],
@@ -489,16 +483,14 @@ async def admin_back_main(cb: types.CallbackQuery):
 async def admin_texts_menu(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    await _render_texts_list(cb.message, 0)
-    await cb.answer("Открыто")
+    await cb.answer("Отключено в personal MVP", show_alert=True)
 
 
 @router.callback_query(F.data == CB_ADMIN_SETTINGS)
 async def admin_settings_menu(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    await _render_settings_list(cb.message, 0)
-    await cb.answer("Открыто")
+    await cb.answer("Отключено в personal MVP", show_alert=True)
 
 
 @router.callback_query(F.data == CB_ADMIN_BACK_TEXTS)
@@ -797,40 +789,7 @@ async def admin_add_days_btn(cb: types.CallbackQuery):
 async def admin_set_rate_btn(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    try:
-        _, _, _, uid_raw, rate_raw, _page_raw = cb.data.split("_", 5)
-        uid = int(uid_raw)
-        if rate_raw == "off":
-            rate_value = 0
-            rate_label = "без ограничения"
-        else:
-            rate_value = int(rate_raw)
-            if rate_value <= 0:
-                await cb.answer("Некорректный лимит", show_alert=True)
-                return
-            rate_label = f"{rate_value} Мбит/с"
-        await execute(
-            """
-            UPDATE keys
-            SET rate_limit_mbit = ?
-            WHERE user_id = ? AND state IN ('active', 'pending')
-            """,
-            (rate_value, uid),
-        )
-        changed = int((await fetchone("SELECT changes()"))[0])
-        if changed <= 0:
-            await cb.answer("Нет активных ключей", show_alert=True)
-            return
-        await sync_qos_state()
-        await write_audit_log(cb.from_user.id, "set_rate_limit_btn", f"target={uid}; rate_mbit={rate_value}; keys={changed}")
-        await cb.answer(f"✅ Лимит: {rate_label}")
-        await cb.message.answer(
-            f"🚦 Лимит скорости для пользователя <code>{uid}</code>: <b>{rate_label}</b> (ключей: {changed}).",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        logger.exception("Ошибка admin_set_rate_btn: %s", e)
-        await cb.answer("❌ Не удалось изменить лимит", show_alert=True)
+    await cb.answer("Отключено в personal MVP", show_alert=True)
 
 
 @router.callback_query(F.data.startswith(CB_ADMIN_REVOKE_PREFIX))
@@ -1055,12 +1014,7 @@ async def admin_referrals_summary(cb: types.CallbackQuery):
 async def admin_health_summary(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    await cb.message.answer(
-        await build_health_text(),
-        parse_mode="HTML",
-        reply_markup=get_admin_simple_back_kb(CB_ADMIN_BACK_MAIN, CB_ADMIN_REFRESH_HEALTH),
-    )
-    await cb.answer("Готово")
+    await cb.answer("Отключено в personal MVP", show_alert=True)
 
 
 @router.message(Command("cancel_edit"), IsAdmin())
@@ -1159,89 +1113,12 @@ async def give_manual(message: types.Message, command: CommandObject):
 
 @router.message(Command("set_rate"), IsAdmin())
 async def set_user_rate_limit_cmd(message: types.Message, command: CommandObject):
-    if admin_command_limited("set_rate", message.from_user.id):
-        await message.answer("⏳ Слишком частый вызов /set_rate")
-        return
-    if not command.args:
-        await message.answer(
-            "Формат: <code>/set_rate ID МБИТ|off</code>\n"
-            "Пример: <code>/set_rate 123456789 100</code> или <code>/set_rate 123456789 off</code>",
-            parse_mode="HTML",
-        )
-        return
-    try:
-        uid_raw, rate_raw = command.args.split(maxsplit=1)
-        uid = int(uid_raw)
-        normalized = rate_raw.strip().lower()
-        if normalized in {"off", "none", "unlimited", "nolimit", "безлимит", "без_лимита"}:
-            rate = 0
-            rate_label = "без ограничения"
-        else:
-            rate = int(rate_raw)
-            if rate <= 0:
-                await message.answer("Скорость должна быть больше 0 Мбит/с или используйте <code>off</code> для отключения лимита.", parse_mode="HTML")
-                return
-            if rate > 10000:
-                await message.answer("Слишком большое значение. Укажите реалистичный лимит до 10000 Мбит/с.")
-                return
-            rate_label = f"{rate} Мбит/с"
-        await execute(
-            """
-            UPDATE keys
-            SET rate_limit_mbit = ?
-            WHERE user_id = ? AND state IN ('active', 'pending')
-            """,
-            (rate, uid),
-        )
-        changed = int((await fetchone("SELECT changes()"))[0])
-        if changed <= 0:
-            await message.answer("У пользователя нет активных/ожидающих ключей для применения лимита.")
-            return
-        await sync_qos_state()
-        await write_audit_log(message.from_user.id, "set_rate_limit", f"target={uid}; rate_mbit={rate}; keys={changed}")
-        await message.answer(
-            f"✅ Лимит скорости обновлён: <b>{rate_label}</b> для пользователя <code>{uid}</code> (ключей: {changed}).",
-            parse_mode="HTML",
-        )
-    except ValueError:
-        await message.answer("Ошибка формата. Пример: <code>/set_rate 123456789 100</code> или <code>/set_rate 123456789 off</code>", parse_mode="HTML")
-    except Exception as e:
-        logger.exception("Ошибка /set_rate: %s", e)
-        await message.answer("❌ Не удалось применить лимит скорости.")
+    await message.answer("⚠️ /set_rate отключена в personal MVP.")
 
 
 @router.message(Command("rate"), IsAdmin())
 async def get_user_rate_limit_cmd(message: types.Message, command: CommandObject):
-    if not command.args:
-        await message.answer("Формат: <code>/rate ID</code>", parse_mode="HTML")
-        return
-    try:
-        uid = int(command.args.strip())
-        rows = await fetchall(
-            """
-            SELECT device_num, ip, COALESCE(rate_limit_mbit, 0), state
-            FROM keys
-            WHERE user_id = ?
-            ORDER BY device_num
-            """,
-            (uid,),
-        )
-        if not rows:
-            await message.answer("Ключи пользователя не найдены.")
-            return
-        default_rate = int(await get_setting("DEFAULT_KEY_RATE_MBIT", int) or 100)
-        lines = [f"🚦 <b>Лимиты скорости для user_id={uid}</b>", f"По умолчанию: <b>{default_rate} Мбит/с</b>", ""]
-        for device_num, ip, rate_limit_mbit, state in rows:
-            effective = int(rate_limit_mbit) if int(rate_limit_mbit or 0) > 0 else default_rate
-            lines.append(
-                f"• device {device_num} | ip <code>{ip or '—'}</code> | state={state} | limit=<b>{effective} Мбит/с</b>"
-            )
-        await message.answer("\n".join(lines), parse_mode="HTML")
-    except ValueError:
-        await message.answer("Ошибка формата. Пример: <code>/rate 123456789</code>", parse_mode="HTML")
-    except Exception as e:
-        logger.exception("Ошибка /rate: %s", e)
-        await message.answer("❌ Не удалось получить лимиты скорости.")
+    await message.answer("⚠️ /rate отключена в personal MVP.")
 
 
 @router.message(Command("revoke"), IsAdmin())
@@ -1362,51 +1239,14 @@ async def clean_orphans_cmd(message: types.Message):
 
 @router.message(Command("clean_orphans_force"), IsAdmin())
 async def clean_orphans_force_cmd(message: types.Message):
-    try:
-        candidates = await list_orphan_delete_candidates_force()
-        preview_keys = [item.get("public_key") for item in candidates[:10] if item.get("public_key")]
-        await set_pending_admin_action(
-            ADMIN_ID,
-            "clean_orphans_force",
-            {
-                "action": "clean_orphans_force",
-                "candidate_count": len(candidates),
-                "preview": preview_keys,
-                "confirmed": False,
-            },
-        )
-        preview_text = "\n".join(f"• <code>{key}</code>" for key in preview_keys) or "—"
-        await message.answer(
-            (
-                "🧨 <b>Force-cleanup (предпросмотр)</b>\n\n"
-                f"Кандидатов на удаление: <b>{len(candidates)}</b>\n"
-                "Будут удалены только quarantined+managed peer, которые всё ещё отсутствуют в БД.\n\n"
-                f"Первые ключи:\n{preview_text}\n\n"
-                "Нажмите подтверждение ниже, затем введите: <code>/force_delete FORCE</code> или <code>/force_delete DELETE</code>."
-            ),
-            parse_mode="HTML",
-            reply_markup=get_admin_force_confirm_kb(),
-        )
-    except Exception as e:
-        logger.exception("Ошибка /clean_orphans_force: %s", e)
-        await message.answer("❌ Не удалось подготовить принудительную очистку потерянных peer.")
+    await message.answer("⚠️ /clean_orphans_force отключена в personal MVP.")
 
 
 @router.callback_query(F.data == CB_CONFIRM_CLEAN_ORPHANS_FORCE)
 async def confirm_clean_orphans_force(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    action = await pop_pending_admin_action(ADMIN_ID, "clean_orphans_force")
-    if not action or action.get("action") != "clean_orphans_force":
-        await cb.answer("Нет ожидающего действия", show_alert=True)
-        return
-    action["confirmed"] = True
-    await set_pending_admin_action(ADMIN_ID, "clean_orphans_force_word", action)
-    await cb.message.answer(
-        "🛡 Дополнительное подтверждение: введите <code>/force_delete FORCE</code> или <code>/force_delete DELETE</code>.",
-        parse_mode="HTML",
-    )
-    await cb.answer("Ожидаю кодовое слово")
+    await cb.answer("Отключено в personal MVP", show_alert=True)
 
 
 @router.callback_query(F.data == CB_CANCEL_CLEAN_ORPHANS_FORCE)
@@ -1421,28 +1261,7 @@ async def cancel_clean_orphans_force(cb: types.CallbackQuery):
 
 @router.message(Command("force_delete"), IsAdmin())
 async def force_delete_cmd(message: types.Message, command: CommandObject):
-    action = await pop_pending_admin_action(ADMIN_ID, "clean_orphans_force_word")
-    if not action or action.get("action") != "clean_orphans_force" or not action.get("confirmed"):
-        await message.answer("Нет подтверждённого force-действия. Сначала выполните /clean_orphans_force.")
-        return
-    word = (command.args or "").strip().upper()
-    if word not in {"FORCE", "DELETE"}:
-        await set_pending_admin_action(ADMIN_ID, "clean_orphans_force_word", action)
-        await message.answer("❌ Неверное кодовое слово. Введите /force_delete FORCE или /force_delete DELETE.")
-        return
-    try:
-        removed = await clean_orphan_awg_peers(force=True)
-        await write_audit_log(ADMIN_ID, "clean_orphans_force", f"removed={removed} confirm_word={word}")
-        await message.answer(
-            (
-                "🧨 <b>Force-cleanup завершён</b>\n\n"
-                f"Физически удалено потерянных peer: <b>{removed}</b>"
-            ),
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        logger.exception("Ошибка /force_delete: %s", e)
-        await message.answer("❌ Не удалось выполнить принудительную очистку потерянных peer.")
+    await message.answer("⚠️ /force_delete отключена в personal MVP.")
 
 
 @router.message(Command("backup"), IsAdmin())
@@ -1499,84 +1318,42 @@ async def broadcast_prepare(message: types.Message, command: CommandObject):
 
 @router.message(Command("health"), IsAdmin())
 async def health_cmd(message: types.Message):
-    await message.answer(await build_health_text(), parse_mode="HTML")
+    await message.answer("⚠️ /health отключена в personal MVP.")
 
 
 @router.message(Command("text_list"), IsAdmin())
 async def text_list_cmd(message: types.Message):
-    rows = await list_text_overrides()
-    defaults = ", ".join(sorted(TEXT_DEFAULTS.keys()))
-    custom = ", ".join([row[0] for row in rows]) or "—"
-    await message.answer(f"TEXT_DEFAULTS: {defaults}\nCUSTOM: {custom}")
+    await message.answer("⚠️ Text editor отключён в personal MVP.")
 
 
 @router.message(Command("text_get"), IsAdmin())
 async def text_get_cmd(message: types.Message, command: CommandObject):
-    key = (command.args or "").strip()
-    if not key:
-        await message.answer("Использование: /text_get <key>")
-        return
-    value = await get_text_override(key) or TEXT_DEFAULTS.get(key)
-    await message.answer(f"{key}:\n\n{escape_html(str(value or ''))}", parse_mode="HTML")
+    await message.answer("⚠️ Text editor отключён в personal MVP.")
 
 
 @router.message(Command("text_set"), IsAdmin())
 async def text_set_cmd(message: types.Message, command: CommandObject):
-    raw = (command.args or "").strip()
-    if " " not in raw:
-        await message.answer("Использование: /text_set <key> <value>")
-        return
-    key, value = raw.split(" ", 1)
-    valid, err = await validate_text_template(key, value)
-    if not valid:
-        await message.answer(f"❌ {err}")
-        return
-    await set_text_override(key, value, updated_by=message.from_user.id)
-    await write_audit_log(message.from_user.id, "text_set", f"key={key}")
-    await message.answer("✅ Текст обновлён.")
+    await message.answer("⚠️ Text editor отключён в personal MVP.")
 
 
 @router.message(Command("text_reset"), IsAdmin())
 async def text_reset_cmd(message: types.Message, command: CommandObject):
-    key = (command.args or "").strip()
-    if not key:
-        await message.answer("Использование: /text_reset <key>")
-        return
-    await reset_text_override(key)
-    await write_audit_log(message.from_user.id, "text_reset", f"key={key}")
-    await message.answer("✅ Override удалён.")
+    await message.answer("⚠️ Text editor отключён в personal MVP.")
 
 
 @router.message(Command("setting_list"), IsAdmin())
 async def setting_list_cmd(message: types.Message):
-    rows = await list_app_settings()
-    defaults = ", ".join(sorted(SETTING_DEFAULTS.keys()))
-    custom = ", ".join([row[0] for row in rows]) or "—"
-    await message.answer(f"SETTING_DEFAULTS: {defaults}\nCUSTOM: {custom}")
+    await message.answer("⚠️ Settings editor отключён в personal MVP.")
 
 
 @router.message(Command("setting_get"), IsAdmin())
 async def setting_get_cmd(message: types.Message, command: CommandObject):
-    key = (command.args or "").strip()
-    if not key:
-        await message.answer("Использование: /setting_get <key>")
-        return
-    value = await get_app_setting(key)
-    if value is None:
-        value = SETTING_DEFAULTS.get(key)
-    await message.answer(f"{key}={value}")
+    await message.answer("⚠️ Settings editor отключён в personal MVP.")
 
 
 @router.message(Command("setting_set"), IsAdmin())
 async def setting_set_cmd(message: types.Message, command: CommandObject):
-    raw = (command.args or "").strip()
-    if " " not in raw:
-        await message.answer("Использование: /setting_set <key> <value>")
-        return
-    key, value = raw.split(" ", 1)
-    await set_app_setting(key, value, updated_by=message.from_user.id)
-    await write_audit_log(message.from_user.id, "setting_set", f"key={key}; value={value[:120]}")
-    await message.answer("✅ Настройка сохранена.")
+    await message.answer("⚠️ Settings editor отключён в personal MVP.")
 
 
 @router.message(Command("ref_stats"), IsAdmin())

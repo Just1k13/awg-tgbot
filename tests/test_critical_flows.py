@@ -739,39 +739,23 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertIn('if [[ -n "$db_path" ]]; then', script)
         self.assertIn('set_env_value DB_PATH "$db_path"', script)
 
-    def test_installer_update_requires_pinned_sha(self):
+    def test_installer_legacy_pinned_update_surface_removed(self):
         script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
-        self.assertIn('Безопасное обновление требует pinned commit SHA', script)
-        self.assertIn('Небезопасный update по mutable ветке отключён', script)
-        self.assertIn('requested_ref="${REPO_UPDATE_REF:-}"', script)
-        self.assertIn('if ! is_full_sha "$requested_ref"; then', script)
-        self.assertIn('tmp_dir="$(download_repo "$requested_ref")"', script)
+        self.assertNotIn("update_bot()", script)
+        self.assertNotIn("menu_choose_update_ref()", script)
+        self.assertNotIn("print_pinned_update_command()", script)
+        self.assertNotIn("create_update_backup()", script)
+        self.assertNotIn("rollback_update_backup()", script)
+        self.assertNotIn("REPO_UPDATE_REF", script)
 
-    def test_installer_update_has_no_implicit_target_fallback_from_state(self):
+    def test_installer_check_updates_is_minimal_reinstall_guidance(self):
         script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
-        self.assertNotIn("UPDATE_REF_FILE=", script)
-        self.assertNotIn('UPDATE_REF="${REPO_UPDATE_REF:-$(cat', script)
-        self.assertIn('printf \'%s\\n\' "$requested_ref" > "$VERSION_FILE"', script)
-
-    def test_installer_update_explicit_noop_when_target_equals_current(self):
-        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
-        self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', script)
-        self.assertIn('Запрошенный SHA уже установлен', script)
-
-    def test_installer_update_does_not_gate_explicit_requested_sha_by_branch_status(self):
-        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
-        update_body = self._extract_shell_function(script, "update_bot")
-        self.assertIn('requested_ref="${REPO_UPDATE_REF:-}"', update_body)
-        self.assertIn('if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then', update_body)
-        self.assertNotIn('if [[ "$UPDATE_STATUS" == "current" ]]; then', update_body)
-
-    def test_installer_update_has_rollback_path_after_deploy(self):
-        script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")
-        self.assertIn("create_update_backup()", script)
-        self.assertIn("rollback_update_backup()", script)
-        update_body = self._extract_shell_function(script, "update_bot")
-        self.assertIn('update_backup_dir="$(create_update_backup)"', update_body)
-        self.assertIn('rollback_update_backup "$update_backup_dir"', update_body)
+        check_updates_body = self._extract_shell_function(script, "check_updates")
+        self.assertIn('echo "Remote: ${UPDATE_REMOTE_SHA:-не удалось получить}"', check_updates_body)
+        self.assertIn('echo "Local : ${UPDATE_LOCAL_SHA:-нет локальной версии}"', check_updates_body)
+        self.assertIn("используй пункт «Переустановить» в меню", check_updates_body)
+        self.assertNotIn("pinned", check_updates_body.lower())
+        self.assertNotIn("REPO_UPDATE_REF", check_updates_body)
 
     def test_installer_repo_branch_priority_and_selfhost_default(self):
         script = (ROOT / "awg-tgbot.sh").read_text(encoding="utf-8")

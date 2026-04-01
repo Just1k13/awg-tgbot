@@ -79,7 +79,6 @@ UPDATE_LOCAL_SHA=""
 UPDATE_CHECK_TS=0
 UPDATE_CACHE_TTL=15
 UPDATE_CACHE_BRANCH=""
-UPDATE_SAFE_READY=0
 
 print_line() { printf '%s\n' "------------------------------------------------------------"; }
 info() { printf '[*] %s\n' "$*" >&2; }
@@ -262,10 +261,6 @@ persist_repo_branch() {
   mkdir -p "$STATE_DIR"
   printf '%s\n' "$REPO_BRANCH" > "$REPO_BRANCH_FILE"
   return 0
-}
-
-is_full_sha() {
-  [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
 }
 
 is_safe_name() {
@@ -860,7 +855,6 @@ refresh_update_status_quiet() {
   UPDATE_STATUS="not_applicable"
   UPDATE_LOCAL_SHA="$(get_local_sha)"
   UPDATE_REMOTE_TITLE=""
-  UPDATE_SAFE_READY=0
 
   if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
     UPDATE_REMOTE_SHA=""
@@ -878,9 +872,6 @@ refresh_update_status_quiet() {
         UPDATE_STATUS="current"
       else
         UPDATE_STATUS="available"
-      fi
-      if is_full_sha "${UPDATE_REMOTE_SHA:-}"; then
-        UPDATE_SAFE_READY=1
       fi
       return 0
     fi
@@ -900,9 +891,6 @@ refresh_update_status_quiet() {
     UPDATE_STATUS="current"
   else
     UPDATE_STATUS="available"
-  fi
-  if is_full_sha "${UPDATE_REMOTE_SHA:-}"; then
-    UPDATE_SAFE_READY=1
   fi
   return 0
 }
@@ -1096,54 +1084,6 @@ deploy_repo() {
     rm -rf "$backup_dir"
   fi
   return 1
-}
-
-create_update_backup() {
-  local backup_dir
-  backup_dir="$(mktemp -d "${INSTALL_DIR}/.update-backup.XXXXXX")"
-  if [[ -d "$BOT_DIR" ]]; then
-    cp -a "$BOT_DIR" "$backup_dir/bot" || { rm -rf "$backup_dir"; return 1; }
-  fi
-  if [[ -f "$INSTALL_DIR/awg-tgbot.sh" ]]; then
-    cp "$INSTALL_DIR/awg-tgbot.sh" "$backup_dir/awg-tgbot.sh" || { rm -rf "$backup_dir"; return 1; }
-  fi
-  if [[ -f "$ENV_FILE" ]]; then
-    cp "$ENV_FILE" "$backup_dir/.env" || { rm -rf "$backup_dir"; return 1; }
-  fi
-  if [[ -f "$VERSION_FILE" ]]; then
-    cp "$VERSION_FILE" "$backup_dir/version" || { rm -rf "$backup_dir"; return 1; }
-  fi
-  printf '%s' "$backup_dir"
-}
-
-rollback_update_backup() {
-  local backup_dir="$1"
-  [[ -n "$backup_dir" && -d "$backup_dir" ]] || return 1
-  warn "Обновление прервано. Выполняю откат к предыдущей рабочей версии."
-  stop_service_if_exists || true
-  rm -rf "$BOT_DIR"
-  if [[ -d "$backup_dir/bot" ]]; then
-    cp -a "$backup_dir/bot" "$BOT_DIR" || return 1
-  fi
-  if [[ -f "$backup_dir/awg-tgbot.sh" ]]; then
-    cp "$backup_dir/awg-tgbot.sh" "$INSTALL_DIR/awg-tgbot.sh" || return 1
-    chmod +x "$INSTALL_DIR/awg-tgbot.sh" || true
-    ln -sfn "$INSTALL_DIR/awg-tgbot.sh" "$SELF_SYMLINK" || true
-  fi
-  if [[ -f "$backup_dir/.env" ]]; then
-    cp "$backup_dir/.env" "$ENV_FILE" || return 1
-  fi
-  if [[ -f "$backup_dir/version" ]]; then
-    cp "$backup_dir/version" "$VERSION_FILE" || true
-  fi
-  ensure_venv_and_requirements || warn "Не удалось восстановить python зависимости после отката."
-  write_service || warn "Не удалось полностью восстановить systemd unit после отката."
-  if start_service; then
-    ok "Откат завершён, сервис восстановлен."
-  else
-    warn "Откат выполнен, но сервис не запустился автоматически. Проверь 'sudo awg-tgbot status'."
-  fi
-  return 0
 }
 
 ensure_env_file() {
@@ -1442,7 +1382,6 @@ check_updates() {
   echo "Ветка : ${REPO_BRANCH}"
   echo "Remote: ${UPDATE_REMOTE_SHA:-не удалось получить}"
   echo "Local : ${UPDATE_LOCAL_SHA:-нет локальной версии}"
-  echo "Pinned update готов: $([[ "$UPDATE_SAFE_READY" == "1" ]] && echo 'да' || echo 'нет')"
   if [[ -n "$UPDATE_REMOTE_TITLE" ]]; then
     echo "Commit title: ${UPDATE_REMOTE_TITLE}"
   fi
@@ -1452,13 +1391,10 @@ check_updates() {
       ;;
     available)
       warn "Доступно обновление. В personal selfhost используй пункт «Переустановить» в меню."
-      if [[ "$UPDATE_SAFE_READY" == "1" ]]; then
-        echo "Готовая команда: sudo REPO_UPDATE_REF=${UPDATE_REMOTE_SHA} awg-tgbot update"
-      fi
       ;;
     unknown|*)
-      warn "Не удалось подготовить pinned update автоматически."
-      echo "Для ручного безопасного обновления используй: sudo REPO_UPDATE_REF=<40-hex-sha> awg-tgbot update"
+      warn "Не удалось проверить удалённый commit."
+      echo "Для обновления в personal selfhost используй «Переустановить»."
       ;;
   esac
   print_line
@@ -1572,186 +1508,6 @@ install_or_reinstall_flow() {
   echo "Или коротко: sudo awg-tgbot"
   return 0
 }
-
-relaunch_installer_menu() {
-  local target=""
-  if [[ -x "$SELF_SYMLINK" ]]; then
-    target="$SELF_SYMLINK"
-  elif [[ -x "$INSTALL_DIR/awg-tgbot.sh" ]]; then
-    target="$INSTALL_DIR/awg-tgbot.sh"
-  else
-    return 0
-  fi
-  clear_if_tty
-  exec "$target"
-}
-
-print_pinned_update_command() {
-  local sha="${1:-}"
-  if is_full_sha "$sha"; then
-    echo "sudo REPO_UPDATE_REF=${sha} awg-tgbot update"
-  else
-    echo "sudo REPO_UPDATE_REF=<40-hex-sha> awg-tgbot update"
-  fi
-}
-
-menu_choose_update_ref() {
-  local selection="" resolved_ref=""
-  refresh_update_status_quiet
-  screen_line
-  screen_echo "Безопасное обновление (pinned commit)"
-  screen_echo "Текущая ветка: ${REPO_BRANCH}"
-  screen_echo "Текущий commit: ${UPDATE_LOCAL_SHA:-неизвестно}"
-  screen_echo "Доступный commit: ${UPDATE_REMOTE_SHA:-не удалось определить}"
-  if [[ -n "$UPDATE_REMOTE_TITLE" ]]; then
-    screen_echo "Commit title: ${UPDATE_REMOTE_TITLE}"
-  fi
-  screen_line
-
-  if [[ "$UPDATE_STATUS" == "current" ]]; then
-    screen_echo "Уже установлена актуальная версия."
-    screen_echo "Обновление не требуется."
-    screen_line
-    return 1
-  fi
-
-  if [[ "$UPDATE_SAFE_READY" != "1" ]]; then
-    screen_echo "Авто-подготовка pinned update сейчас недоступна."
-    screen_echo "Безопасное обновление требует pinned commit SHA."
-    screen_echo "Безопасное обновление возможно только с явным SHA."
-    screen_echo "Ручная команда:"
-    screen_echo "  $(print_pinned_update_command)"
-    screen_line
-    return 1
-  fi
-
-  screen_echo "Обновление будет выполнено ТОЛЬКО до pinned commit:"
-  screen_echo "  ${UPDATE_REMOTE_SHA}"
-  screen_line
-  screen_echo "[1] Обновить безопасно до pinned commit"
-  screen_echo "[2] Показать команду"
-  screen_echo "[0] Назад"
-  screen_line
-  prompt_menu_key "Выбор: " selection
-  case "$selection" in
-    1)
-      resolved_ref="$UPDATE_REMOTE_SHA"
-      info "Получен доступный pinned commit: ${resolved_ref}"
-      info "Пользователь подтвердил safe update из меню."
-      REPO_UPDATE_REF="$resolved_ref"
-      export REPO_UPDATE_REF
-      return 0
-      ;;
-    2)
-      screen_echo "Готовая команда безопасного обновления:"
-      screen_echo "  $(print_pinned_update_command "$UPDATE_REMOTE_SHA")"
-      screen_echo "Технический эквивалент (git):"
-      screen_echo "  cd ${INSTALL_DIR} && git fetch ${REPO_URL}.git ${UPDATE_REMOTE_SHA} && git checkout ${UPDATE_REMOTE_SHA}"
-      info "Пользователь запросил команду ручного safe update."
-      screen_line
-      return 1
-      ;;
-    *)
-      info "Update aborted by user."
-      return 1
-      ;;
-  esac
-}
-
-update_bot() {
-  local mode="${1:-direct}" tmp_dir api_token admin_id server_name secret requested_ref local_sha update_backup_dir="" previous_sha=""
-  detect_install_state
-  if [[ "$STATE_BOT_INSTALLED" != "1" ]]; then
-    warn "Бот не установлен."
-    return 0
-  fi
-
-  requested_ref="${REPO_UPDATE_REF:-}"
-  if [[ "$mode" == "menu" ]]; then
-    if ! menu_choose_update_ref; then
-      return 0
-    fi
-    requested_ref="${REPO_UPDATE_REF:-}"
-  fi
-
-  if ! is_full_sha "$requested_ref"; then
-    print_line
-    warn "Авто-подготовка pinned update недоступна."
-    warn "Безопасное обновление требует pinned commit SHA."
-    warn "Безопасное обновление выполняется только по фиксированному commit SHA."
-    warn "Запусти вручную: $(print_pinned_update_command)"
-    warn "Небезопасный update по mutable ветке отключён."
-    info "Safe update unavailable: no pinned ref detected."
-    print_line
-    return 1
-  fi
-
-  refresh_update_status_quiet
-  local_sha="${UPDATE_LOCAL_SHA:-}"
-  previous_sha="${local_sha:-unknown}"
-  if [[ -n "$local_sha" && "$requested_ref" == "$local_sha" ]]; then
-    print_line
-    ok "Запрошенный SHA уже установлен (${local_sha:0:12}). Обновление не требуется."
-    print_line
-    return 0
-  fi
-
-  print_line
-  info "Обновление AWG Telegram Bot"
-  info "Pinned ref для обновления: ${requested_ref}"
-  if [[ "$UPDATE_STATUS" == "available" ]]; then
-    info "Доступна новая версия. Начинаю безопасное обновление до pinned commit..."
-  elif [[ "$UPDATE_STATUS" == "unknown" ]]; then
-    warn "Метаданные обновления недоступны, но задан явный pinned commit."
-  fi
-
-  ensure_packages || die "Не удалось обновить системные зависимости."
-  ensure_docker_ready || die "Docker недоступен."
-
-  update_backup_dir="$(create_update_backup)" || die "Не удалось подготовить backup перед обновлением."
-  tmp_dir="$(download_repo "$requested_ref")" || die "Не удалось скачать код проекта из GitHub."
-  stop_service_if_exists
-  deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; die "Не удалось развернуть обновление."; }
-  rm -rf "$tmp_dir"
-  ensure_env_file
-
-  api_token="$(get_env_value API_TOKEN)"
-  admin_id="$(get_env_value ADMIN_ID)"
-  server_name="$(pick_existing_or_default "$(get_env_value SERVER_NAME)" "My VPN")"
-  secret="$(ensure_secret)"
-  [[ -n "$api_token" ]] || prompt_api_token api_token
-  [[ -n "$admin_id" ]] || prompt_admin_id admin_id
-  write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
-
-  detect_awg_environment
-  write_detected_awg_env
-  ensure_venv_and_requirements || { rollback_update_backup "$update_backup_dir"; die "Не удалось обновить Python зависимости."; }
-  ensure_bot_user || { rollback_update_backup "$update_backup_dir"; die "Не удалось подготовить service пользователя."; }
-  install_awg_helper || { rollback_update_backup "$update_backup_dir"; die "Не удалось установить helper для AWG."; }
-  write_service || { rollback_update_backup "$update_backup_dir"; die "Не удалось обновить systemd сервис."; }
-  persist_repo_branch
-  mkdir -p "$STATE_DIR"
-  printf '%s\n' "$requested_ref" > "$VERSION_FILE"
-  start_service || { rollback_update_backup "$update_backup_dir"; die "Не удалось перезапустить сервис."; }
-  [[ -n "$update_backup_dir" ]] && rm -rf "$update_backup_dir"
-  ok "Обновление завершено."
-  print_line
-  echo "Итог обновления:"
-  echo "Было: ${previous_sha}"
-  echo "Стало: ${requested_ref}"
-  echo "Статус сервиса: $(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
-  echo "Следующий шаг: проверь логи в пункте «Логи», если замечены аномалии."
-  print_line
-
-  if [[ "$mode" == "menu" ]] && has_tty; then
-    info "Перезапускаю awg-tgbot, чтобы загрузить обновлённое меню..."
-    relaunch_installer_menu
-  fi
-
-  show_status
-  return 0
-}
-
 
 get_bot_db_file() {
   local db_path db_file

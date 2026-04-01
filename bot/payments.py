@@ -50,6 +50,7 @@ from content_settings import get_text
 from referrals import apply_referral_rewards_on_first_payment, notify_inviter_about_referral_reward
 from texts import get_payment_result_text
 from ui_constants import CB_BUY_30, CB_BUY_7
+from maintenance import get_purchase_maintenance_text, is_purchase_maintenance_enabled
 
 router = Router()
 purchase_rate_limit: dict[int, object] = {}
@@ -138,6 +139,9 @@ async def checkout_readiness() -> tuple[bool, str]:
 
 @router.callback_query(F.data == CB_BUY_7)
 async def buy_7_days(cb: types.CallbackQuery, bot: Bot):
+    if await is_purchase_maintenance_enabled():
+        await cb.answer(await get_purchase_maintenance_text(), show_alert=True)
+        return
     mem_limited, mem_wait = is_purchase_rate_limited(cb.from_user.id)
     persistent_limited, persistent_wait = await is_purchase_rate_limited_persistent(cb.from_user.id, CB_BUY_7)
     limited = persistent_limited or mem_limited
@@ -151,6 +155,9 @@ async def buy_7_days(cb: types.CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data == CB_BUY_30)
 async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
+    if await is_purchase_maintenance_enabled():
+        await cb.answer(await get_purchase_maintenance_text(), show_alert=True)
+        return
     mem_limited, mem_wait = is_purchase_rate_limited(cb.from_user.id)
     persistent_limited, persistent_wait = await is_purchase_rate_limited_persistent(cb.from_user.id, CB_BUY_30)
     limited = persistent_limited or mem_limited
@@ -164,6 +171,13 @@ async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
 
 @router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
+    if await is_purchase_maintenance_enabled():
+        await bot.answer_pre_checkout_query(
+            q.id,
+            ok=False,
+            error_message=await get_purchase_maintenance_text(),
+        )
+        return
     tariff = TARIFFS.get(q.invoice_payload)
     if not tariff:
         await bot.answer_pre_checkout_query(q.id, ok=False, error_message=await get_text("payment_payload_error"))

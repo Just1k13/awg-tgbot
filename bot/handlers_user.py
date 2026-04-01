@@ -59,6 +59,7 @@ from ui_constants import (
 )
 from content_settings import get_text
 from referrals import capture_referral_start, get_referral_screen_data
+from maintenance import get_purchase_maintenance_text, is_purchase_maintenance_enabled
 
 router = Router()
 
@@ -159,6 +160,9 @@ async def _build_user_device_activity_lines(user_id: int) -> list[str]:
 
 
 async def _send_buy_menu(target, user_id: int):
+    if await is_purchase_maintenance_enabled():
+        await target.answer(await get_purchase_maintenance_text())
+        return
     sub_until = await get_user_subscription(user_id)
     price_lines = [
         f"• 7 дней — {STARS_PRICE_7_DAYS}⭐",

@@ -11,7 +11,6 @@ REPO_BRANCH="${REPO_BRANCH:-$(cat "$REPO_BRANCH_FILE" 2>/dev/null | tr -d '\r\n'
 REPO_BRANCH="${REPO_BRANCH:-$DEFAULT_REPO_BRANCH}"
 REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
-TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
 COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
 
 BOT_DIR="${INSTALL_DIR}/bot"
@@ -269,19 +268,6 @@ is_full_sha() {
   [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
 }
 
-set_repo_branch() {
-  local next_branch="$1"
-  [[ -n "$next_branch" ]] || return 1
-  REPO_BRANCH="$next_branch"
-  RAW_BASE_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
-  TARBALL_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/tar.gz/refs/heads/${REPO_BRANCH}"
-  COMMIT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/commits/${REPO_BRANCH}"
-  UPDATE_CHECK_TS=0
-  UPDATE_CACHE_BRANCH=""
-  UPDATE_REMOTE_SHA=""
-  return 0
-}
-
 is_safe_name() {
   local value="$1"
   [[ "$value" =~ ^[a-zA-Z0-9_.-]+$ ]]
@@ -336,27 +322,6 @@ with open(path, "r", encoding="utf-8") as f:
 value = data.get(key, "")
 print(value if isinstance(value, str) else "")
 PY
-}
-
-target_branch_for_toggle() {
-  if [[ "$REPO_BRANCH" == "beta" ]]; then
-    printf '%s' "main"
-  else
-    printf '%s' "beta"
-  fi
-}
-
-toggle_branch_action() {
-  local next_branch
-  next_branch="$(target_branch_for_toggle)"
-  set_repo_branch "$next_branch" || die "Не удалось переключить ветку."
-  ok "Ветка переключена: ${REPO_BRANCH}"
-  return 0
-}
-
-choose_branch_menu() {
-  toggle_branch_action
-  return 0
 }
 
 print_exit_hint() {
@@ -987,7 +952,7 @@ print_update_status_line() {
       printf '    %s\n' "$(color_red 'Открой пункт меню: 3) Переустановить')"
       ;;
     current) echo "Обновление: версия актуальна" ;;
-    unknown) echo "Обновление: не удалось подготовить pinned commit" ;;
+    unknown) echo "Обновление: не удалось проверить удалённый commit" ;;
   esac
   return 0
 }
@@ -1021,8 +986,7 @@ print_detailed_startup_summary() {
   if [[ "$STATE_BOT_INSTALLED" == "1" ]]; then
     echo "Локальная версия: ${UPDATE_LOCAL_SHA:-неизвестно}"
     echo "Доступный commit: ${UPDATE_REMOTE_SHA:-не удалось получить}"
-    echo "Pinned update готов: $([[ "$UPDATE_SAFE_READY" == "1" ]] && echo 'да' || echo 'нет')"
-    echo "Pinned SHA для update: ${UPDATE_REMOTE_SHA:-недоступен}"
+    echo "Обновление: через «Переустановить» (reinstall)"
     if [[ -n "$UPDATE_REMOTE_TITLE" ]]; then
       echo "Commit title: ${UPDATE_REMOTE_TITLE}"
     fi
@@ -1407,7 +1371,7 @@ stop_service_if_exists() {
 
 show_status() {
   local active_state enabled_state local_sha branch_info env_state env_container env_interface policy_container policy_interface docker_membership
-  local remote_sha safe_ready_text
+  local remote_sha
   detect_install_state
   refresh_update_status_quiet
   print_line
@@ -1421,8 +1385,6 @@ show_status() {
   [[ -n "$local_sha" ]] || local_sha="неизвестно"
   remote_sha="${UPDATE_REMOTE_SHA:0:12}"
   [[ -n "$remote_sha" ]] || remote_sha="не удалось получить"
-  safe_ready_text="нет"
-  [[ "$UPDATE_SAFE_READY" == "1" ]] && safe_ready_text="да"
   env_state="нет"
   [[ -f "$ENV_FILE" ]] && env_state="есть"
   env_container="$(get_env_value DOCKER_CONTAINER)"
@@ -1440,8 +1402,7 @@ show_status() {
   echo "Ветка: ${branch_info}"
   echo "Локальная версия: ${local_sha}"
   echo "Доступная версия: ${remote_sha}"
-  echo "Safe update готов: ${safe_ready_text}"
-  echo "Pinned SHA для update: ${UPDATE_REMOTE_SHA:-недоступен}"
+  echo "Обновление: через «Переустановить» (reinstall)"
   echo "Логи приложения: ${APP_LOG_FILE}"
   echo "Лог установки: ${INSTALL_LOG}"
   if id -u "$BOT_USER" >/dev/null 2>&1 && id -nG "$BOT_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then

@@ -83,6 +83,9 @@ ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/promo_list", "краткий список промокодов"),
     ("/promo_disable CODE", "отключить промокод"),
     ("/revoke USER_ID", "отключить доступ вручную (осторожно)"),
+    ("/maintenance_status", "статус freeze новых покупок"),
+    ("/maintenance_on", "включить freeze новых покупок"),
+    ("/maintenance_off", "выключить freeze новых покупок"),
 )
 
 
@@ -2000,6 +2003,38 @@ async def broadcast_prepare(message: types.Message, command: CommandObject):
 @router.message(Command("health"), IsAdmin())
 async def health_cmd(message: types.Message):
     await message.answer(await build_runtime_smokecheck_text(), parse_mode="HTML")
+
+
+@router.message(Command("maintenance_status"), IsAdmin())
+async def maintenance_status_cmd(message: types.Message):
+    enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
+    status_line = "🟠 maintenance: ON (покупки заморожены)" if enabled else "🟢 maintenance: OFF (покупки доступны)"
+    await message.answer(status_line)
+
+
+@router.message(Command("maintenance_on"), IsAdmin())
+async def maintenance_on_cmd(message: types.Message):
+    enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
+    if enabled:
+        await message.answer("🟠 Maintenance уже включен: новые покупки заморожены.")
+        return
+    await set_app_setting("MAINTENANCE_MODE", "1", updated_by=message.from_user.id)
+    await write_audit_log(message.from_user.id, "maintenance_enabled", "purchase_flow=frozen")
+    await message.answer(
+        "🟠 Maintenance включен: новые покупки временно заморожены.\n"
+        "💡 При необходимости отправьте ручной broadcast через /send."
+    )
+
+
+@router.message(Command("maintenance_off"), IsAdmin())
+async def maintenance_off_cmd(message: types.Message):
+    enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
+    if not enabled:
+        await message.answer("🟢 Maintenance уже выключен: покупки доступны.")
+        return
+    await set_app_setting("MAINTENANCE_MODE", "0", updated_by=message.from_user.id)
+    await write_audit_log(message.from_user.id, "maintenance_disabled", "purchase_flow=active")
+    await message.answer("🟢 Maintenance выключен: новые покупки снова доступны.")
 
 
 @router.message(Command("text_list"), IsAdmin())

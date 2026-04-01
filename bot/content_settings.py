@@ -101,6 +101,7 @@ TEXT_DEFAULTS: dict[str, str] = {
     "payment_pending_followup": "Если статус не меняется больше минуты, нажмите «⏱ Проверить статус активации». Если всё ещё не готово — напишите в поддержку.",
     "payment_recovery_ready": "✅ Доступ готов. Платёж успешно применён в фоне. Откройте «🔑 Подключение».",
     "precheckout_unavailable": "Сервис временно недоступен для активации. Попробуйте чуть позже.",
+    "maintenance_purchase_unavailable": "Сейчас техработы. Покупка временно недоступна. Попробуйте позже.",
     "activation_status_ready": "✅ Доступ готов. Можно открывать «🔑 Подключение».",
     "activation_status_ready_config_pending": "⏳ Доступ уже активирован, но ключ ещё собирается. Откройте «🔑 Подключение» через минуту.",
     "activation_status_pending": "⏳ Оплата получена, доступ выпускается. Обычно до минуты.",
@@ -125,6 +126,7 @@ TEXT_REQUIRED_PLACEHOLDERS: dict[str, set[str]] = {
 }
 
 SETTING_DEFAULTS: dict[str, Any] = {
+    "MAINTENANCE_MODE": 0,
     "DEFAULT_KEY_RATE_MBIT": DEFAULT_KEY_RATE_MBIT,
     "REFERRAL_ENABLED": int(REFERRAL_ENABLED),
     "REFERRAL_INVITEE_BONUS_DAYS": REFERRAL_INVITEE_BONUS_DAYS,

@@ -319,6 +319,8 @@ def build_vpn_payload(
     client_public_key: str,
     client_ip: str,
     psk_key: str,
+    *,
+    device_num: int | None = None,
 ) -> dict[str, Any]:
     host, port = parse_server_host_port(SERVER_IP)
     subnet_address = ".".join(client_ip.split(".")[:3]) + ".0"
@@ -341,6 +343,14 @@ def build_vpn_payload(
         "psk_key": psk_key,
         "server_pub_key": SERVER_PUBLIC_KEY,
     }
+    profile_name = SERVER_NAME
+    try:
+        device_int = int(device_num) if device_num is not None else None
+    except (TypeError, ValueError):
+        device_int = None
+    if device_int is not None and device_int > 0 and not re.search(r" #\d+$", profile_name):
+        profile_name = f"{profile_name} #{device_int}"
+
     return {
         "containers": [
             {
@@ -356,7 +366,7 @@ def build_vpn_payload(
             }
         ],
         "defaultContainer": DOCKER_CONTAINER,
-        "description": SERVER_NAME,
+        "description": profile_name,
         "dns1": PRIMARY_DNS,
         "dns2": SECONDARY_DNS,
         "hostName": host,
@@ -906,7 +916,9 @@ async def reissue_user_device(user_id: int, device_num: int) -> dict[str, Any]:
         psk_key = await generate_psk()
         await add_peer_to_awg(new_public_key, ip, psk_key)
         config = build_client_config(client_private_key, ip, psk_key)
-        vpn_key = encode_vpn_key(build_vpn_payload(client_private_key, new_public_key, ip, psk_key))
+        vpn_key = encode_vpn_key(
+            build_vpn_payload(client_private_key, new_public_key, ip, psk_key, device_num=device_num)
+        )
 
         db = await open_db()
         try:

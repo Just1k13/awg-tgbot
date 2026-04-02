@@ -606,7 +606,7 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
         if not private_key or not public_key or not psk or not ip:
             continue
         config = build_client_config(private_key, ip, psk)
-        vpn_key = encode_vpn_key(build_vpn_payload(private_key, public_key, ip, psk))
+        vpn_key = encode_vpn_key(build_vpn_payload(private_key, public_key, ip, psk, device_num=device_num))
         result.append((key_id, device_num, config, vpn_key))
     return result
 

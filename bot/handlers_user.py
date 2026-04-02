@@ -44,6 +44,7 @@ from keyboards import (
     get_configs_devices_kb,
     get_instruction_inline_kb,
     get_main_menu,
+    get_promo_cancel_kb,
     get_profile_inline_kb,
     get_support_back_kb,
     get_support_center_kb,
@@ -60,12 +61,15 @@ from ui_constants import (
     BTN_CONFIGS,
     BTN_GUIDE,
     BTN_PROFILE,
+    BTN_PROMO,
     BTN_REFERRALS,
     BTN_SUPPORT,
     CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX,
     CB_CONFIG_DEVICE_PREFIX,
     CB_OPEN_CONFIGS,
+    CB_PROMO_INPUT_CANCEL,
+    CB_PROMO_INPUT_START,
     CB_OPEN_SUPPORT,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
@@ -82,6 +86,7 @@ from referrals import capture_referral_start, get_referral_screen_data
 from maintenance import get_purchase_maintenance_text, is_purchase_maintenance_enabled
 
 router = Router()
+USER_PROMO_INPUT_ACTION_KEY = "user_promo_input"
 
 
 def _config_filename_prefix() -> str:
@@ -379,6 +384,10 @@ async def promo_cmd(message: types.Message, command: CommandObject):
     if not code:
         await message.answer("Формат: <code>/promo CODE</code>", parse_mode="HTML")
         return
+    await _apply_promo_code(message, code)
+
+
+async def _apply_promo_code(message: types.Message, code: str) -> None:
     try:
         activation = await activate_promo_code(message.from_user.id, code)
         status = activation["status"]
@@ -416,6 +425,40 @@ async def promo_cmd(message: types.Message, command: CommandObject):
         await rollback_promo_activation_reservation(message.from_user.id, code)
         await write_audit_log(message.from_user.id, "promo_activation_failed", f"code={code}; reason=internal_error")
         await message.answer("❌ Не удалось применить промокод. Попробуйте позже.")
+
+
+async def _start_promo_input_flow(target, user: types.User) -> None:
+    await clear_pending_admin_action(user.id, USER_PROMO_INPUT_ACTION_KEY)
+    await set_pending_admin_action(
+        user.id,
+        USER_PROMO_INPUT_ACTION_KEY,
+        {"action": USER_PROMO_INPUT_ACTION_KEY},
+    )
+    await target.answer(
+        "Введите промокод одним сообщением.",
+        reply_markup=get_promo_cancel_kb(),
+    )
+
+
+@router.message(F.text == BTN_PROMO)
+async def promo_button(message: types.Message):
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    await _start_promo_input_flow(message, message.from_user)
+
+
+@router.callback_query(F.data == CB_PROMO_INPUT_START)
+async def promo_input_start_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    if cb.message:
+        await _start_promo_input_flow(cb.message, cb.from_user)
+
+
+@router.callback_query(F.data == CB_PROMO_INPUT_CANCEL)
+async def promo_input_cancel_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    await clear_pending_admin_action(cb.from_user.id, USER_PROMO_INPUT_ACTION_KEY)
+    if cb.message:
+        await cb.message.answer("❌ Ввод промокода отменён.")
 
 
 @router.message(F.text == BTN_PROFILE)
@@ -727,6 +770,20 @@ async def show_instruction_callback(cb: types.CallbackQuery):
 
 @router.message()
 async def fallback_message(message: types.Message):
+    pending_promo = await get_pending_admin_action(message.from_user.id, USER_PROMO_INPUT_ACTION_KEY)
+    if pending_promo and pending_promo.get("action") == USER_PROMO_INPUT_ACTION_KEY:
+        text = (message.text or "").strip()
+        if text.lower() in {"отмена", "cancel", "/cancel"}:
+            await clear_pending_admin_action(message.from_user.id, USER_PROMO_INPUT_ACTION_KEY)
+            await message.answer("❌ Ввод промокода отменён.")
+            return
+        code = normalize_promo_code(text)
+        if not code:
+            await message.answer("Введите промокод или нажмите «❌ Отмена».", reply_markup=get_promo_cancel_kb())
+            return
+        await clear_pending_admin_action(message.from_user.id, USER_PROMO_INPUT_ACTION_KEY)
+        await _apply_promo_code(message, code)
+        return
     if message.text and message.text.startswith("/"):
         await message.answer(await get_text("unknown_slash"))
         return

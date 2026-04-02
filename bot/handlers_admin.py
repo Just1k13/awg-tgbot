@@ -22,6 +22,7 @@ from config import (
 )
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, create_promo_code, db_health_info, disable_promo_code, fetchall, fetchone, fetchval,
+    find_payments_by_charge_id,
     get_latest_user_payment_summary,
     get_user_device_traffic_summary,
     get_user_total_traffic_bytes,
@@ -67,6 +68,7 @@ ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/send TEXT", "рассылка (осторожно)"),
     ("/finduser QUERY", "поиск пользователя по id или username"),
     ("/payinfo USER_ID", "краткая сводка по последнему платежу"),
+    ("/findpay CHARGE_ID", "поиск платежа по telegram_payment_charge_id"),
     ("/give USER_ID DAYS", "выдать/продлить доступ вручную"),
     ("/promo_create CODE DAYS [MAX]", "создать промокод"),
     ("/promo_list", "краткий список промокодов"),
@@ -580,6 +582,36 @@ def _payment_admin_details(payment_summary: dict | None) -> tuple[str, str, str]
     activation_line = str(payment_summary.get("last_provision_status") or "—")
     charge_id = str(payment_summary.get("payment_id") or "—")
     return payment_line, activation_line, charge_id
+
+
+def _user_card_jump_kb(uid: int) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="Открыть карточку пользователя",
+                    callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_0",
+                )
+            ]
+        ]
+    )
+
+
+def _render_payment_support_summary(payment_summary: dict, *, title: str) -> str:
+    lines = [
+        f"💳 <b>{title}</b>",
+        "",
+        f"🆔 user_id: <code>{payment_summary.get('user_id')}</code>",
+        f"🧾 telegram_payment_charge_id: <code>{escape_html(str(payment_summary.get('payment_id') or '—'))}</code>",
+        f"📌 status: <b>{escape_html(str(payment_summary.get('status') or '—'))}</b>",
+        f"💰 amount: <b>{payment_summary.get('amount')} {escape_html(str(payment_summary.get('currency') or '—'))}</b>",
+        f"📦 payload: <code>{escape_html(str(payment_summary.get('payload') or '—'))}</code>",
+        f"🕒 created_at: <code>{escape_html(str(payment_summary.get('created_at') or '—'))}</code>",
+    ]
+    last_provision_status = payment_summary.get("last_provision_status")
+    if last_provision_status:
+        lines.append(f"⚙️ last_provision_status: <code>{escape_html(str(last_provision_status))}</code>")
+    return "\n".join(lines)
 
 
 async def _send_user_manage_card(target_message: types.Message, uid: int, page: int) -> None:
@@ -1542,17 +1574,53 @@ async def payinfo_cmd(message: types.Message, command: CommandObject):
     if not payment_summary:
         await message.answer("Платежей не найдено.")
         return
+    payment_summary["user_id"] = uid
     await message.answer(
-        (
-            "💳 <b>Последний платёж пользователя</b>\n\n"
-            f"🆔 user_id: <code>{uid}</code>\n"
-            f"📌 status: <b>{escape_html(str(payment_summary.get('status') or '—'))}</b>\n"
-            f"💰 amount: <b>{payment_summary.get('amount')} {escape_html(str(payment_summary.get('currency') or '—'))}</b>\n"
-            f"🧾 telegram_payment_charge_id: <code>{escape_html(str(payment_summary.get('payment_id') or '—'))}</code>\n"
-            "↩️ Подготовка к возврату: используйте user_id и telegram_payment_charge_id.\n"
-            "TODO: автоматический refund flow пока не реализован в selfhost MVP."
-        ),
+        _render_payment_support_summary(payment_summary, title="Последний платёж пользователя"),
         parse_mode="HTML",
+        reply_markup=_user_card_jump_kb(uid),
+    )
+
+
+@router.message(Command("findpay"), IsAdmin())
+async def findpay_cmd(message: types.Message, command: CommandObject):
+    charge_id = (command.args or "").strip()
+    if not charge_id:
+        await message.answer("Формат: <code>/findpay CHARGE_ID</code>", parse_mode="HTML")
+        return
+
+    matches = await find_payments_by_charge_id(charge_id, limit=5)
+    if not matches:
+        await message.answer("Платёж с таким telegram_payment_charge_id не найден.")
+        return
+
+    if len(matches) == 1:
+        payment = matches[0]
+        await message.answer(
+            _render_payment_support_summary(payment, title="Платёж найден"),
+            parse_mode="HTML",
+            reply_markup=_user_card_jump_kb(int(payment["user_id"])),
+        )
+        return
+
+    kb_rows: list[list[types.InlineKeyboardButton]] = []
+    lines = ["Найдено несколько платежей. Выберите пользователя:"]
+    for row in matches:
+        uid = int(row["user_id"])
+        currency = escape_html(str(row.get("currency") or "—"))
+        lines.append(f"• <code>{uid}</code> · {escape_html(str(row.get('status') or '—'))} · {row.get('amount')} {currency}")
+        kb_rows.append(
+            [
+                types.InlineKeyboardButton(
+                    text=f"👤 {uid} · {row.get('amount')} {row.get('currency') or '—'}",
+                    callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_0",
+                )
+            ]
+        )
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_rows),
     )
 
 

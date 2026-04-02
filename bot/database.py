@@ -782,6 +782,32 @@ async def get_latest_user_payment_summary(user_id: int) -> dict[str, Any] | None
     }
 
 
+async def find_payments_by_charge_id(payment_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    rows = await fetchall(
+        """
+        SELECT user_id, telegram_payment_charge_id, status, amount, currency, payload, created_at, last_provision_status
+        FROM payments
+        WHERE telegram_payment_charge_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (payment_id, max(1, min(limit, 20))),
+    )
+    return [
+        {
+            "user_id": row[0],
+            "payment_id": row[1],
+            "status": row[2],
+            "amount": row[3],
+            "currency": row[4],
+            "payload": row[5],
+            "created_at": row[6],
+            "last_provision_status": row[7],
+        }
+        for row in rows
+    ]
+
+
 async def update_last_provision_status(payment_id: str, status: str) -> None:
     await execute(
         """

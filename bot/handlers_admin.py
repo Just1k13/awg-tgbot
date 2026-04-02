@@ -659,8 +659,9 @@ async def _send_user_manage_card(target_message: types.Message, uid: int, page: 
             f"💸 Последний платёж: <b>{payment_line}</b>\n"
             f"🚦 Активация: <b>{activation_line}</b>\n"
             f"🧾 Charge ID: <code>{escape_html(charge_id)}</code>\n"
-            "↩️ Возврат: обрабатывается оператором вручную по telegram_payment_charge_id.\n"
-            "Автоматический refund flow в selfhost MVP пока не реализован.\n"
+            "↩️ Возврат: обрабатывается оператором вручную.\n"
+            "Для refund flow используйте user_id и telegram_payment_charge_id.\n"
+            "Автоматический refund в selfhost MVP пока не реализован.\n"
             f"➡️ Шаг оператора: <b>{operator_step}</b>\n"
             f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}\n\n"
             "📶 Активность устройств:\n"
@@ -1501,8 +1502,8 @@ async def payinfo_cmd(message: types.Message, command: CommandObject):
             f"📌 status: <b>{escape_html(str(payment_summary.get('status') or '—'))}</b>\n"
             f"💰 amount: <b>{payment_summary.get('amount')} {escape_html(str(payment_summary.get('currency') or '—'))}</b>\n"
             f"🧾 telegram_payment_charge_id: <code>{escape_html(str(payment_summary.get('payment_id') or '—'))}</code>\n"
-            "↩️ Refund prep: используйте telegram_payment_charge_id для ручной обработки возврата.\n"
-            "TODO: автоматический refund flow пока не реализован."
+            "↩️ Refund prep: используйте user_id и telegram_payment_charge_id для ручной обработки возврата.\n"
+            "TODO: автоматический refund в selfhost MVP пока не реализован."
         ),
         parse_mode="HTML",
     )

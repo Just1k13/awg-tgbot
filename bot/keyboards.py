@@ -2,7 +2,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 import config
 from ui_constants import (
-    BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_GUIDE, BTN_PROFILE, BTN_REFERRALS, BTN_SUPPORT,
+    BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_PROFILE, BTN_PROMO, BTN_REFERRALS, BTN_SUPPORT,
     CB_ADMIN_BACK_MAIN, CB_ADMIN_BROADCAST, CB_ADMIN_COMMANDS, CB_ADMIN_LIST, CB_ADMIN_PRICE_CANCEL, CB_ADMIN_PRICE_EDIT_30,
     CB_ADMIN_PRICE_EDIT_7, CB_ADMIN_PRICE_EDIT_90, CB_ADMIN_PRICE_SAVE, CB_ADMIN_PRICES, CB_ADMIN_REFERRALS,
     CB_ADMIN_STATS, CB_ADMIN_SYNC,
@@ -10,6 +10,8 @@ from ui_constants import (
     CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX, CB_CONFIG_DEVICE_PREFIX, CB_OPEN_CONFIGS,
     CB_OPEN_SUPPORT,
+    CB_PROMO_INPUT_CANCEL,
+    CB_PROMO_INPUT_START,
     CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION, CB_USER_REISSUE_CANCEL, CB_USER_REISSUE_CONFIRM,
     CB_SUPPORT_BACK, CB_SUPPORT_CONNECTION, CB_SUPPORT_PAYMENT, CB_SUPPORT_TERMS, CB_USER_REISSUE_DEVICE_PREFIX,
 )
@@ -18,8 +20,8 @@ from ui_constants import (
 def get_main_menu(user_id: int, admin_id: int) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text=BTN_PROFILE), KeyboardButton(text=BTN_BUY)],
-        [KeyboardButton(text=BTN_CONFIGS), KeyboardButton(text=BTN_GUIDE)],
-        [KeyboardButton(text=BTN_REFERRALS), KeyboardButton(text=BTN_SUPPORT)],
+        [KeyboardButton(text=BTN_CONFIGS), KeyboardButton(text=BTN_SUPPORT)],
+        [KeyboardButton(text=BTN_PROMO), KeyboardButton(text=BTN_REFERRALS)],
     ]
     if user_id == admin_id:
         rows.append([KeyboardButton(text=BTN_ADMIN)])
@@ -46,6 +48,7 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="🔄 Продлить доступ", callback_data=CB_SHOW_BUY_MENU)])
     else:
         rows.append([InlineKeyboardButton(text="💳 Оплатить доступ", callback_data=CB_SHOW_BUY_MENU)])
+    rows.append([InlineKeyboardButton(text="🎟 Ввести промокод", callback_data=CB_PROMO_INPUT_START)])
     rows.append([InlineKeyboardButton(text="🔑 Подключение", callback_data=CB_OPEN_CONFIGS)])
     rows.append([InlineKeyboardButton(text="⏱ Статус активации", callback_data=CB_CHECK_ACTIVATION_STATUS)])
     rows.append([InlineKeyboardButton(text="🆘 Помощь и поддержка", callback_data=CB_OPEN_SUPPORT)])
@@ -112,6 +115,14 @@ def get_support_back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⬅️ Назад в помощь", callback_data=CB_OPEN_SUPPORT)],
+        ]
+    )
+
+
+def get_promo_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=CB_PROMO_INPUT_CANCEL)],
         ]
     )
 

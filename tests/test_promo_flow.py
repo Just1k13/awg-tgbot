@@ -162,3 +162,91 @@ class PromoFlowTests(unittest.IsolatedAsyncioTestCase):
             default="",
         )
         self.assertEqual(action, "promo_activation_failed")
+
+    def test_main_menu_contains_promo_and_has_no_permanent_guide_button(self):
+        from keyboards import get_main_menu
+
+        kb = get_main_menu(user_id=10, admin_id=1)
+        labels = [button.text for row in kb.keyboard for button in row]
+        self.assertIn("🎟 Промокод", labels)
+        self.assertNotIn("📖 Как подключиться", labels)
+
+    async def test_promo_button_starts_pending_input_mode(self):
+        import database
+        import handlers_user
+
+        class FakeMessage:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 8101, "username": "u8101", "first_name": "User"})()
+                self.answers: list[str] = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        msg = FakeMessage()
+        await handlers_user.promo_button(msg)  # type: ignore[arg-type]
+        pending = await database.get_pending_admin_action(8101, handlers_user.USER_PROMO_INPUT_ACTION_KEY)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["action"], handlers_user.USER_PROMO_INPUT_ACTION_KEY)
+        self.assertIn("Введите промокод", msg.answers[-1])
+
+    async def test_pending_promo_input_uses_existing_activation_path(self):
+        import database
+        import handlers_user
+
+        await database.create_promo_code("BONUS3", 3, 5, created_by=1)
+
+        class FakeMessage:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 8201, "username": "u8201", "first_name": "Promo"})()
+                self.text = "bonus3"
+                self.answers: list[str] = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        async def fake_issue_subscription(user_id, days, silent=False, operation_id=None):
+            self.assertEqual(user_id, 8201)
+            self.assertEqual(days, 3)
+            self.assertEqual(operation_id, "promo-BONUS3-8201")
+            return datetime(2026, 4, 30, 12, 0, 0)
+
+        await database.set_pending_admin_action(
+            8201,
+            handlers_user.USER_PROMO_INPUT_ACTION_KEY,
+            {"action": handlers_user.USER_PROMO_INPUT_ACTION_KEY},
+        )
+        msg = FakeMessage()
+        original_issue = handlers_user.issue_subscription
+        handlers_user.issue_subscription = fake_issue_subscription
+        try:
+            await handlers_user.fallback_message(msg)  # type: ignore[arg-type]
+        finally:
+            handlers_user.issue_subscription = original_issue
+
+        self.assertIn("Промокод применён", msg.answers[-1])
+
+    async def test_pending_promo_cancel_clears_pending_mode(self):
+        import database
+        import handlers_user
+
+        class FakeMessage:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 8301, "username": "u8301", "first_name": "Promo"})()
+                self.text = "отмена"
+                self.answers: list[str] = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        await database.set_pending_admin_action(
+            8301,
+            handlers_user.USER_PROMO_INPUT_ACTION_KEY,
+            {"action": handlers_user.USER_PROMO_INPUT_ACTION_KEY},
+        )
+        msg = FakeMessage()
+        await handlers_user.fallback_message(msg)  # type: ignore[arg-type]
+
+        pending = await database.get_pending_admin_action(8301, handlers_user.USER_PROMO_INPUT_ACTION_KEY)
+        self.assertIsNone(pending)
+        self.assertIn("отменён", msg.answers[-1].lower())

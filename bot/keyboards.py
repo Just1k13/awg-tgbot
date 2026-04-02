@@ -1,14 +1,14 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS
+from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS, STARS_PRICE_90_DAYS
 from ui_constants import (
     BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_GUIDE, BTN_PROFILE, BTN_REFERRALS, BTN_SUPPORT,
     CB_ADMIN_BROADCAST, CB_ADMIN_COMMANDS, CB_ADMIN_BACKUP, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
     CB_ADMIN_STATS, CB_ADMIN_SYNC,
-    CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7,
+    CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7, CB_BUY_90,
     CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX, CB_CONFIG_DEVICE_PREFIX, CB_OPEN_CONFIGS,
-    CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION,
+    CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION, CB_USER_REISSUE_CANCEL, CB_USER_REISSUE_CONFIRM,
 )
 
 
@@ -31,6 +31,7 @@ def get_buy_inline_kb() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=f"7 дней — {STARS_PRICE_7_DAYS}⭐", callback_data=CB_BUY_7)],
         [InlineKeyboardButton(text=f"30 дней — {STARS_PRICE_30_DAYS}⭐", callback_data=CB_BUY_30)],
+        [InlineKeyboardButton(text=f"90 дней — {STARS_PRICE_90_DAYS}⭐", callback_data=CB_BUY_90)],
         [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -116,6 +117,15 @@ def get_broadcast_cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="❌ Отменить", callback_data=CB_BROADCAST_CANCEL)],
+        ]
+    )
+
+
+def get_user_reissue_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="♻️ Да, перевыпустить", callback_data=CB_USER_REISSUE_CONFIRM)],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=CB_USER_REISSUE_CANCEL)],
         ]
     )
 

@@ -19,6 +19,7 @@ from config import (
     PURCHASE_RATE_LIMIT_TTL_SECONDS,
     STARS_PRICE_7_DAYS,
     STARS_PRICE_30_DAYS,
+    STARS_PRICE_90_DAYS,
     WG_INTERFACE,
     logger,
 )
@@ -53,7 +54,7 @@ from referrals import (
     notify_inviter_about_referral_reward,
 )
 from texts import get_payment_result_text
-from ui_constants import CB_BUY_30, CB_BUY_7
+from ui_constants import CB_BUY_30, CB_BUY_7, CB_BUY_90
 from maintenance import get_purchase_maintenance_text, is_purchase_maintenance_enabled
 
 router = Router()
@@ -71,6 +72,7 @@ except Exception:  # pragma: no cover - optional dependency
 TARIFFS = {
     "sub_7": {"days": 7, "amount": STARS_PRICE_7_DAYS, "currency": "XTR", "method": "stars"},
     "sub_30": {"days": 30, "amount": STARS_PRICE_30_DAYS, "currency": "XTR", "method": "stars"},
+    "sub_90": {"days": 90, "amount": STARS_PRICE_90_DAYS, "currency": "XTR", "method": "stars"},
 }
 
 
@@ -171,6 +173,22 @@ async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
         return
     await cb.answer()
     await _send_stars_invoice(bot, cb.message.chat.id, "sub_30", "Свободный Интернет на 30 дней", "30 дней доступа", STARS_PRICE_30_DAYS)
+
+
+@router.callback_query(F.data == CB_BUY_90)
+async def buy_90_days(cb: types.CallbackQuery, bot: Bot):
+    if await is_purchase_maintenance_enabled():
+        await cb.answer(await get_purchase_maintenance_text(), show_alert=True)
+        return
+    mem_limited, mem_wait = is_purchase_rate_limited(cb.from_user.id)
+    persistent_limited, persistent_wait = await is_purchase_rate_limited_persistent(cb.from_user.id, CB_BUY_90)
+    limited = persistent_limited or mem_limited
+    if limited:
+        wait_seconds = max(mem_wait, persistent_wait, 1)
+        await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
+        return
+    await cb.answer()
+    await _send_stars_invoice(bot, cb.message.chat.id, "sub_90", "Свободный Интернет на 90 дней", "90 дней доступа", STARS_PRICE_90_DAYS)
 
 
 @router.pre_checkout_query()

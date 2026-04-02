@@ -134,6 +134,149 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Файл отправлен", last_text)
         self.assertIsNone(last_kwargs.get("reply_markup"))
 
+    async def test_support_policy_commands_return_text(self):
+        import handlers_user
+
+        class DummyMsg:
+            def __init__(self):
+                self.answers = []
+                self.from_user = type("U", (), {"id": 100, "username": "u", "first_name": "N"})()
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        support_msg = DummyMsg()
+        await handlers_user.support_cmd(support_msg)  # type: ignore[arg-type]
+        self.assertTrue(support_msg.answers)
+        self.assertIn("Поддержка", support_msg.answers[-1])
+
+        pay_msg = DummyMsg()
+        await handlers_user.paysupport_cmd(pay_msg)  # type: ignore[arg-type]
+        self.assertIn("/support", pay_msg.answers[-1])
+
+        terms_msg = DummyMsg()
+        await handlers_user.terms_cmd(terms_msg)  # type: ignore[arg-type]
+        self.assertIn("7 / 30 / 90", terms_msg.answers[-1])
+
+    async def test_send_without_args_enters_interactive_broadcast_mode(self):
+        import handlers_admin
+        import database
+        handlers_admin.admin_command_rate_limit.clear()
+
+        class DummyMsg:
+            def __init__(self):
+                self.from_user = type("U", (), {"id": 1})()
+                self.answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append((text, kwargs))
+
+        msg = DummyMsg()
+        await handlers_admin.broadcast_prepare(msg, type("C", (), {"args": None})())  # type: ignore[arg-type]
+        pending = await database.get_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY)
+        self.assertIsNotNone(pending)
+        self.assertTrue(msg.answers)
+
+    async def test_finduser_by_numeric_id_opens_card(self):
+        import handlers_admin
+        import database
+
+        await database.ensure_user_exists(222, "alpha", "A")
+
+        class DummyMsg:
+            def __init__(self):
+                self.from_user = type("U", (), {"id": 1})()
+                self.answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        msg = DummyMsg()
+        await handlers_admin.find_user_cmd(msg, type("C", (), {"args": "222"})())  # type: ignore[arg-type]
+        self.assertTrue(any("Управление пользователем" in line for line in msg.answers))
+
+    async def test_finduser_by_username_substring_returns_short_list(self):
+        import handlers_admin
+        import database
+
+        await database.ensure_user_exists(301, "john_alpha", "John")
+        await database.ensure_user_exists(302, "john_beta", "John")
+
+        class DummyMsg:
+            def __init__(self):
+                self.from_user = type("U", (), {"id": 1})()
+                self.answers = []
+                self.kwargs = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+                self.kwargs.append(kwargs)
+
+        msg = DummyMsg()
+        await handlers_admin.find_user_cmd(msg, type("C", (), {"args": "john"})())  # type: ignore[arg-type]
+        self.assertIn("Найдено несколько пользователей", msg.answers[-1])
+        self.assertIn("reply_markup", msg.kwargs[-1])
+
+    async def test_user_reset_device_happy_path_and_cooldown_guard(self):
+        import handlers_user
+        import database
+
+        future = "2099-01-01T00:00:00"
+        await database.ensure_user_exists(1001, "u1001", "User")
+        await database.execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (future, 1001))
+
+        class DummyMsg:
+            def __init__(self):
+                self.from_user = type("U", (), {"id": 1001, "username": "u1001", "first_name": "User"})()
+                self.answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append(text)
+
+        original_get_keys = handlers_user.get_user_keys
+        async def fake_get_user_keys(_user_id: int):
+            return [(10, 1, "conf", "vpn://new")]
+        handlers_user.get_user_keys = fake_get_user_keys
+        msg = DummyMsg()
+        await handlers_user.reset_device_cmd(msg)  # type: ignore[arg-type]
+        self.assertIn("Перевыпуск доступа", msg.answers[-1])
+
+        original_reissue = handlers_user.reissue_user_device
+        calls = {"count": 0}
+
+        async def fake_reissue(uid: int, device_num: int):
+            calls["count"] += 1
+            return {"status": "reissued", "uid": uid, "device_num": device_num}
+
+        handlers_user.reissue_user_device = fake_reissue
+        try:
+            class DummyCb:
+                def __init__(self):
+                    self.from_user = type("U", (), {"id": 1001})()
+                    self.message = DummyMsg()
+
+                async def answer(self, *args, **kwargs):
+                    return None
+
+            cb = DummyCb()
+            await handlers_user.user_reissue_confirm(cb)  # type: ignore[arg-type]
+            await handlers_user.set_pending_admin_action(1001, "user_reissue_device", {"action": "user_reissue_device", "device_num": 1})
+            await handlers_user.user_reissue_confirm(cb)  # type: ignore[arg-type]
+        finally:
+            handlers_user.reissue_user_device = original_reissue
+            handlers_user.get_user_keys = original_get_keys
+        self.assertEqual(calls["count"], 1)
+
+    async def test_90_day_tariff_is_available(self):
+        import handlers_user
+        import payments
+        from keyboards import get_buy_inline_kb
+
+        self.assertIn("sub_90", payments.TARIFFS)
+        self.assertEqual(handlers_user._format_last_payment_tariff("sub_90"), "90 дней")
+        labels = [button.text for row in get_buy_inline_kb().inline_keyboard for button in row]
+        self.assertTrue(any("90 дней" in label for label in labels))
+
 
 if __name__ == "__main__":
     unittest.main()

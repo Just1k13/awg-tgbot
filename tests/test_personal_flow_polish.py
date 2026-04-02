@@ -51,6 +51,27 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
         kb = get_profile_inline_kb(subscription_active=False)
         labels = [button.text for row in kb.inline_keyboard for button in row]
         self.assertIn("⏱ Статус активации", labels)
+        self.assertIn("🆘 Помощь и поддержка", labels)
+        self.assertNotIn("♻️ Перевыпустить устройство", labels)
+
+        kb_active = get_profile_inline_kb(subscription_active=True)
+        active_labels = [button.text for row in kb_active.inline_keyboard for button in row]
+        self.assertIn("♻️ Перевыпустить устройство", active_labels)
+
+    async def test_support_center_keyboard_contains_main_help_actions(self):
+        from keyboards import get_support_center_kb
+
+        labels = [button.text for row in get_support_center_kb().inline_keyboard for button in row]
+        self.assertIn("💳 Помощь с оплатой", labels)
+        self.assertIn("🔌 Помощь с подключением", labels)
+        self.assertIn("📄 Краткие условия", labels)
+        self.assertIn("⬅️ К меню", labels)
+
+    async def test_config_result_keyboard_has_reissue_action(self):
+        from keyboards import get_config_result_kb
+
+        labels = [button.text for row in get_config_result_kb(5).inline_keyboard for button in row]
+        self.assertIn("♻️ Перевыпустить это устройство", labels)
 
     async def test_admin_user_manage_keyboard_has_refresh(self):
         import handlers_admin
@@ -152,11 +173,71 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
 
         pay_msg = DummyMsg()
         await handlers_user.paysupport_cmd(pay_msg)  # type: ignore[arg-type]
-        self.assertIn("/support", pay_msg.answers[-1])
+        self.assertIn("user_id", pay_msg.answers[-1])
 
         terms_msg = DummyMsg()
         await handlers_user.terms_cmd(terms_msg)  # type: ignore[arg-type]
         self.assertIn("7 / 30 / 90", terms_msg.answers[-1])
+
+    async def test_support_callback_payment_and_terms_are_reachable(self):
+        import handlers_user
+
+        class DummyMessage:
+            def __init__(self):
+                self.answers = []
+
+            async def answer(self, text, **kwargs):
+                self.answers.append((text, kwargs))
+
+        class DummyCb:
+            def __init__(self, data: str):
+                self.data = data
+                self.from_user = type("U", (), {"id": 100, "username": "u", "first_name": "N"})()
+                self.message = DummyMessage()
+
+            async def answer(self, *args, **kwargs):
+                return None
+
+        cb_pay = DummyCb("support_payment")
+        await handlers_user.support_payment_callback(cb_pay)  # type: ignore[arg-type]
+        self.assertIn("Поддержка по оплате", cb_pay.message.answers[-1][0])
+
+        cb_terms = DummyCb("support_terms")
+        await handlers_user.support_terms_callback(cb_terms)  # type: ignore[arg-type]
+        self.assertIn("Краткие условия", cb_terms.message.answers[-1][0])
+
+    async def test_reissue_is_reachable_from_profile_and_device_buttons(self):
+        import handlers_user
+
+        await handlers_user.ensure_user_exists(1002)
+
+        original_start = handlers_user._start_user_reissue_flow
+        seen: list[int | None] = []
+
+        async def fake_start(_target, _user, *, key_id=None):
+            seen.append(key_id)
+
+        handlers_user._start_user_reissue_flow = fake_start
+        try:
+            class DummyMessage:
+                async def answer(self, text, **kwargs):
+                    return None
+
+            class DummyCb:
+                def __init__(self, data: str):
+                    self.data = data
+                    self.from_user = type("U", (), {"id": 1002, "username": "u1002", "first_name": "User"})()
+                    self.message = DummyMessage()
+
+                async def answer(self, *args, **kwargs):
+                    return None
+
+            await handlers_user.user_reissue_from_button(DummyCb("user_reissue_device_0"))  # type: ignore[arg-type]
+            await handlers_user.user_reissue_from_button(DummyCb("user_reissue_device_7"))  # type: ignore[arg-type]
+        finally:
+            handlers_user._start_user_reissue_flow = original_start
+
+        self.assertEqual(seen, [None, 7])
 
     async def test_send_without_args_enters_interactive_broadcast_mode(self):
         import handlers_admin

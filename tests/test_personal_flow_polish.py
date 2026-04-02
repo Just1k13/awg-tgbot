@@ -45,7 +45,7 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("первый доступ", referral.lower())
         self.assertIn("начисляется бонус", referral.lower())
 
-    async def test_profile_keyboard_has_activation_status_short_label(self):
+    async def test_profile_keyboard_has_activation_status_short_label_and_no_generic_reissue(self):
         from keyboards import get_profile_inline_kb
 
         kb = get_profile_inline_kb(subscription_active=False)
@@ -56,7 +56,7 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
 
         kb_active = get_profile_inline_kb(subscription_active=True)
         active_labels = [button.text for row in kb_active.inline_keyboard for button in row]
-        self.assertIn("♻️ Перевыпустить устройство", active_labels)
+        self.assertNotIn("♻️ Перевыпустить устройство", active_labels)
 
     async def test_support_center_keyboard_contains_main_help_actions(self):
         from keyboards import get_support_center_kb

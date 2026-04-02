@@ -415,7 +415,6 @@ async def send_selected_device_conf(cb: types.CallbackQuery):
         )
         await cb.message.answer(
             await get_text("config_conf_sent"),
-            reply_markup=get_config_result_kb(key_id),
         )
     else:
         await cb.message.answer(

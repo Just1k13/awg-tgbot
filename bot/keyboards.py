@@ -112,6 +112,14 @@ def get_broadcast_confirm_kb() -> InlineKeyboardMarkup:
     )
 
 
+def get_broadcast_cancel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=CB_BROADCAST_CANCEL)],
+        ]
+    )
+
+
 def get_admin_confirm_kb(action_key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

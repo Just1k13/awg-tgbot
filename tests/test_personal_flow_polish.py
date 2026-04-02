@@ -92,6 +92,48 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>2</b>", out)
         self.assertIn("…", out)
 
+    async def test_send_selected_device_conf_does_not_repeat_action_keyboard(self):
+        import handlers_user
+
+        await handlers_user.ensure_user_exists(101)
+        original_find = handlers_user._find_user_config_by_key_id
+
+        async def fake_find(_uid: int, _key_id: int):
+            return (1, 2, "[Interface]\nPrivateKey=x", "vpn://key")
+
+        handlers_user._find_user_config_by_key_id = fake_find
+        try:
+            class DummyMessage:
+                def __init__(self):
+                    self.answer_calls = []
+                    self.document_calls = []
+
+                async def answer(self, text, **kwargs):
+                    self.answer_calls.append((text, kwargs))
+
+                async def answer_document(self, document, **kwargs):
+                    self.document_calls.append((document, kwargs))
+
+            class DummyCb:
+                def __init__(self):
+                    self.from_user = type("U", (), {"id": 101, "username": None, "first_name": "U"})()
+                    self.data = "config_conf_1"
+                    self.message = DummyMessage()
+
+                async def answer(self, *args, **kwargs):
+                    return None
+
+            cb = DummyCb()
+            await handlers_user.send_selected_device_conf(cb)  # type: ignore[arg-type]
+        finally:
+            handlers_user._find_user_config_by_key_id = original_find
+
+        self.assertEqual(len(cb.message.document_calls), 1)
+        self.assertTrue(cb.message.answer_calls)
+        last_text, last_kwargs = cb.message.answer_calls[-1]
+        self.assertIn("Файл отправлен", last_text)
+        self.assertIsNone(last_kwargs.get("reply_markup"))
+
 
 if __name__ == "__main__":
     unittest.main()

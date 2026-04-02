@@ -1501,7 +1501,7 @@ async def payinfo_cmd(message: types.Message, command: CommandObject):
             f"📌 status: <b>{escape_html(str(payment_summary.get('status') or '—'))}</b>\n"
             f"💰 amount: <b>{payment_summary.get('amount')} {escape_html(str(payment_summary.get('currency') or '—'))}</b>\n"
             f"🧾 telegram_payment_charge_id: <code>{escape_html(str(payment_summary.get('payment_id') or '—'))}</code>\n"
-            "Refund prep: используйте user_id и telegram_payment_charge_id.\n"
+            "↩️ Подготовка к возврату: используйте user_id и telegram_payment_charge_id.\n"
             "TODO: автоматический refund flow пока не реализован в selfhost MVP."
         ),
         parse_mode="HTML",

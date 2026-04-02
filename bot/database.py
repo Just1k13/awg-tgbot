@@ -114,6 +114,11 @@ async def init_db() -> None:
         await ensure_column(db, "keys", "state_updated_at", "TEXT")
         await ensure_column(db, "keys", "delete_reason", "TEXT")
         await ensure_column(db, "keys", "rate_limit_mbit", "INTEGER")
+        await ensure_column(db, "keys", "rx_bytes_total", "INTEGER NOT NULL DEFAULT 0")
+        await ensure_column(db, "keys", "tx_bytes_total", "INTEGER NOT NULL DEFAULT 0")
+        await ensure_column(db, "keys", "rx_bytes_last", "INTEGER")
+        await ensure_column(db, "keys", "tx_bytes_last", "INTEGER")
+        await ensure_column(db, "keys", "traffic_updated_at", "TEXT")
 
         await db.execute(
             """
@@ -609,6 +614,130 @@ async def get_user_keys(user_id: int) -> list[tuple[int, int, str, str]]:
         vpn_key = encode_vpn_key(build_vpn_payload(private_key, public_key, ip, psk, device_num=device_num))
         result.append((key_id, device_num, config, vpn_key))
     return result
+
+
+async def get_user_device_traffic_summary(user_id: int) -> list[dict[str, int | str | None]]:
+    rows = await fetchall(
+        """
+        SELECT device_num,
+               COALESCE(rx_bytes_total, 0) AS rx_bytes_total,
+               COALESCE(tx_bytes_total, 0) AS tx_bytes_total,
+               traffic_updated_at
+        FROM keys
+        WHERE user_id = ?
+          AND state = 'active'
+          AND public_key NOT LIKE 'pending:%'
+        ORDER BY device_num
+        """,
+        (user_id,),
+    )
+    result: list[dict[str, int | str | None]] = []
+    for device_num, rx_bytes_total, tx_bytes_total, traffic_updated_at in rows:
+        rx_total = int(rx_bytes_total or 0)
+        tx_total = int(tx_bytes_total or 0)
+        result.append(
+            {
+                "device_num": int(device_num),
+                "rx_bytes_total": rx_total,
+                "tx_bytes_total": tx_total,
+                "total_bytes": rx_total + tx_total,
+                "traffic_updated_at": traffic_updated_at,
+            }
+        )
+    return result
+
+
+async def get_user_total_traffic_bytes(user_id: int) -> int:
+    row = await fetchone(
+        """
+        SELECT COALESCE(SUM(COALESCE(rx_bytes_total, 0) + COALESCE(tx_bytes_total, 0)), 0)
+        FROM keys
+        WHERE user_id = ?
+          AND state = 'active'
+          AND public_key NOT LIKE 'pending:%'
+        """,
+        (user_id,),
+    )
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+async def sync_traffic_counters_from_runtime_peers(runtime_peers: list[dict[str, Any]]) -> int:
+    runtime_by_public_key: dict[str, dict[str, int | None]] = {}
+    for peer in runtime_peers:
+        public_key = str(peer.get("public_key") or "").strip()
+        if not public_key:
+            continue
+        rx_raw = peer.get("rx_bytes")
+        tx_raw = peer.get("tx_bytes")
+        rx_bytes = int(rx_raw) if isinstance(rx_raw, int) and rx_raw >= 0 else None
+        tx_bytes = int(tx_raw) if isinstance(tx_raw, int) and tx_raw >= 0 else None
+        runtime_by_public_key[public_key] = {"rx_bytes": rx_bytes, "tx_bytes": tx_bytes}
+
+    now_iso = utc_now_naive().isoformat()
+    db = await open_db()
+    touched = 0
+    try:
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            """
+            SELECT id, public_key,
+                   COALESCE(rx_bytes_total, 0), COALESCE(tx_bytes_total, 0),
+                   rx_bytes_last, tx_bytes_last
+            FROM keys
+            WHERE state='active'
+              AND public_key NOT LIKE 'pending:%'
+              AND public_key IS NOT NULL
+              AND TRIM(public_key) != ''
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        for key_id, public_key, rx_total, tx_total, rx_last, tx_last in rows:
+            peer = runtime_by_public_key.get(str(public_key).strip())
+            if not peer:
+                continue
+
+            rx_live = peer.get("rx_bytes")
+            tx_live = peer.get("tx_bytes")
+            if rx_live is None and tx_live is None:
+                continue
+
+            next_rx_total = int(rx_total or 0)
+            next_tx_total = int(tx_total or 0)
+            next_rx_last = rx_last
+            next_tx_last = tx_last
+
+            if isinstance(rx_live, int):
+                if isinstance(rx_last, int) and rx_live >= rx_last:
+                    next_rx_total += rx_live - rx_last
+                next_rx_last = rx_live
+
+            if isinstance(tx_live, int):
+                if isinstance(tx_last, int) and tx_live >= tx_last:
+                    next_tx_total += tx_live - tx_last
+                next_tx_last = tx_live
+
+            await db.execute(
+                """
+                UPDATE keys
+                SET rx_bytes_total = ?,
+                    tx_bytes_total = ?,
+                    rx_bytes_last = ?,
+                    tx_bytes_last = ?,
+                    traffic_updated_at = ?
+                WHERE id = ?
+                """,
+                (next_rx_total, next_tx_total, next_rx_last, next_tx_last, now_iso, key_id),
+            )
+            touched += 1
+
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+    return touched
 
 
 async def get_payment_status(payment_id: str) -> str | None:

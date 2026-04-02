@@ -19,7 +19,7 @@ from config import (
 from database import (
     add_protected_peer, count_protected_peers, db_health_info, ensure_user_exists, fetchall,
     get_bot_managed_known_public_keys, get_protected_public_keys, get_reserved_ips_from_db, get_reserved_ips_from_db_conn,
-    get_valid_db_public_keys, increment_metric, open_db, write_audit_log,
+    get_valid_db_public_keys, increment_metric, open_db, sync_traffic_counters_from_runtime_peers, write_audit_log,
 )
 from helpers import is_valid_awg_public_key, parse_server_host_port, utc_now_naive
 from network_policy import denylist_sync, qos_clear, qos_rate_for_key, qos_set, qos_sync
@@ -74,9 +74,55 @@ async def run_docker(args: list[str], input_data: str | None = None, timeout: in
     raise last_error if last_error else RuntimeError("helper exec failed")
 
 
-def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
-    def flush_peer() -> dict[str, str | datetime | None]:
-        return {"public_key": current_pub, "ip": current_ip, "latest_handshake_at": current_handshake_at}
+
+def _parse_transfer_bytes(raw_value: str) -> int | None:
+    value = raw_value.strip()
+    if not value:
+        return None
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?$", value)
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = (match.group(2) or "B").strip().upper()
+    multipliers = {
+        "B": 1,
+        "BYTE": 1,
+        "BYTES": 1,
+        "KB": 1024,
+        "KIB": 1024,
+        "MB": 1024 ** 2,
+        "MIB": 1024 ** 2,
+        "GB": 1024 ** 3,
+        "GIB": 1024 ** 3,
+        "TB": 1024 ** 4,
+        "TIB": 1024 ** 4,
+    }
+    multiplier = multipliers.get(unit)
+    if multiplier is None:
+        return None
+    return max(0, int(number * multiplier))
+
+
+def _parse_transfer_line(raw_value: str) -> tuple[int | None, int | None]:
+    value = raw_value.strip()
+    if not value:
+        return (None, None)
+    rx_match = re.search(r"([\d.]+\s*[A-Za-z]+|\d+)\s+received", value, re.IGNORECASE)
+    tx_match = re.search(r"([\d.]+\s*[A-Za-z]+|\d+)\s+sent", value, re.IGNORECASE)
+    rx_bytes = _parse_transfer_bytes(rx_match.group(1)) if rx_match else None
+    tx_bytes = _parse_transfer_bytes(tx_match.group(1)) if tx_match else None
+    return (rx_bytes, tx_bytes)
+
+
+def parse_awg_show_output(show_output: str) -> list[dict[str, str | datetime | int | None]]:
+    def flush_peer() -> dict[str, str | datetime | int | None]:
+        return {
+            "public_key": current_pub,
+            "ip": current_ip,
+            "latest_handshake_at": current_handshake_at,
+            "rx_bytes": current_rx_bytes,
+            "tx_bytes": current_tx_bytes,
+        }
 
     def parse_latest_handshake(raw_value: str) -> datetime | None:
         value = raw_value.strip().lower()
@@ -114,10 +160,12 @@ def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
         return utc_now_naive() - timedelta(seconds=delta_seconds)
 
     lines = show_output.splitlines()
-    peers: list[dict[str, str | None]] = []
+    peers: list[dict[str, str | datetime | int | None]] = []
     current_pub: str | None = None
     current_ip: str | None = None
     current_handshake_at: datetime | None = None
+    current_rx_bytes: int | None = None
+    current_tx_bytes: int | None = None
     for raw_line in lines:
         line = raw_line.strip()
         lowered = line.lower()
@@ -127,6 +175,8 @@ def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
             current_pub = line.split(":", 1)[1].strip()
             current_ip = None
             current_handshake_at = None
+            current_rx_bytes = None
+            current_tx_bytes = None
             continue
         if lowered.startswith("allowed ips:"):
             allowed = line.split(":", 1)[1].strip()
@@ -146,6 +196,8 @@ def parse_awg_show_output(show_output: str) -> list[dict[str, str | None]]:
                 break
         if lowered.startswith("latest handshake:"):
             current_handshake_at = parse_latest_handshake(line.split(":", 1)[1])
+        if lowered.startswith("transfer:"):
+            current_rx_bytes, current_tx_bytes = _parse_transfer_line(line.split(":", 1)[1])
     if current_pub:
         peers.append(flush_peer())
     return peers
@@ -214,7 +266,7 @@ async def remove_peer_from_awg(public_key: str) -> None:
     _invalidate_peers_cache()
 
 
-async def get_awg_peers() -> list[dict[str, str | None]]:
+async def get_awg_peers() -> list[dict[str, str | datetime | int | None]]:
     now_ts = utc_now_naive().timestamp()
     expires_at = _peers_cache.get("expires_at")
     cached = _peers_cache.get("data")
@@ -226,6 +278,11 @@ async def get_awg_peers() -> list[dict[str, str | None]]:
     _peers_cache["data"] = list(peers)
     _peers_cache["expires_at"] = now_ts + AWG_PEERS_CACHE_TTL_SECONDS
     return peers
+
+
+async def sync_traffic_counters() -> int:
+    peers = await get_awg_peers()
+    return await sync_traffic_counters_from_runtime_peers(peers)
 
 
 async def get_used_ips_from_awg() -> set[int]:

@@ -29,14 +29,14 @@ class UserDeviceActivityRenderingTests(unittest.IsolatedAsyncioTestCase):
             await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (601, '2099-01-01T00:00:00', '2026-01-01T00:00:00')")
             await db.execute(
                 """
-                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
-                VALUES (601, 1, 'PUBKEY1', '', '10.8.1.11', '2026-01-01T00:00:00', 'active')
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, rx_bytes_total, tx_bytes_total)
+                VALUES (601, 1, 'PUBKEY1', '', '10.8.1.11', '2026-01-01T00:00:00', 'active', 1073741824, 314572800)
                 """
             )
             await db.execute(
                 """
-                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
-                VALUES (601, 2, 'PUBKEY2', '', '10.8.1.12', '2026-01-01T00:00:00', 'active')
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, rx_bytes_total, tx_bytes_total)
+                VALUES (601, 2, 'PUBKEY2', '', '10.8.1.12', '2026-01-01T00:00:00', 'active', 0, 0)
                 """
             )
             await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (602, '2099-01-01T00:00:00', '2026-01-01T00:00:00')")
@@ -75,6 +75,16 @@ class UserDeviceActivityRenderingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Устройство 2", lines[1])
         self.assertIn("давно не подключалось", lines[1])
 
+    async def test_user_device_traffic_block_lines(self):
+        import handlers_user
+
+        lines = await handlers_user._build_user_traffic_lines(601)
+
+        self.assertIn("Устройство 1", lines[0])
+        self.assertIn("↓ 1.0 GB", lines[0])
+        self.assertIn("↑ 300 MB", lines[0])
+        self.assertIn("Всего трафика", lines[-1])
+
     async def test_user_device_activity_no_runtime_data(self):
         import handlers_user
 
@@ -99,8 +109,10 @@ class UserDeviceActivityRenderingTests(unittest.IsolatedAsyncioTestCase):
         import handlers_user
 
         lines = await handlers_user._build_user_device_activity_lines(602)
+        traffic_lines = await handlers_user._build_user_traffic_lines(602)
 
         self.assertEqual(lines, ["• нет данных"])
+        self.assertEqual(traffic_lines[-1], "• Всего трафика — 0 B")
 
 
 if __name__ == "__main__":

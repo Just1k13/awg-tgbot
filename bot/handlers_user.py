@@ -184,7 +184,7 @@ async def _build_user_device_activity_lines(user_id: int) -> list[str]:
 async def _build_user_traffic_lines(user_id: int) -> list[str]:
     rows = await get_user_device_traffic_summary(user_id)
     if not rows:
-        return ["• Устройства: 0", "• Всего трафика — 0 B"]
+        return ["• Всего трафика — 0 B"]
 
     lines = [
         render_device_traffic_line(

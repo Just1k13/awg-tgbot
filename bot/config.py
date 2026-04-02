@@ -16,9 +16,30 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 
-def save_env_value(name: str, value: str) -> None:
-    save_env_value_raw(name, value)
+def save_env_value(name: str, value: str | int) -> None:
+    save_env_value_raw(name, str(value))
     globals()[name] = value
+
+
+STARS_PRICE_KEYS = ("STARS_PRICE_7_DAYS", "STARS_PRICE_30_DAYS", "STARS_PRICE_90_DAYS")
+
+
+def get_stars_prices() -> dict[str, int]:
+    return {
+        "STARS_PRICE_7_DAYS": int(globals()["STARS_PRICE_7_DAYS"]),
+        "STARS_PRICE_30_DAYS": int(globals()["STARS_PRICE_30_DAYS"]),
+        "STARS_PRICE_90_DAYS": int(globals()["STARS_PRICE_90_DAYS"]),
+    }
+
+
+def set_stars_price(name: str, value: int) -> tuple[int, int]:
+    if name not in STARS_PRICE_KEYS:
+        raise ValueError("unknown_stars_price_key")
+    if value <= 0:
+        raise ValueError("stars_price_must_be_positive")
+    old_value = int(globals()[name])
+    save_env_value(name, value)
+    return old_value, value
 
 
 def get_support_username() -> str:

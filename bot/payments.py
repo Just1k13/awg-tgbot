@@ -8,6 +8,7 @@ from aiogram import Bot, F, Router, types
 from aiogram.types import LabeledPrice, PreCheckoutQuery
 
 from awg_backend import check_awg_container, issue_subscription
+import config
 from config import (
     AWG_HELPER_POLICY_PATH,
     DOCKER_CONTAINER,
@@ -17,9 +18,6 @@ from config import (
     PAYMENT_RETRY_DELAY_SECONDS,
     PURCHASE_CLICK_COOLDOWN_SECONDS,
     PURCHASE_RATE_LIMIT_TTL_SECONDS,
-    STARS_PRICE_7_DAYS,
-    STARS_PRICE_30_DAYS,
-    STARS_PRICE_90_DAYS,
     WG_INTERFACE,
     logger,
 )
@@ -69,11 +67,18 @@ except Exception:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-TARIFFS = {
-    "sub_7": {"days": 7, "amount": STARS_PRICE_7_DAYS, "currency": "XTR", "method": "stars"},
-    "sub_30": {"days": 30, "amount": STARS_PRICE_30_DAYS, "currency": "XTR", "method": "stars"},
-    "sub_90": {"days": 90, "amount": STARS_PRICE_90_DAYS, "currency": "XTR", "method": "stars"},
-}
+def __getattr__(name: str):
+    if name in {"STARS_PRICE_7_DAYS", "STARS_PRICE_30_DAYS", "STARS_PRICE_90_DAYS"}:
+        return int(getattr(config, name))
+    raise AttributeError(name)
+
+
+def get_tariffs() -> dict[str, dict[str, int | str]]:
+    return {
+        "sub_7": {"days": 7, "amount": int(config.STARS_PRICE_7_DAYS), "currency": "XTR", "method": "stars"},
+        "sub_30": {"days": 30, "amount": int(config.STARS_PRICE_30_DAYS), "currency": "XTR", "method": "stars"},
+        "sub_90": {"days": 90, "amount": int(config.STARS_PRICE_90_DAYS), "currency": "XTR", "method": "stars"},
+    }
 
 
 def _cleanup_purchase_rate_limit(now):
@@ -156,7 +161,7 @@ async def buy_7_days(cb: types.CallbackQuery, bot: Bot):
         await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
         return
     await cb.answer()
-    await _send_stars_invoice(bot, cb.message.chat.id, "sub_7", "Свободный Интернет на 7 дней", "7 дней доступа", STARS_PRICE_7_DAYS)
+    await _send_stars_invoice(bot, cb.message.chat.id, "sub_7", "Свободный Интернет на 7 дней", "7 дней доступа", int(config.STARS_PRICE_7_DAYS))
 
 
 @router.callback_query(F.data == CB_BUY_30)
@@ -172,7 +177,7 @@ async def buy_30_days(cb: types.CallbackQuery, bot: Bot):
         await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
         return
     await cb.answer()
-    await _send_stars_invoice(bot, cb.message.chat.id, "sub_30", "Свободный Интернет на 30 дней", "30 дней доступа", STARS_PRICE_30_DAYS)
+    await _send_stars_invoice(bot, cb.message.chat.id, "sub_30", "Свободный Интернет на 30 дней", "30 дней доступа", int(config.STARS_PRICE_30_DAYS))
 
 
 @router.callback_query(F.data == CB_BUY_90)
@@ -188,7 +193,7 @@ async def buy_90_days(cb: types.CallbackQuery, bot: Bot):
         await cb.answer(f"Подождите {wait_seconds} сек.", show_alert=True)
         return
     await cb.answer()
-    await _send_stars_invoice(bot, cb.message.chat.id, "sub_90", "Свободный Интернет на 90 дней", "90 дней доступа", STARS_PRICE_90_DAYS)
+    await _send_stars_invoice(bot, cb.message.chat.id, "sub_90", "Свободный Интернет на 90 дней", "90 дней доступа", int(config.STARS_PRICE_90_DAYS))
 
 
 @router.pre_checkout_query()
@@ -200,7 +205,7 @@ async def pre_checkout(q: PreCheckoutQuery, bot: Bot):
             error_message=await get_purchase_maintenance_text(),
         )
         return
-    tariff = TARIFFS.get(q.invoice_payload)
+    tariff = get_tariffs().get(q.invoice_payload)
     if not tariff:
         await bot.answer_pre_checkout_query(q.id, ok=False, error_message=await get_text("payment_payload_error"))
         return
@@ -270,7 +275,7 @@ async def _send_user_active_config(message: types.Message, user_id: int) -> bool
 @router.message(F.successful_payment)
 async def success_pay(message: types.Message):
     payment = message.successful_payment
-    tariff = TARIFFS.get(payment.invoice_payload)
+    tariff = get_tariffs().get(payment.invoice_payload)
     if not tariff:
         await message.answer(await get_text("payment_payload_error"))
         return
@@ -440,7 +445,7 @@ async def payment_recovery_worker(bot: Bot | None = None) -> int:
             await write_audit_log(user_id, "payment_recovery_stuck_manual", f"payment_id={payment_id}; {reason}")
             await _notify_admin_stuck(bot, payment_id, user_id, reason)
             continue
-        tariff = TARIFFS.get(payload)
+        tariff = get_tariffs().get(payload)
         if not tariff:
             await update_payment_status(payment_id, "failed", error_message="unknown payload in recovery")
             continue
@@ -487,7 +492,7 @@ async def manual_retry_activation(payment_id: str, bot: Bot | None = None) -> di
     if status not in {"received", "needs_repair", "failed", "stuck_manual"}:
         return {"result": "not_retryable", "message": f"Текущий статус не подходит для retry: {status}"}
 
-    tariff = TARIFFS.get(payload)
+    tariff = get_tariffs().get(payload)
     if not tariff:
         return {"result": "unknown_payload", "message": f"Неизвестный payload={payload}. Нужна ручная проверка."}
 

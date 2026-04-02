@@ -3,6 +3,7 @@ import asyncio
 from pathlib import Path
 from cryptography.fernet import Fernet
 
+import config
 
 from aiogram import F, Router, types
 from aiogram import Bot
@@ -23,6 +24,7 @@ from config import (
     DOCKER_CONTAINER,
     WG_INTERFACE,
     logger,
+    set_stars_price,
 )
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, create_promo_code, db_health_info, disable_promo_code, fetchall, fetchone, fetchval,
@@ -35,11 +37,12 @@ from database import (
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
 from device_activity import render_device_activity_line
 from keyboards import (
-    get_admin_confirm_kb, get_admin_inline_kb, get_admin_simple_back_kb, get_broadcast_cancel_kb, get_broadcast_confirm_kb,
+    get_admin_confirm_kb, get_admin_inline_kb, get_admin_price_confirm_kb, get_admin_prices_kb, get_admin_simple_back_kb, get_broadcast_cancel_kb, get_broadcast_confirm_kb,
 )
 from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BROADCAST, CB_ADMIN_BACKUP,
-    CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
+    CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_PRICE_CANCEL, CB_ADMIN_PRICE_EDIT_30, CB_ADMIN_PRICE_EDIT_7,
+    CB_ADMIN_PRICE_EDIT_90, CB_ADMIN_PRICE_SAVE, CB_ADMIN_PRICES, CB_ADMIN_REFERRALS,
     CB_ADMIN_REFRESH_HEALTH, CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_STATS, CB_ADMIN_SYNC,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
     CB_ADMIN_USERS_PAGE_PREFIX, CB_ADMIN_MANAGE_USER_PREFIX, CB_ADMIN_ADD_DAYS_PREFIX,
@@ -78,6 +81,32 @@ ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/maintenance_off", "выключить freeze новых покупок"),
 )
 BROADCAST_INPUT_ACTION_KEY = "broadcast_input"
+PRICE_INPUT_ACTION_KEY = "price_input"
+PRICE_CONFIRM_ACTION_KEY = "price_confirm"
+PRICE_TARGETS = {
+    CB_ADMIN_PRICE_EDIT_7: ("STARS_PRICE_7_DAYS", "7 дней"),
+    CB_ADMIN_PRICE_EDIT_30: ("STARS_PRICE_30_DAYS", "30 дней"),
+    CB_ADMIN_PRICE_EDIT_90: ("STARS_PRICE_90_DAYS", "90 дней"),
+}
+
+
+def _render_admin_prices_text() -> str:
+    return (
+        "💸 <b>Цены</b>\n\n"
+        f"7 дней — {config.STARS_PRICE_7_DAYS}⭐\n"
+        f"30 дней — {config.STARS_PRICE_30_DAYS}⭐\n"
+        f"90 дней — {config.STARS_PRICE_90_DAYS}⭐"
+    )
+
+
+def _parse_price_input(raw_text: str) -> int | None:
+    value_text = raw_text.strip()
+    if not value_text.isdigit():
+        return None
+    value = int(value_text)
+    if value <= 0:
+        return None
+    return value
 
 
 def _build_broadcast_preview(raw_text: str) -> str:
@@ -211,6 +240,12 @@ class IsAdmin(BaseFilter):
 class HasPendingBroadcastInput(BaseFilter):
     async def __call__(self, message: types.Message) -> bool:
         pending_action = await get_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY)
+        return bool(pending_action)
+
+
+class HasPendingPriceInput(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        pending_action = await get_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
         return bool(pending_action)
 
 
@@ -720,6 +755,104 @@ async def admin_manual_commands(cb: types.CallbackQuery):
         reply_markup=get_admin_simple_back_kb(CB_ADMIN_BACK_MAIN),
     )
     await cb.answer("Готово")
+
+
+@router.callback_query(F.data == CB_ADMIN_PRICES)
+async def admin_prices(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    await cb.message.answer(
+        _render_admin_prices_text(),
+        parse_mode="HTML",
+        reply_markup=get_admin_prices_kb(),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.in_(set(PRICE_TARGETS.keys())))
+async def admin_prices_start_edit(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    target = PRICE_TARGETS.get(cb.data)
+    if not target:
+        await cb.answer("Некорректный тариф", show_alert=True)
+        return
+    env_key, label = target
+    current_value = int(getattr(config, env_key))
+    await clear_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
+    await set_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY, {"env_key": env_key, "label": label})
+    await cb.message.answer(f"Введите новую цену для «{label}» в ⭐. Текущая: {current_value}⭐")
+    await cb.answer()
+
+
+@router.message(IsAdmin(), F.text, ~F.text.startswith("/"), HasPendingPriceInput())
+async def admin_prices_capture_input(message: types.Message):
+    action = await get_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
+    if not action:
+        return
+    new_value = _parse_price_input(message.text or "")
+    if new_value is None:
+        await message.answer("Нужно положительное целое число.")
+        return
+    env_key = str(action.get("env_key", ""))
+    label = str(action.get("label", ""))
+    old_value = int(getattr(config, env_key, 0))
+    await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
+    await set_pending_admin_action(
+        ADMIN_ID,
+        PRICE_CONFIRM_ACTION_KEY,
+        {"env_key": env_key, "label": label, "old": old_value, "new": new_value},
+    )
+    await message.answer(
+        (
+            f"{label}\n"
+            f"Было: {old_value}⭐\n"
+            f"Станет: {new_value}⭐"
+        ),
+        reply_markup=get_admin_price_confirm_kb(),
+    )
+
+
+@router.callback_query(F.data == CB_ADMIN_PRICE_SAVE)
+async def admin_prices_save(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    action = await pop_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
+    await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
+    if not action:
+        await cb.answer("Нет ожидающего действия", show_alert=True)
+        return
+    env_key = str(action.get("env_key", ""))
+    label = str(action.get("label", ""))
+    new_value = int(action.get("new", 0))
+    old_value, saved_value = set_stars_price(env_key, new_value)
+    await write_audit_log(ADMIN_ID, "admin_price_updated", f"key={env_key}; old={old_value}; new={saved_value}")
+    await cb.message.answer(
+        (
+            f"✅ Сохранено: {label}\n"
+            f"{old_value}⭐ → {saved_value}⭐"
+        ),
+    )
+    await cb.message.answer(
+        _render_admin_prices_text(),
+        parse_mode="HTML",
+        reply_markup=get_admin_prices_kb(),
+    )
+    await cb.answer("Сохранено")
+
+
+@router.callback_query(F.data == CB_ADMIN_PRICE_CANCEL)
+async def admin_prices_cancel(cb: types.CallbackQuery):
+    if not await _guard_admin_callback(cb):
+        return
+    await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
+    await clear_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
+    await cb.message.answer(
+        _render_admin_prices_text(),
+        parse_mode="HTML",
+        reply_markup=get_admin_prices_kb(),
+    )
+    await cb.answer("Отменено")
 
 
 @router.callback_query(F.data == CB_ADMIN_BACKUP)

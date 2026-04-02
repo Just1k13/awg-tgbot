@@ -1,9 +1,10 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from config import STARS_PRICE_7_DAYS, STARS_PRICE_30_DAYS, STARS_PRICE_90_DAYS
+import config
 from ui_constants import (
     BTN_ADMIN, BTN_BUY, BTN_CONFIGS, BTN_GUIDE, BTN_PROFILE, BTN_REFERRALS, BTN_SUPPORT,
-    CB_ADMIN_BROADCAST, CB_ADMIN_COMMANDS, CB_ADMIN_BACKUP, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
+    CB_ADMIN_BACK_MAIN, CB_ADMIN_BROADCAST, CB_ADMIN_COMMANDS, CB_ADMIN_BACKUP, CB_ADMIN_LIST, CB_ADMIN_PRICE_CANCEL, CB_ADMIN_PRICE_EDIT_30,
+    CB_ADMIN_PRICE_EDIT_7, CB_ADMIN_PRICE_EDIT_90, CB_ADMIN_PRICE_SAVE, CB_ADMIN_PRICES, CB_ADMIN_REFERRALS,
     CB_ADMIN_STATS, CB_ADMIN_SYNC,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7, CB_BUY_90,
     CB_CHECK_ACTIVATION_STATUS,
@@ -31,9 +32,9 @@ def get_main_menu(user_id: int, admin_id: int) -> ReplyKeyboardMarkup:
 
 def get_buy_inline_kb() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text=f"7 дней — {STARS_PRICE_7_DAYS}⭐", callback_data=CB_BUY_7)],
-        [InlineKeyboardButton(text=f"30 дней — {STARS_PRICE_30_DAYS}⭐", callback_data=CB_BUY_30)],
-        [InlineKeyboardButton(text=f"90 дней — {STARS_PRICE_90_DAYS}⭐", callback_data=CB_BUY_90)],
+        [InlineKeyboardButton(text=f"7 дней — {config.STARS_PRICE_7_DAYS}⭐", callback_data=CB_BUY_7)],
+        [InlineKeyboardButton(text=f"30 дней — {config.STARS_PRICE_30_DAYS}⭐", callback_data=CB_BUY_30)],
+        [InlineKeyboardButton(text=f"90 дней — {config.STARS_PRICE_90_DAYS}⭐", callback_data=CB_BUY_90)],
         [InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -131,9 +132,30 @@ def get_admin_inline_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
             [InlineKeyboardButton(text="🎁 Рефералы", callback_data=CB_ADMIN_REFERRALS)],
             [InlineKeyboardButton(text="🔄 Синхронизация", callback_data=CB_ADMIN_SYNC)],
+            [InlineKeyboardButton(text="💸 Цены", callback_data=CB_ADMIN_PRICES)],
             [InlineKeyboardButton(text="💾 Бэкап", callback_data=CB_ADMIN_BACKUP)],
             [InlineKeyboardButton(text="⌨️ Команды", callback_data=CB_ADMIN_COMMANDS)],
             [InlineKeyboardButton(text="📢 Рассылка", callback_data=CB_ADMIN_BROADCAST)],
+        ]
+    )
+
+
+def get_admin_prices_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Изменить 7 дней", callback_data=CB_ADMIN_PRICE_EDIT_7)],
+            [InlineKeyboardButton(text="Изменить 30 дней", callback_data=CB_ADMIN_PRICE_EDIT_30)],
+            [InlineKeyboardButton(text="Изменить 90 дней", callback_data=CB_ADMIN_PRICE_EDIT_90)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_ADMIN_BACK_MAIN)],
+        ]
+    )
+
+
+def get_admin_price_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Сохранить", callback_data=CB_ADMIN_PRICE_SAVE)],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data=CB_ADMIN_PRICE_CANCEL)],
         ]
     )
 

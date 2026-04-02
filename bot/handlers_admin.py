@@ -90,20 +90,6 @@ PRICE_TARGETS = {
 }
 
 
-async def _set_purchase_maintenance(enabled: bool, actor_id: int) -> None:
-    await set_app_setting("MAINTENANCE_MODE", "1" if enabled else "0", updated_by=actor_id)
-
-
-async def _restore_maintenance_from_price_action(action: dict | None, actor_id: int) -> bool:
-    if not action:
-        return False
-    was_enabled = bool(action.get("maintenance_was_enabled", True))
-    now_enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
-    if now_enabled != was_enabled:
-        await _set_purchase_maintenance(was_enabled, actor_id)
-    return bool(action.get("maintenance_forced_by_price_edit"))
-
-
 def _render_admin_prices_text() -> str:
     return (
         "💸 <b>Цены</b>\n\n"
@@ -790,26 +776,14 @@ async def admin_prices_start_edit(cb: types.CallbackQuery):
     if not target:
         await cb.answer("Некорректный тариф", show_alert=True)
         return
+    maintenance_enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
+    if not maintenance_enabled:
+        await cb.answer("Сначала включите /maintenance_on, затем изменяйте цену.", show_alert=True)
+        return
     env_key, label = target
     current_value = int(getattr(config, env_key))
-    maintenance_was_enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
-    maintenance_forced_by_price_edit = False
-    if not maintenance_was_enabled:
-        await _set_purchase_maintenance(True, ADMIN_ID)
-        maintenance_forced_by_price_edit = True
     await clear_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
-    await set_pending_admin_action(
-        ADMIN_ID,
-        PRICE_INPUT_ACTION_KEY,
-        {
-            "env_key": env_key,
-            "label": label,
-            "maintenance_was_enabled": maintenance_was_enabled,
-            "maintenance_forced_by_price_edit": maintenance_forced_by_price_edit,
-        },
-    )
-    if maintenance_forced_by_price_edit:
-        await cb.message.answer("Покупки временно поставлены на паузу до завершения изменения цены.")
+    await set_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY, {"env_key": env_key, "label": label})
     await cb.message.answer(f"Введите новую цену для «{label}» в ⭐. Текущая: {current_value}⭐")
     await cb.answer()
 
@@ -826,20 +800,11 @@ async def admin_prices_capture_input(message: types.Message):
     env_key = str(action.get("env_key", ""))
     label = str(action.get("label", ""))
     old_value = int(getattr(config, env_key, 0))
-    maintenance_was_enabled = bool(action.get("maintenance_was_enabled", True))
-    maintenance_forced_by_price_edit = bool(action.get("maintenance_forced_by_price_edit"))
     await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
     await set_pending_admin_action(
         ADMIN_ID,
         PRICE_CONFIRM_ACTION_KEY,
-        {
-            "env_key": env_key,
-            "label": label,
-            "old": old_value,
-            "new": new_value,
-            "maintenance_was_enabled": maintenance_was_enabled,
-            "maintenance_forced_by_price_edit": maintenance_forced_by_price_edit,
-        },
+        {"env_key": env_key, "label": label, "old": old_value, "new": new_value},
     )
     await message.answer(
         (
@@ -864,7 +829,6 @@ async def admin_prices_save(cb: types.CallbackQuery):
     label = str(action.get("label", ""))
     new_value = int(action.get("new", 0))
     old_value, saved_value = set_stars_price(env_key, new_value)
-    purchases_resumed = await _restore_maintenance_from_price_action(action, ADMIN_ID)
     await write_audit_log(ADMIN_ID, "admin_price_updated", f"key={env_key}; old={old_value}; new={saved_value}")
     await cb.message.answer(
         (
@@ -872,8 +836,6 @@ async def admin_prices_save(cb: types.CallbackQuery):
             f"{old_value}⭐ → {saved_value}⭐"
         ),
     )
-    if purchases_resumed:
-        await cb.message.answer("Покупки снова доступны.")
     await cb.message.answer(
         _render_admin_prices_text(),
         parse_mode="HTML",
@@ -886,14 +848,8 @@ async def admin_prices_save(cb: types.CallbackQuery):
 async def admin_prices_cancel(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    action = await pop_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
-    if not action:
-        action = await pop_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
-    else:
-        await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
-    purchases_resumed = await _restore_maintenance_from_price_action(action, ADMIN_ID)
-    if purchases_resumed:
-        await cb.message.answer("Покупки снова доступны.")
+    await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
+    await clear_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
     await cb.message.answer(
         _render_admin_prices_text(),
         parse_mode="HTML",

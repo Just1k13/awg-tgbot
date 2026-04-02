@@ -43,7 +43,6 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
     rows = []
     if subscription_active:
         rows.append([InlineKeyboardButton(text="🔄 Продлить доступ", callback_data=CB_SHOW_BUY_MENU)])
-        rows.append([InlineKeyboardButton(text="♻️ Перевыпустить устройство", callback_data=f"{CB_USER_REISSUE_DEVICE_PREFIX}0")])
     else:
         rows.append([InlineKeyboardButton(text="💳 Оплатить доступ", callback_data=CB_SHOW_BUY_MENU)])
     rows.append([InlineKeyboardButton(text="🔑 Подключение", callback_data=CB_OPEN_CONFIGS)])

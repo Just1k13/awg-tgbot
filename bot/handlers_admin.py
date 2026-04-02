@@ -26,31 +26,23 @@ from config import (
 )
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, create_promo_code, db_health_info, disable_promo_code, fetchall, fetchone, fetchval,
-    get_app_setting,
     get_latest_user_payment_summary,
     list_promo_codes,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
-    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_text_override, get_user_keys, get_user_meta, normalize_promo_code, pop_pending_admin_action, reset_text_override,
-    reset_app_setting, set_app_setting, set_text_override,
-    set_pending_admin_action, set_pending_broadcast, write_audit_log,
+    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_user_keys, get_user_meta, normalize_promo_code, pop_pending_admin_action,
+    set_app_setting, set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
 from device_activity import render_device_activity_line
 from keyboards import (
-    get_admin_confirm_kb, get_admin_edit_mode_kb, get_admin_inline_kb,
-    get_admin_setting_detail_kb, get_admin_settings_list_kb, get_admin_simple_back_kb, get_admin_text_detail_kb,
-    get_admin_texts_list_kb, get_broadcast_confirm_kb,
+    get_admin_confirm_kb, get_admin_inline_kb, get_admin_simple_back_kb, get_broadcast_confirm_kb,
 )
 from ui_constants import (
-    BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BACK_SETTINGS, CB_ADMIN_BACK_TEXTS, CB_ADMIN_BROADCAST, CB_ADMIN_BACKUP,
-    CB_ADMIN_CANCEL_EDIT, CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
-    CB_ADMIN_REFRESH_HEALTH, CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_REFRESH_SETTINGS, CB_ADMIN_REFRESH_TEXTS,
-    CB_ADMIN_SETTING_EDIT_PREFIX, CB_ADMIN_SETTING_KEY_PREFIX, CB_ADMIN_SETTING_RESET_PREFIX, CB_ADMIN_SETTINGS,
-    CB_ADMIN_SETTINGS_PAGE_PREFIX, CB_ADMIN_STATS, CB_ADMIN_SYNC, CB_ADMIN_TEXT_EDIT_PREFIX, CB_ADMIN_TEXT_KEY_PREFIX,
-    CB_ADMIN_TEXT_RESET_PREFIX, CB_ADMIN_TEXTS, CB_ADMIN_TEXTS_PAGE_PREFIX,
+    BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BROADCAST, CB_ADMIN_BACKUP,
+    CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
+    CB_ADMIN_REFRESH_HEALTH, CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_STATS, CB_ADMIN_SYNC,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
     CB_ADMIN_USERS_PAGE_PREFIX, CB_ADMIN_MANAGE_USER_PREFIX, CB_ADMIN_ADD_DAYS_PREFIX,
-    CB_ADMIN_SET_RATE_PREFIX,
     CB_ADMIN_RETRY_ACTIVATION_PREFIX,
     CB_ADMIN_DEVICE_DELETE_PREFIX, CB_ADMIN_DEVICE_REISSUE_PREFIX,
     CB_ADMIN_REVOKE_PREFIX, CB_ADMIN_DELETE_PREFIX, CB_CONFIRM_CLEAN_ORPHANS,
@@ -58,7 +50,6 @@ from ui_constants import (
     CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE, CB_CONFIRM_DEVICE_DELETE,
     CB_CANCEL_DEVICE_DELETE, CB_CONFIRM_DEVICE_REISSUE, CB_CANCEL_DEVICE_REISSUE,
 )
-from content_settings import SETTING_DEFAULTS, TEXT_DEFAULTS, validate_text_template
 from config_validate import read_helper_policy
 from network_policy import denylist_sync, policy_metrics
 from content_settings import get_setting
@@ -67,8 +58,6 @@ from payments import manual_retry_activation
 router = Router()
 admin_command_rate_limit: dict[str, object] = {}
 ADMIN_USERS_PAGE_SIZE = 10
-ADMIN_CONTENT_PAGE_SIZE = 8
-ADMIN_EDIT_TIMEOUT_SECONDS = 600
 ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/health", "быстрая проверка selfhost readiness"),
     ("/sync_awg", "сверка AWG и БД"),
@@ -210,17 +199,6 @@ class IsAdmin(BaseFilter):
         return bool(message.from_user and message.from_user.id == ADMIN_ID)
 
 
-class HasPendingAdminEdit(BaseFilter):
-    async def __call__(self, message: types.Message) -> bool:
-        if not message.from_user:
-            return False
-        row = await fetchone(
-            "SELECT 1 FROM pending_actions WHERE admin_id = ? AND action_key IN (?, ?) LIMIT 1",
-            (message.from_user.id, "edit_text", "edit_setting"),
-        )
-        return bool(row)
-
-
 async def notify_user_subscription_granted(bot: Bot, user_id: int, days: int, new_until) -> bool:
     try:
         await bot.send_message(
@@ -277,160 +255,6 @@ async def build_stats_text() -> str:
         f"🆕 Новых за 24ч: <b>{new_24h}</b>\n"
         f"🧩 Свободных IP: <b>{free_slots}</b>\n"
         f"👻 Потерянных peer: <b>{len(orphans)}</b>"
-    )
-
-
-def _truncate_preview(value: str, limit: int = 700) -> str:
-    text = value or ""
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "\n…<i>обрезано</i>"
-
-
-def _chunk_keys(keys: list[str], page: int, page_size: int = ADMIN_CONTENT_PAGE_SIZE) -> tuple[list[str], int, int]:
-    total_pages = max(1, (len(keys) + page_size - 1) // page_size)
-    page = max(0, min(page, total_pages - 1))
-    start = page * page_size
-    end = start + page_size
-    return keys[start:end], page, total_pages
-
-
-def _is_stale_edit(payload: dict) -> bool:
-    started_at = payload.get("started_at")
-    if not started_at:
-        return False
-    try:
-        ts = datetime.fromisoformat(started_at)
-    except Exception:
-        return False
-    return (utc_now_naive() - ts).total_seconds() > ADMIN_EDIT_TIMEOUT_SECONDS
-
-
-def _all_text_keys() -> list[str]:
-    return sorted(TEXT_DEFAULTS.keys())
-
-
-def _all_setting_keys() -> list[str]:
-    return sorted(SETTING_DEFAULTS.keys())
-
-
-SETTING_LABELS: dict[str, tuple[str, str]] = {
-    "REFERRAL_ENABLED": ("Рефералка включена", "1 — включена, 0 — выключена."),
-    "REFERRAL_INVITEE_BONUS_DAYS": ("Бонус приглашённому (дни)", "Сколько дней получает новый пользователь после первой оплаты."),
-    "REFERRAL_INVITER_BONUS_DAYS": ("Бонус пригласившему (дни)", "Сколько дней получает пригласивший после первой оплаты приглашённого."),
-    "DEFAULT_KEY_RATE_MBIT": ("Скорость по умолчанию (Мбит/с)", "Лимит скорости для новых ключей."),
-    "QOS_ENABLED": ("Ограничение скорости включено", "1 — лимиты скорости активны."),
-    "QOS_STRICT": ("Строгий режим QoS", "1 — ошибка QoS останавливает операцию; 0 — только warning."),
-    "EGRESS_DENYLIST_ENABLED": ("Блок-лист сайтов включен", "1 — включен denylist исходящего трафика."),
-    "EGRESS_DENYLIST_MODE": ("Режим блок-листа", "strict — ошибки sync критичны; soft — только логируются."),
-    "EGRESS_DENYLIST_DOMAINS": ("Домены в блок-листе", "Список доменов через запятую."),
-    "EGRESS_DENYLIST_CIDRS": ("IP/CIDR в блок-листе", "Список сетей через запятую."),
-    "EGRESS_DENYLIST_REFRESH_MINUTES": ("Интервал обновления block-листа (мин)", "Как часто обновлять denylist в фоне."),
-    "TORRENT_POLICY_TEXT_ENABLED": ("Показывать предупреждение про P2P", "1 — в инструкции отображается блок про policy."),
-    "VPN_SUBNET_PREFIX": ("Префикс VPN подсети", "Обычно 10.8.1."),
-}
-
-TEXT_LABELS: dict[str, tuple[str, str]] = {
-    "start": ("Стартовое сообщение", "Текст после /start."),
-    "buy_menu": ("Экран покупки", "Показывается перед выбором тарифа."),
-    "renew_menu": ("Экран продления", "Показывается при активной подписке."),
-    "profile_screen": ("Экран профиля", "Карточка пользователя и статус подписки."),
-    "configs_menu": ("Экран подключения", "Объяснение, что отправляется vpn:// и .conf."),
-    "configs_empty": ("Нет подключений", "Сообщение, когда у пользователя нет ключей."),
-    "payment_success": ("Оплата: доступ готов", "Статус успешной активации."),
-    "payment_pending": ("Оплата: в обработке", "Статус, когда выдача ещё в процессе."),
-    "payment_error": ("Оплата: ошибка", "Сообщение при проблеме активации."),
-    "referral_screen": ("Экран рефералов", "Ссылка, статистика и правила начисления бонуса."),
-    "support_contact": ("Текст поддержки", "Полный текст раздела поддержки."),
-    "instruction_body": ("Инструкция подключения", "Пошаговый гайд для пользователя."),
-}
-
-
-def _humanize_setting_key(key: str) -> tuple[str, str]:
-    if key in SETTING_LABELS:
-        return SETTING_LABELS[key]
-    return key.replace("_", " ").capitalize(), "Технический параметр."
-
-
-def _humanize_text_key(key: str) -> tuple[str, str]:
-    if key in TEXT_LABELS:
-        return TEXT_LABELS[key]
-    return key.replace("_", " ").capitalize(), "Технический текстовый шаблон."
-
-
-def _compact_setting_title(key: str) -> str:
-    title, _ = _humanize_setting_key(key)
-    return f"{title} · {key}"
-
-
-def _compact_text_title(key: str) -> str:
-    title, _ = _humanize_text_key(key)
-    return f"{title} · {key}"
-
-
-def _value_type_hint(default_value) -> str:
-    if isinstance(default_value, int):
-        return "int"
-    if isinstance(default_value, float):
-        return "float"
-    return "str"
-
-
-async def _render_texts_list(target_message: types.Message, page: int = 0) -> None:
-    keys = _all_text_keys()
-    chunk, page, total_pages = _chunk_keys(keys, page)
-    await target_message.answer(
-        "📝 <b>Тексты</b>\nВыберите понятное название. Технический ключ показан после точки.",
-        parse_mode="HTML",
-        reply_markup=get_admin_texts_list_kb(chunk, page, total_pages, _compact_text_title),
-    )
-
-
-async def _render_settings_list(target_message: types.Message, page: int = 0) -> None:
-    keys = _all_setting_keys()
-    chunk, page, total_pages = _chunk_keys(keys, page)
-    await target_message.answer(
-        "⚙️ <b>Настройки</b>\nВыберите понятное название. Технический ключ показан после точки.",
-        parse_mode="HTML",
-        reply_markup=get_admin_settings_list_kb(chunk, page, total_pages, _compact_setting_title),
-    )
-
-
-async def _render_text_detail(target_message: types.Message, key: str, index: int, page: int) -> None:
-    current_value = await get_text_override(key) or TEXT_DEFAULTS.get(key, "")
-    default_value = TEXT_DEFAULTS.get(key, "")
-    title, description = _humanize_text_key(key)
-    await target_message.answer(
-        (
-            "📝 <b>Карточка текста</b>\n\n"
-            f"Название: <b>{escape_html(title)}</b>\n"
-            f"Описание: {escape_html(description)}\n"
-            f"Ключ: <code>{key}</code>\n"
-            f"current:\n<blockquote>{escape_html(_truncate_preview(str(current_value)))}</blockquote>\n"
-            f"default:\n<blockquote>{escape_html(_truncate_preview(str(default_value), 280))}</blockquote>"
-        ),
-        parse_mode="HTML",
-        reply_markup=get_admin_text_detail_kb(index, page),
-    )
-
-
-async def _render_setting_detail(target_message: types.Message, key: str, index: int, page: int) -> None:
-    raw_current = await get_app_setting(key)
-    default_value = SETTING_DEFAULTS.get(key)
-    current_value = raw_current if raw_current is not None else default_value
-    title, description = _humanize_setting_key(key)
-    await target_message.answer(
-        (
-            "⚙️ <b>Карточка настройки</b>\n\n"
-            f"Название: <b>{escape_html(title)}</b>\n"
-            f"Описание: {escape_html(description)}\n"
-            f"Ключ: <code>{key}</code>\n"
-            f"Тип: <b>{_value_type_hint(default_value)}</b>\n"
-            f"Текущее: <code>{escape_html(str(current_value))}</code>\n"
-            f"По умолчанию: <code>{escape_html(str(default_value))}</code>"
-        ),
-        parse_mode="HTML",
-        reply_markup=get_admin_setting_detail_kb(index, page),
     )
 
 
@@ -825,151 +649,6 @@ async def admin_backup_cb(cb: types.CallbackQuery):
     await _run_backup_flow(cb.message)
 
 
-@router.callback_query(F.data == CB_ADMIN_TEXTS)
-async def admin_texts_menu(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await cb.answer("Отключено в personal MVP", show_alert=True)
-
-
-@router.callback_query(F.data == CB_ADMIN_SETTINGS)
-async def admin_settings_menu(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await cb.answer("Отключено в personal MVP", show_alert=True)
-
-
-@router.callback_query(F.data == CB_ADMIN_BACK_TEXTS)
-@router.callback_query(F.data == CB_ADMIN_REFRESH_TEXTS)
-async def admin_texts_back_refresh(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await _render_texts_list(cb.message, 0)
-    await cb.answer("Готово")
-
-
-@router.callback_query(F.data == CB_ADMIN_BACK_SETTINGS)
-@router.callback_query(F.data == CB_ADMIN_REFRESH_SETTINGS)
-async def admin_settings_back_refresh(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await _render_settings_list(cb.message, 0)
-    await cb.answer("Готово")
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_TEXTS_PAGE_PREFIX))
-async def admin_texts_page(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    page = int(cb.data.removeprefix(CB_ADMIN_TEXTS_PAGE_PREFIX))
-    await _render_texts_list(cb.message, page)
-    await cb.answer("Готово")
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_SETTINGS_PAGE_PREFIX))
-async def admin_settings_page(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    page = int(cb.data.removeprefix(CB_ADMIN_SETTINGS_PAGE_PREFIX))
-    await _render_settings_list(cb.message, page)
-    await cb.answer("Готово")
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_TEXT_KEY_PREFIX))
-async def admin_text_key_detail(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    raw = cb.data.removeprefix(CB_ADMIN_TEXT_KEY_PREFIX)
-    index_raw, page_raw = raw.split("_", 1)
-    idx = int(index_raw)
-    page = int(page_raw)
-    chunk, _, _ = _chunk_keys(_all_text_keys(), page)
-    if idx < 0 or idx >= len(chunk):
-        await cb.answer("Ключ не найден", show_alert=True)
-        return
-    key = chunk[idx]
-    await _render_text_detail(cb.message, key, idx, page)
-    await cb.answer("Открыто")
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_SETTING_KEY_PREFIX))
-async def admin_setting_key_detail(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    raw = cb.data.removeprefix(CB_ADMIN_SETTING_KEY_PREFIX)
-    index_raw, page_raw = raw.split("_", 1)
-    idx = int(index_raw)
-    page = int(page_raw)
-    chunk, _, _ = _chunk_keys(_all_setting_keys(), page)
-    if idx < 0 or idx >= len(chunk):
-        await cb.answer("Ключ не найден", show_alert=True)
-        return
-    key = chunk[idx]
-    await _render_setting_detail(cb.message, key, idx, page)
-    await cb.answer("Открыто")
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_TEXT_EDIT_PREFIX))
-async def admin_text_edit_start(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    raw = cb.data.removeprefix(CB_ADMIN_TEXT_EDIT_PREFIX)
-    index_raw, page_raw = raw.split("_", 1)
-    idx = int(index_raw)
-    page = int(page_raw)
-    chunk, _, _ = _chunk_keys(_all_text_keys(), page)
-    if idx < 0 or idx >= len(chunk):
-        await cb.answer("Ключ не найден", show_alert=True)
-        return
-    key = chunk[idx]
-    await set_pending_admin_action(
-        cb.from_user.id,
-        "edit_text",
-        {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
-    )
-    await cb.message.answer(
-        f"✏️ Отправьте новое значение для <code>{key}</code> ({_humanize_text_key(key)[0]}).\nДля отмены нажмите кнопку ниже.",
-        parse_mode="HTML",
-        reply_markup=get_admin_edit_mode_kb(),
-    )
-    await cb.answer("Режим редактирования")
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_SETTING_EDIT_PREFIX))
-async def admin_setting_edit_start(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    raw = cb.data.removeprefix(CB_ADMIN_SETTING_EDIT_PREFIX)
-    index_raw, page_raw = raw.split("_", 1)
-    idx = int(index_raw)
-    page = int(page_raw)
-    chunk, _, _ = _chunk_keys(_all_setting_keys(), page)
-    if idx < 0 or idx >= len(chunk):
-        await cb.answer("Ключ не найден", show_alert=True)
-        return
-    key = chunk[idx]
-    await set_pending_admin_action(
-        cb.from_user.id,
-        "edit_setting",
-        {"key": key, "page": page, "index": idx, "started_at": utc_now_naive().isoformat()},
-    )
-    await cb.message.answer(
-        f"✏️ Отправьте новое значение для <code>{key}</code> ({_humanize_setting_key(key)[0]}).\nДля отмены нажмите кнопку ниже.",
-        parse_mode="HTML",
-        reply_markup=get_admin_edit_mode_kb(),
-    )
-    await cb.answer("Режим редактирования")
-
-
-@router.callback_query(F.data == CB_ADMIN_CANCEL_EDIT)
-async def admin_cancel_edit(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await clear_pending_admin_action(cb.from_user.id, "edit_text")
-    await clear_pending_admin_action(cb.from_user.id, "edit_setting")
-    await cb.message.answer("❌ Редактирование отменено.")
-    await cb.answer("Отменено")
-
 @router.callback_query(F.data == CB_ADMIN_STATS)
 async def admin_stats_cb(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
@@ -1173,13 +852,6 @@ async def admin_add_days_btn(cb: types.CallbackQuery):
     except Exception as e:
         logger.exception("Ошибка admin_add_days_btn: %s", e)
         await cb.answer("❌ Не удалось продлить доступ", show_alert=True)
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_SET_RATE_PREFIX))
-async def admin_set_rate_btn(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await cb.answer("Отключено в personal MVP", show_alert=True)
 
 
 @router.callback_query(F.data.startswith(CB_ADMIN_RETRY_ACTIVATION_PREFIX))
@@ -1596,46 +1268,6 @@ async def broadcast_cancel(cb: types.CallbackQuery):
     await cb.answer("Отменено")
 
 
-@router.callback_query(F.data.startswith(CB_ADMIN_TEXT_RESET_PREFIX))
-async def admin_text_reset_btn(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    raw = cb.data.removeprefix(CB_ADMIN_TEXT_RESET_PREFIX)
-    index_raw, page_raw = raw.split("_", 1)
-    idx = int(index_raw)
-    page = int(page_raw)
-    chunk, _, _ = _chunk_keys(_all_text_keys(), page)
-    if idx < 0 or idx >= len(chunk):
-        await cb.answer("Ключ не найден", show_alert=True)
-        return
-    key = chunk[idx]
-    await reset_text_override(key)
-    await write_audit_log(cb.from_user.id, "text_reset", f"key={key}")
-    await cb.message.answer(f"♻️ Сброшен override для <code>{key}</code>.", parse_mode="HTML")
-    await _render_text_detail(cb.message, key, idx, page)
-    await cb.answer("Сброшено")
-
-
-@router.callback_query(F.data.startswith(CB_ADMIN_SETTING_RESET_PREFIX))
-async def admin_setting_reset_btn(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    raw = cb.data.removeprefix(CB_ADMIN_SETTING_RESET_PREFIX)
-    index_raw, page_raw = raw.split("_", 1)
-    idx = int(index_raw)
-    page = int(page_raw)
-    chunk, _, _ = _chunk_keys(_all_setting_keys(), page)
-    if idx < 0 or idx >= len(chunk):
-        await cb.answer("Ключ не найден", show_alert=True)
-        return
-    key = chunk[idx]
-    await reset_app_setting(key)
-    await write_audit_log(cb.from_user.id, "setting_reset", f"key={key}")
-    await cb.message.answer(f"♻️ Сброшена настройка <code>{key}</code> к default.", parse_mode="HTML")
-    await _render_setting_detail(cb.message, key, idx, page)
-    await cb.answer("Сброшено")
-
-
 @router.callback_query(F.data == CB_ADMIN_REFERRALS)
 @router.callback_query(F.data == CB_ADMIN_REFRESH_REFERRALS)
 async def admin_referrals_summary(cb: types.CallbackQuery):
@@ -1656,66 +1288,6 @@ async def admin_health_summary(cb: types.CallbackQuery):
         return
     await cb.message.answer(await build_runtime_smokecheck_text(), parse_mode="HTML")
     await cb.answer("Готово")
-
-
-@router.message(Command("cancel_edit"), IsAdmin())
-async def cancel_edit_cmd(message: types.Message):
-    await clear_pending_admin_action(message.from_user.id, "edit_text")
-    await clear_pending_admin_action(message.from_user.id, "edit_setting")
-    await message.answer("❌ Редактирование отменено.")
-
-
-@router.message(IsAdmin(), HasPendingAdminEdit(), F.text, ~F.text.startswith("/"))
-async def admin_pending_edit_consumer(message: types.Message):
-    edit_text_state = await pop_pending_admin_action(message.from_user.id, "edit_text")
-    if edit_text_state:
-        if _is_stale_edit(edit_text_state):
-            await message.answer("⌛ Сессия редактирования текста устарела. Запустите заново.")
-            return
-        key = str(edit_text_state.get("key") or "")
-        valid, err = await validate_text_template(key, message.text)
-        if not valid:
-            await message.answer(f"❌ {err}\nОтправьте значение снова или нажмите ❌ Отмена.", reply_markup=get_admin_edit_mode_kb())
-            await set_pending_admin_action(message.from_user.id, "edit_text", edit_text_state)
-            return
-        await set_text_override(key, message.text, updated_by=message.from_user.id)
-        await write_audit_log(message.from_user.id, "text_set", f"key={key}; via=ui")
-        await message.answer("✅ Текст сохранён.")
-        await _render_text_detail(
-            message,
-            key,
-            int(edit_text_state.get("index", 0)),
-            int(edit_text_state.get("page", 0)),
-        )
-        return
-
-    edit_setting_state = await pop_pending_admin_action(message.from_user.id, "edit_setting")
-    if not edit_setting_state:
-        return
-    if _is_stale_edit(edit_setting_state):
-        await message.answer("⌛ Сессия редактирования настройки устарела. Запустите заново.")
-        return
-    key = str(edit_setting_state.get("key") or "")
-    default_value = SETTING_DEFAULTS.get(key)
-    cast_type = type(default_value) if default_value is not None else str
-    try:
-        cast_type(message.text)
-    except Exception:
-        await message.answer(
-            f"❌ Некорректный тип: ожидается {_value_type_hint(default_value)}.\nОтправьте значение снова или нажмите ❌ Отмена.",
-            reply_markup=get_admin_edit_mode_kb(),
-        )
-        await set_pending_admin_action(message.from_user.id, "edit_setting", edit_setting_state)
-        return
-    await set_app_setting(key, message.text, updated_by=message.from_user.id)
-    await write_audit_log(message.from_user.id, "setting_set", f"key={key}; via=ui")
-    await message.answer("✅ Настройка сохранена.")
-    await _render_setting_detail(
-        message,
-        key,
-        int(edit_setting_state.get("index", 0)),
-        int(edit_setting_state.get("page", 0)),
-    )
 
 
 @router.message(Command("give"), IsAdmin())

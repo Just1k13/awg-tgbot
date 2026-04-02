@@ -52,7 +52,11 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
         labels = [button.text for row in kb.inline_keyboard for button in row]
         self.assertIn("⏱ Статус активации", labels)
         self.assertIn("🆘 Помощь и поддержка", labels)
-        self.assertIn("♻️ Перевыпустить устройство", labels)
+        self.assertNotIn("♻️ Перевыпустить устройство", labels)
+
+        kb_active = get_profile_inline_kb(subscription_active=True)
+        active_labels = [button.text for row in kb_active.inline_keyboard for button in row]
+        self.assertIn("♻️ Перевыпустить устройство", active_labels)
 
     async def test_support_center_keyboard_contains_main_help_actions(self):
         from keyboards import get_support_center_kb
@@ -61,6 +65,7 @@ class PersonalFlowPolishTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("💳 Помощь с оплатой", labels)
         self.assertIn("🔌 Помощь с подключением", labels)
         self.assertIn("📄 Краткие условия", labels)
+        self.assertIn("⬅️ К меню", labels)
 
     async def test_config_result_keyboard_has_reissue_action(self):
         from keyboards import get_config_result_kb

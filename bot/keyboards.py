@@ -43,11 +43,11 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
     rows = []
     if subscription_active:
         rows.append([InlineKeyboardButton(text="🔄 Продлить доступ", callback_data=CB_SHOW_BUY_MENU)])
+        rows.append([InlineKeyboardButton(text="♻️ Перевыпустить устройство", callback_data=f"{CB_USER_REISSUE_DEVICE_PREFIX}0")])
     else:
         rows.append([InlineKeyboardButton(text="💳 Оплатить доступ", callback_data=CB_SHOW_BUY_MENU)])
     rows.append([InlineKeyboardButton(text="🔑 Подключение", callback_data=CB_OPEN_CONFIGS)])
     rows.append([InlineKeyboardButton(text="⏱ Статус активации", callback_data=CB_CHECK_ACTIVATION_STATUS)])
-    rows.append([InlineKeyboardButton(text="♻️ Перевыпустить устройство", callback_data=f"{CB_USER_REISSUE_DEVICE_PREFIX}0")])
     rows.append([InlineKeyboardButton(text="🆘 Помощь и поддержка", callback_data=CB_OPEN_SUPPORT)])
     rows.append([InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -103,7 +103,7 @@ def get_support_center_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💳 Помощь с оплатой", callback_data=CB_SUPPORT_PAYMENT)],
             [InlineKeyboardButton(text="🔌 Помощь с подключением", callback_data=CB_SUPPORT_CONNECTION)],
             [InlineKeyboardButton(text="📄 Краткие условия", callback_data=CB_SUPPORT_TERMS)],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_SUPPORT_BACK)],
+            [InlineKeyboardButton(text="⬅️ К меню", callback_data=CB_SUPPORT_BACK)],
         ]
     )
 

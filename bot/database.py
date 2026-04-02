@@ -1270,7 +1270,11 @@ async def get_referral_summary(user_id: int) -> dict[str, int]:
         """,
         (user_id, user_id),
     )
-    inviter_bonus = int(row[0]) if row else 0
+    recurring = await fetchone(
+        "SELECT COALESCE(SUM(inviter_bonus_days), 0) FROM referral_recurring_rewards WHERE inviter_user_id = ?",
+        (user_id,),
+    )
+    inviter_bonus = (int(row[0]) if row else 0) + (int(recurring[0]) if recurring else 0)
     invitee_bonus = int(row[1]) if row else 0
     return {
         "invited_count": int(invited[0]) if invited else 0,
@@ -1289,12 +1293,19 @@ async def get_referral_admin_stats(limit: int = 5) -> dict[str, Any]:
         WHERE r.invitee_user_id IS NULL
         """
     )
-    rewarded = await fetchone("SELECT COUNT(*) FROM referral_rewards")
+    first_rewarded = await fetchone("SELECT COUNT(*) FROM referral_rewards")
+    recurring_rewarded = await fetchone("SELECT COUNT(*) FROM referral_recurring_rewards")
     recent = await fetchall(
         """
         SELECT invitee_user_id, inviter_user_id, payment_id, invitee_bonus_days, inviter_bonus_days, created_at
-        FROM referral_rewards
-        ORDER BY id DESC
+        FROM (
+            SELECT invitee_user_id, inviter_user_id, payment_id, invitee_bonus_days, inviter_bonus_days, created_at
+            FROM referral_rewards
+            UNION ALL
+            SELECT invitee_user_id, inviter_user_id, payment_id, 0 AS invitee_bonus_days, inviter_bonus_days, created_at
+            FROM referral_recurring_rewards
+        )
+        ORDER BY datetime(created_at) DESC
         LIMIT ?
         """,
         (limit,),
@@ -1302,18 +1313,30 @@ async def get_referral_admin_stats(limit: int = 5) -> dict[str, Any]:
     top = await fetchall(
         """
         SELECT inviter_user_id, COUNT(*) AS cnt
-        FROM referral_rewards
+        FROM (
+            SELECT inviter_user_id FROM referral_rewards
+            UNION ALL
+            SELECT inviter_user_id FROM referral_recurring_rewards
+        )
         GROUP BY inviter_user_id
         ORDER BY cnt DESC
         LIMIT ?
         """,
         (limit,),
     )
+    total_bonus_days = await fetchone(
+        """
+        SELECT
+            COALESCE((SELECT SUM(invitee_bonus_days + inviter_bonus_days) FROM referral_rewards), 0) +
+            COALESCE((SELECT SUM(inviter_bonus_days) FROM referral_recurring_rewards), 0)
+        """
+    )
     return {
         "pending": int(pending[0]) if pending else 0,
-        "rewarded": int(rewarded[0]) if rewarded else 0,
+        "rewarded": (int(first_rewarded[0]) if first_rewarded else 0) + (int(recurring_rewarded[0]) if recurring_rewarded else 0),
         "recent": recent,
         "top": top,
+        "total_bonus_days": int(total_bonus_days[0]) if total_bonus_days else 0,
     }
 
 

@@ -558,6 +558,39 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first)
         self.assertFalse(second)
 
+    async def test_referral_summary_includes_recurring_inviter_bonus_days(self):
+        import database
+
+        await database.create_referral_reward_once(9501, 9500, "pay-first-9501", 3, 5)
+        await database.create_referral_recurring_reward_once(9501, 9500, "pay-rec-9501", 2)
+
+        inviter_summary = await database.get_referral_summary(9500)
+        invitee_summary = await database.get_referral_summary(9501)
+
+        self.assertEqual(inviter_summary["inviter_bonus_days"], 7)
+        self.assertEqual(inviter_summary["invitee_bonus_days"], 3)
+        self.assertEqual(inviter_summary["rewarded_count"], 1)
+        self.assertEqual(invitee_summary["inviter_bonus_days"], 5)
+        self.assertEqual(invitee_summary["invitee_bonus_days"], 3)
+
+    async def test_referral_admin_stats_include_recurring_rewards(self):
+        import database
+
+        await database.create_referral_reward_once(9601, 9600, "pay-first-9601", 3, 5)
+        await database.create_referral_recurring_reward_once(9601, 9600, "pay-rec-9601-a", 2)
+        await database.create_referral_recurring_reward_once(9601, 9600, "pay-rec-9601-b", 2)
+
+        stats = await database.get_referral_admin_stats(limit=5)
+
+        self.assertEqual(stats["rewarded"], 3)
+        self.assertEqual(stats["total_bonus_days"], 12)
+        self.assertEqual(stats["top"][0][0], 9600)
+        self.assertEqual(stats["top"][0][1], 3)
+        payment_ids = {row[2] for row in stats["recent"]}
+        self.assertIn("pay-first-9601", payment_ids)
+        self.assertIn("pay-rec-9601-a", payment_ids)
+        self.assertIn("pay-rec-9601-b", payment_ids)
+
     async def test_referral_recurring_second_30_day_purchase_gives_plus_2_days(self):
         import database
         import referrals

@@ -91,14 +91,15 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
                 self.currency = currency
 
         bot = DummyBot()
+        stars_7_amount = int(payments.get_tariffs()["sub_7"]["amount"])
         original_readiness = payments.checkout_readiness
         payments.checkout_readiness = lambda: asyncio.sleep(0, result=(True, ""))  # type: ignore[assignment]
         try:
-            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS + 1, "XTR"), bot)
+            await payments.pre_checkout(DummyQuery("sub_7", stars_7_amount + 1, "XTR"), bot)
             self.assertEqual(bot.calls[-1][1], False)
-            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "USD"), bot)
+            await payments.pre_checkout(DummyQuery("sub_7", stars_7_amount, "USD"), bot)
             self.assertEqual(bot.calls[-1][1], False)
-            await payments.pre_checkout(DummyQuery("sub_7", payments.STARS_PRICE_7_DAYS, "XTR"), bot)
+            await payments.pre_checkout(DummyQuery("sub_7", stars_7_amount, "XTR"), bot)
             self.assertEqual(bot.calls[-1][1], True)
         finally:
             payments.checkout_readiness = original_readiness
@@ -116,7 +117,7 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         class DummyQuery:
             id = "q-unknown"
             invoice_payload = "sub_999"
-            total_amount = payments.STARS_PRICE_7_DAYS
+            total_amount = payments.get_tariffs()["sub_7"]["amount"]
             currency = "XTR"
 
         bot = DummyBot()
@@ -136,7 +137,7 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         class DummyQuery:
             id = "q-degraded"
             invoice_payload = "sub_7"
-            total_amount = payments.STARS_PRICE_7_DAYS
+            total_amount = payments.get_tariffs()["sub_7"]["amount"]
             currency = "XTR"
 
         bot = DummyBot()
@@ -599,7 +600,7 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
             provider_payment_charge_id="prov_notify",
             user_id=555,
             payload="sub_7",
-            amount=payments.STARS_PRICE_7_DAYS,
+            amount=int(payments.get_tariffs()["sub_7"]["amount"]),
             currency="XTR",
             payment_method="stars",
             status="needs_repair",
@@ -917,54 +918,10 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
             referrals.apply_referral_rewards_on_first_payment = original_apply
         self.assertEqual(called["count"], 0)
 
-    async def test_admin_set_rate_is_disabled_in_personal_mvp(self):
+    async def test_personal_mvp_rate_commands_removed(self):
         import handlers_admin
-        import database
-
-        db = await database.open_db()
-        try:
-            await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (9100, '0', '2026-01-01T00:00:00')")
-            await db.execute(
-                """
-                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
-                VALUES (9100, 1, 'PUB9100=', '', '10.8.1.90', '2026-01-01T00:00:00', 'active')
-                """
-            )
-            await db.commit()
-        finally:
-            await db.close()
-
-        class DummyMessage:
-            from_user = type("U", (), {"id": 1})()
-            bot = object()
-            answers = []
-
-            async def answer(self, text, **kwargs):
-                self.answers.append(text)
-
-        msg = DummyMessage()
-        await handlers_admin.set_user_rate_limit_cmd(msg, type("C", (), {"args": "9100 55"})())  # type: ignore[arg-type]
-
-        row = await database.fetchone("SELECT rate_limit_mbit FROM keys WHERE user_id = 9100")
-        self.assertEqual(int(row[0] or 0), 0)
-        self.assertTrue(msg.answers)
-        self.assertIn("отключена в personal MVP", msg.answers[-1])
-
-    async def test_admin_rate_command_is_disabled_in_personal_mvp(self):
-        import handlers_admin
-
-        class DummyMessage:
-            from_user = type("U", (), {"id": 1})()
-            bot = object()
-            answers = []
-
-            async def answer(self, text, **kwargs):
-                self.answers.append(text)
-
-        msg = DummyMessage()
-        await handlers_admin.get_user_rate_limit_cmd(msg, type("C", (), {"args": "9200"})())  # type: ignore[arg-type]
-        self.assertTrue(msg.answers)
-        self.assertIn("отключена в personal MVP", msg.answers[-1])
+        self.assertFalse(hasattr(handlers_admin, "set_user_rate_limit_cmd"))
+        self.assertFalse(hasattr(handlers_admin, "get_user_rate_limit_cmd"))
 
     async def test_ref_stats_returns_global_summary(self):
         import handlers_admin

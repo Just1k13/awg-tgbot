@@ -90,6 +90,20 @@ PRICE_TARGETS = {
 }
 
 
+async def _set_purchase_maintenance(enabled: bool, actor_id: int) -> None:
+    await set_app_setting("MAINTENANCE_MODE", "1" if enabled else "0", updated_by=actor_id)
+
+
+async def _restore_maintenance_from_price_action(action: dict | None, actor_id: int) -> bool:
+    if not action:
+        return False
+    was_enabled = bool(action.get("maintenance_was_enabled", True))
+    now_enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
+    if now_enabled != was_enabled:
+        await _set_purchase_maintenance(was_enabled, actor_id)
+    return bool(action.get("maintenance_forced_by_price_edit"))
+
+
 def _render_admin_prices_text() -> str:
     return (
         "💸 <b>Цены</b>\n\n"
@@ -117,7 +131,6 @@ def _build_broadcast_preview(raw_text: str) -> str:
 
 
 def _build_redacted_backup_payload(db_path: str) -> tuple[bytes, str]:
-    from pathlib import Path
     import sqlite3
     import tempfile
 
@@ -779,8 +792,24 @@ async def admin_prices_start_edit(cb: types.CallbackQuery):
         return
     env_key, label = target
     current_value = int(getattr(config, env_key))
+    maintenance_was_enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
+    maintenance_forced_by_price_edit = False
+    if not maintenance_was_enabled:
+        await _set_purchase_maintenance(True, ADMIN_ID)
+        maintenance_forced_by_price_edit = True
     await clear_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
-    await set_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY, {"env_key": env_key, "label": label})
+    await set_pending_admin_action(
+        ADMIN_ID,
+        PRICE_INPUT_ACTION_KEY,
+        {
+            "env_key": env_key,
+            "label": label,
+            "maintenance_was_enabled": maintenance_was_enabled,
+            "maintenance_forced_by_price_edit": maintenance_forced_by_price_edit,
+        },
+    )
+    if maintenance_forced_by_price_edit:
+        await cb.message.answer("Покупки временно поставлены на паузу до завершения изменения цены.")
     await cb.message.answer(f"Введите новую цену для «{label}» в ⭐. Текущая: {current_value}⭐")
     await cb.answer()
 
@@ -797,11 +826,20 @@ async def admin_prices_capture_input(message: types.Message):
     env_key = str(action.get("env_key", ""))
     label = str(action.get("label", ""))
     old_value = int(getattr(config, env_key, 0))
+    maintenance_was_enabled = bool(action.get("maintenance_was_enabled", True))
+    maintenance_forced_by_price_edit = bool(action.get("maintenance_forced_by_price_edit"))
     await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
     await set_pending_admin_action(
         ADMIN_ID,
         PRICE_CONFIRM_ACTION_KEY,
-        {"env_key": env_key, "label": label, "old": old_value, "new": new_value},
+        {
+            "env_key": env_key,
+            "label": label,
+            "old": old_value,
+            "new": new_value,
+            "maintenance_was_enabled": maintenance_was_enabled,
+            "maintenance_forced_by_price_edit": maintenance_forced_by_price_edit,
+        },
     )
     await message.answer(
         (
@@ -826,6 +864,7 @@ async def admin_prices_save(cb: types.CallbackQuery):
     label = str(action.get("label", ""))
     new_value = int(action.get("new", 0))
     old_value, saved_value = set_stars_price(env_key, new_value)
+    purchases_resumed = await _restore_maintenance_from_price_action(action, ADMIN_ID)
     await write_audit_log(ADMIN_ID, "admin_price_updated", f"key={env_key}; old={old_value}; new={saved_value}")
     await cb.message.answer(
         (
@@ -833,6 +872,8 @@ async def admin_prices_save(cb: types.CallbackQuery):
             f"{old_value}⭐ → {saved_value}⭐"
         ),
     )
+    if purchases_resumed:
+        await cb.message.answer("Покупки снова доступны.")
     await cb.message.answer(
         _render_admin_prices_text(),
         parse_mode="HTML",
@@ -845,8 +886,14 @@ async def admin_prices_save(cb: types.CallbackQuery):
 async def admin_prices_cancel(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
-    await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
-    await clear_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
+    action = await pop_pending_admin_action(ADMIN_ID, PRICE_CONFIRM_ACTION_KEY)
+    if not action:
+        action = await pop_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
+    else:
+        await clear_pending_admin_action(ADMIN_ID, PRICE_INPUT_ACTION_KEY)
+    purchases_resumed = await _restore_maintenance_from_price_action(action, ADMIN_ID)
+    if purchases_resumed:
+        await cb.message.answer("Покупки снова доступны.")
     await cb.message.answer(
         _render_admin_prices_text(),
         parse_mode="HTML",
@@ -1519,16 +1566,6 @@ async def promo_disable_cmd(message: types.Message, command: CommandObject):
         await message.answer("❌ Не удалось отключить промокод.")
 
 
-@router.message(Command("set_rate"), IsAdmin())
-async def set_user_rate_limit_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ /set_rate отключена в personal MVP.")
-
-
-@router.message(Command("rate"), IsAdmin())
-async def get_user_rate_limit_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ /rate отключена в personal MVP.")
-
-
 @router.message(Command("revoke"), IsAdmin())
 async def revoke_user_cmd(message: types.Message, command: CommandObject):
     if not command.args:
@@ -1757,41 +1794,6 @@ async def maintenance_off_cmd(message: types.Message):
     await set_app_setting("MAINTENANCE_MODE", "0", updated_by=message.from_user.id)
     await write_audit_log(message.from_user.id, "maintenance_disabled", "purchase_flow=active")
     await message.answer("🟢 Maintenance выключен: новые покупки снова доступны.")
-
-
-@router.message(Command("text_list"), IsAdmin())
-async def text_list_cmd(message: types.Message):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("text_get"), IsAdmin())
-async def text_get_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("text_set"), IsAdmin())
-async def text_set_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("text_reset"), IsAdmin())
-async def text_reset_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("setting_list"), IsAdmin())
-async def setting_list_cmd(message: types.Message):
-    await message.answer("⚠️ Settings editor отключён в personal MVP.")
-
-
-@router.message(Command("setting_get"), IsAdmin())
-async def setting_get_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Settings editor отключён в personal MVP.")
-
-
-@router.message(Command("setting_set"), IsAdmin())
-async def setting_set_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Settings editor отключён в personal MVP.")
 
 
 @router.message(Command("ref_stats"), IsAdmin())

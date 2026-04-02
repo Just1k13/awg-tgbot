@@ -48,6 +48,7 @@ class AdminPricesFlowTests(unittest.IsolatedAsyncioTestCase):
             (CB_ADMIN_PRICE_EDIT_30, "STARS_PRICE_30_DAYS"),
             (CB_ADMIN_PRICE_EDIT_90, "STARS_PRICE_90_DAYS"),
         ):
+            await database.set_app_setting("MAINTENANCE_MODE", "0")
             answers = []
 
             class DummyMessage:
@@ -65,7 +66,37 @@ class AdminPricesFlowTests(unittest.IsolatedAsyncioTestCase):
             await handlers_admin.admin_prices_start_edit(DummyCb())
             action = await database.get_pending_admin_action(1, handlers_admin.PRICE_INPUT_ACTION_KEY)
             self.assertEqual(action["env_key"], expected_key)
+            self.assertFalse(action["maintenance_was_enabled"])
+            self.assertTrue(action["maintenance_forced_by_price_edit"])
             self.assertTrue(answers)
+
+    async def test_start_edit_enables_maintenance_and_remembers_previous_state(self):
+        import database
+        import handlers_admin
+        import content_settings
+        from ui_constants import CB_ADMIN_PRICE_EDIT_7
+
+        await database.set_app_setting("MAINTENANCE_MODE", "0")
+        answers = []
+
+        class DummyMessage:
+            async def answer(self, text, **kwargs):
+                answers.append(text)
+
+        class DummyCb:
+            from_user = SimpleNamespace(id=1)
+            message = DummyMessage()
+            data = CB_ADMIN_PRICE_EDIT_7
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+        await handlers_admin.admin_prices_start_edit(DummyCb())
+        action = await database.get_pending_admin_action(1, handlers_admin.PRICE_INPUT_ACTION_KEY)
+        self.assertFalse(action["maintenance_was_enabled"])
+        self.assertTrue(action["maintenance_forced_by_price_edit"])
+        self.assertEqual(await content_settings.get_setting("MAINTENANCE_MODE", int), 1)
+        self.assertTrue(any("временно поставлены на паузу" in text for text in answers))
 
     async def test_invalid_input_rejected(self):
         import database
@@ -116,12 +147,21 @@ class AdminPricesFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_confirm_saves_new_value(self):
         import database
         import handlers_admin
+        import content_settings
         from ui_constants import CB_ADMIN_PRICE_SAVE
 
+        await database.set_app_setting("MAINTENANCE_MODE", "1")
         await database.set_pending_admin_action(
             1,
             handlers_admin.PRICE_CONFIRM_ACTION_KEY,
-            {"env_key": "STARS_PRICE_30_DAYS", "label": "30 дней", "old": 50, "new": 88},
+            {
+                "env_key": "STARS_PRICE_30_DAYS",
+                "label": "30 дней",
+                "old": 50,
+                "new": 88,
+                "maintenance_was_enabled": False,
+                "maintenance_forced_by_price_edit": True,
+            },
         )
         captured = {}
         original_set = handlers_admin.set_stars_price
@@ -145,24 +185,37 @@ class AdminPricesFlowTests(unittest.IsolatedAsyncioTestCase):
         finally:
             handlers_admin.set_stars_price = original_set
         self.assertEqual(captured["pair"], (50, 88))
+        self.assertEqual(await content_settings.get_setting("MAINTENANCE_MODE", int), 0)
+        self.assertTrue(any("Покупки снова доступны." in text for text in answers))
         self.assertTrue(any("50⭐ → 88⭐" in text for text in answers))
 
     async def test_cancel_does_not_save(self):
         import database
         import handlers_admin
+        import content_settings
         from ui_constants import CB_ADMIN_PRICE_CANCEL
 
+        await database.set_app_setting("MAINTENANCE_MODE", "1")
         await database.set_pending_admin_action(
             1,
             handlers_admin.PRICE_CONFIRM_ACTION_KEY,
-            {"env_key": "STARS_PRICE_90_DAYS", "label": "90 дней", "old": 140, "new": 190},
+            {
+                "env_key": "STARS_PRICE_90_DAYS",
+                "label": "90 дней",
+                "old": 140,
+                "new": 190,
+                "maintenance_was_enabled": False,
+                "maintenance_forced_by_price_edit": True,
+            },
         )
+        answers = []
         calls = {"count": 0}
         original_set = handlers_admin.set_stars_price
         handlers_admin.set_stars_price = lambda key, value: calls.update(count=calls["count"] + 1)
 
         class DummyMessage:
-            async def answer(self, _text, **_kwargs):
+            async def answer(self, text, **_kwargs):
+                answers.append(text)
                 return None
 
         class DummyCb:
@@ -178,8 +231,74 @@ class AdminPricesFlowTests(unittest.IsolatedAsyncioTestCase):
         finally:
             handlers_admin.set_stars_price = original_set
         self.assertEqual(calls["count"], 0)
+        self.assertEqual(await content_settings.get_setting("MAINTENANCE_MODE", int), 0)
+        self.assertTrue(any("Покупки снова доступны." in text for text in answers))
         action = await database.get_pending_admin_action(1, handlers_admin.PRICE_CONFIRM_ACTION_KEY)
         self.assertIsNone(action)
+
+    async def test_save_and_cancel_keep_existing_maintenance_enabled(self):
+        import database
+        import handlers_admin
+        import content_settings
+        from ui_constants import CB_ADMIN_PRICE_CANCEL, CB_ADMIN_PRICE_SAVE
+
+        await database.set_app_setting("MAINTENANCE_MODE", "1")
+        await database.set_pending_admin_action(
+            1,
+            handlers_admin.PRICE_CONFIRM_ACTION_KEY,
+            {
+                "env_key": "STARS_PRICE_7_DAYS",
+                "label": "7 дней",
+                "old": 21,
+                "new": 22,
+                "maintenance_was_enabled": True,
+                "maintenance_forced_by_price_edit": False,
+            },
+        )
+
+        class DummyMessage:
+            async def answer(self, _text, **_kwargs):
+                return None
+
+        class SaveCb:
+            from_user = SimpleNamespace(id=1)
+            data = CB_ADMIN_PRICE_SAVE
+            message = DummyMessage()
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+        original_set = handlers_admin.set_stars_price
+        handlers_admin.set_stars_price = lambda key, value: (21, value)
+        try:
+            await handlers_admin.admin_prices_save(SaveCb())
+        finally:
+            handlers_admin.set_stars_price = original_set
+        self.assertEqual(await content_settings.get_setting("MAINTENANCE_MODE", int), 1)
+
+        await database.set_pending_admin_action(
+            1,
+            handlers_admin.PRICE_CONFIRM_ACTION_KEY,
+            {
+                "env_key": "STARS_PRICE_7_DAYS",
+                "label": "7 дней",
+                "old": 21,
+                "new": 23,
+                "maintenance_was_enabled": True,
+                "maintenance_forced_by_price_edit": False,
+            },
+        )
+
+        class CancelCb:
+            from_user = SimpleNamespace(id=1)
+            data = CB_ADMIN_PRICE_CANCEL
+            message = DummyMessage()
+
+            async def answer(self, *_args, **_kwargs):
+                return None
+
+        await handlers_admin.admin_prices_cancel(CancelCb())
+        self.assertEqual(await content_settings.get_setting("MAINTENANCE_MODE", int), 1)
 
     async def test_non_admin_cannot_access_price_flow(self):
         import database

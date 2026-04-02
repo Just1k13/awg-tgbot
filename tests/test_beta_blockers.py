@@ -446,6 +446,42 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         queued = await database.fetchone("SELECT COUNT(*) FROM broadcast_jobs WHERE status='queued'")
         self.assertEqual(queued[0], 1)
 
+    async def test_broadcast_pending_input_filter_matches_only_in_interactive_mode(self):
+        import handlers_admin
+        import database
+
+        class FakeMessage:
+            def __init__(self, uid: int):
+                self.from_user = type("u", (), {"id": uid})()
+
+        flt = handlers_admin.HasPendingBroadcastInput()
+        self.assertFalse(await flt(FakeMessage(1)))
+
+        await database.set_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY, {"action": "broadcast_input"})
+        self.assertTrue(await flt(FakeMessage(1)))
+
+    async def test_broadcast_capture_ignores_slash_commands(self):
+        import handlers_admin
+        import database
+
+        await database.set_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY, {"action": "broadcast_input"})
+
+        class FakeInputMessage:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 1})()
+                self.text = "/help"
+                self.calls = []
+
+            async def answer(self, text, **kwargs):
+                self.calls.append((text, kwargs))
+
+        msg = FakeInputMessage()
+        await handlers_admin.broadcast_capture_text(msg)  # type: ignore[arg-type]
+
+        self.assertEqual(msg.calls, [])
+        self.assertIsNone(await database.get_pending_broadcast(1))
+        self.assertIsNotNone(await database.get_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY))
+
     async def test_broadcast_cancel_clears_interactive_state(self):
         import handlers_admin
         import database

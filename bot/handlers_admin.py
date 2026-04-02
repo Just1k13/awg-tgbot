@@ -208,6 +208,12 @@ class IsAdmin(BaseFilter):
         return bool(message.from_user and message.from_user.id == ADMIN_ID)
 
 
+class HasPendingBroadcastInput(BaseFilter):
+    async def __call__(self, message: types.Message) -> bool:
+        pending_action = await get_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY)
+        return bool(pending_action)
+
+
 async def notify_user_subscription_granted(bot: Bot, user_id: int, days: int, new_until) -> bool:
     try:
         await bot.send_message(
@@ -1235,11 +1241,8 @@ async def broadcast_cancel(cb: types.CallbackQuery):
     await cb.answer("Отменено")
 
 
-@router.message(IsAdmin(), F.text)
+@router.message(IsAdmin(), F.text, ~F.text.startswith("/"), HasPendingBroadcastInput())
 async def broadcast_capture_text(message: types.Message):
-    pending_action = await get_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY)
-    if not pending_action:
-        return
     if message.text.startswith("/"):
         return
     text = message.text.strip()

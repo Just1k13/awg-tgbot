@@ -343,6 +343,19 @@ async def init_db() -> None:
         )
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS referral_recurring_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invitee_user_id INTEGER NOT NULL,
+                inviter_user_id INTEGER NOT NULL,
+                payment_id TEXT NOT NULL UNIQUE,
+                inviter_bonus_days INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'applied',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS promo_codes (
                 code TEXT PRIMARY KEY,
                 bonus_days INTEGER NOT NULL,
@@ -381,6 +394,8 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_inviter ON referral_rewards(inviter_user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_rewards_invitee ON referral_rewards(invitee_user_id, created_at)")
         await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_reward_once_per_invitee ON referral_rewards(invitee_user_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_recurring_inviter ON referral_recurring_rewards(inviter_user_id, created_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_referral_recurring_invitee ON referral_recurring_rewards(invitee_user_id, created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_codes_created_at ON promo_codes(created_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_promo_activations_user ON promo_activations(user_id, activated_at DESC)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_broadcast_jobs_status ON broadcast_jobs(status, created_at)")
@@ -1183,6 +1198,14 @@ async def user_has_paid_subscription(user_id: int) -> bool:
     return bool(row)
 
 
+async def count_user_applied_payments(user_id: int) -> int:
+    row = await fetchone(
+        "SELECT COUNT(*) FROM payments WHERE user_id = ? AND status = 'applied'",
+        (user_id,),
+    )
+    return int(row[0]) if row else 0
+
+
 async def create_referral_reward_once(
     invitee_user_id: int,
     inviter_user_id: int,
@@ -1199,6 +1222,36 @@ async def create_referral_reward_once(
             ) VALUES (?, ?, ?, ?, ?, 'applied', ?)
             """,
             (invitee_user_id, inviter_user_id, payment_id, invitee_bonus_days, inviter_bonus_days, utc_now_naive().isoformat()),
+        )
+        await db.commit()
+        return (cur.rowcount or 0) == 1
+    finally:
+        await db.close()
+
+
+async def has_referral_first_reward(invitee_user_id: int) -> bool:
+    row = await fetchone(
+        "SELECT 1 FROM referral_rewards WHERE invitee_user_id = ? LIMIT 1",
+        (invitee_user_id,),
+    )
+    return bool(row)
+
+
+async def create_referral_recurring_reward_once(
+    invitee_user_id: int,
+    inviter_user_id: int,
+    payment_id: str,
+    inviter_bonus_days: int,
+) -> bool:
+    db = await open_db()
+    try:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO referral_recurring_rewards (
+                invitee_user_id, inviter_user_id, payment_id, inviter_bonus_days, status, created_at
+            ) VALUES (?, ?, ?, ?, 'applied', ?)
+            """,
+            (invitee_user_id, inviter_user_id, payment_id, inviter_bonus_days, utc_now_naive().isoformat()),
         )
         await db.commit()
         return (cur.rowcount or 0) == 1

@@ -558,6 +558,108 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first)
         self.assertFalse(second)
 
+    async def test_recurring_referral_reward_on_second_30_day_payment(self):
+        import database
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(3100)
+        await referrals.capture_referral_start(3101, f"ref_{code}")
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            first_reward = await referrals.apply_referral_rewards_on_first_payment(3101, "pay-first")
+            self.assertTrue(first_reward)
+            await database.save_payment("pay-first", "prov-first", 3101, "sub_30", 1000, "XTR", "stars", "applied", "{}")
+            await database.save_payment("pay-second", "prov-second", 3101, "sub_30", 1000, "XTR", "stars", "applied", "{}")
+            recurring = await referrals.apply_recurring_inviter_reward(3101, "pay-second", 30)
+        finally:
+            referrals.issue_subscription = original_issue
+
+        self.assertTrue(recurring)
+        recurring_row = await database.fetchone(
+            "SELECT inviter_bonus_days FROM referral_recurring_rewards WHERE payment_id = ?",
+            ("pay-second",),
+        )
+        self.assertEqual(recurring_row[0], 1)
+        audit_row = await database.fetchone(
+            "SELECT action FROM audit_log WHERE user_id = ? AND action = ? ORDER BY created_at DESC LIMIT 1",
+            (3101, "referral_recurring_inviter_reward_applied"),
+        )
+        self.assertIsNotNone(audit_row)
+
+    async def test_recurring_referral_reward_not_applied_for_7_day_repeat(self):
+        import database
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(3200)
+        await referrals.capture_referral_start(3201, f"ref_{code}")
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            await referrals.apply_referral_rewards_on_first_payment(3201, "pay-first-7")
+            await database.save_payment("pay-first-7", "prov-first-7", 3201, "sub_30", 1000, "XTR", "stars", "applied", "{}")
+            await database.save_payment("pay-second-7", "prov-second-7", 3201, "sub_7", 100, "XTR", "stars", "applied", "{}")
+            recurring = await referrals.apply_recurring_inviter_reward(3201, "pay-second-7", 7)
+        finally:
+            referrals.issue_subscription = original_issue
+        self.assertFalse(recurring)
+
+    async def test_recurring_referral_reward_is_idempotent_by_payment_id(self):
+        import database
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(3300)
+        await referrals.capture_referral_start(3301, f"ref_{code}")
+
+        calls = {"count": 0}
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            calls["count"] += 1
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            await referrals.apply_referral_rewards_on_first_payment(3301, "pay-first-idem")
+            await database.save_payment("pay-first-idem", "prov-first-idem", 3301, "sub_30", 1000, "XTR", "stars", "applied", "{}")
+            await database.save_payment("pay-repeat-idem", "prov-repeat-idem", 3301, "sub_30", 1000, "XTR", "stars", "applied", "{}")
+            first = await referrals.apply_recurring_inviter_reward(3301, "pay-repeat-idem", 30)
+            second = await referrals.apply_recurring_inviter_reward(3301, "pay-repeat-idem", 30)
+        finally:
+            referrals.issue_subscription = original_issue
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(calls["count"], 3)
+
+    async def test_recurring_referral_reward_requires_attribution(self):
+        import database
+        import referrals
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            await database.save_payment("pay-no-ref-1", "prov-no-ref-1", 3401, "sub_30", 1000, "XTR", "stars", "applied", "{}")
+            await database.save_payment("pay-no-ref-2", "prov-no-ref-2", 3401, "sub_30", 1000, "XTR", "stars", "applied", "{}")
+            recurring = await referrals.apply_recurring_inviter_reward(3401, "pay-no-ref-2", 30)
+        finally:
+            referrals.issue_subscription = original_issue
+        self.assertFalse(recurring)
+
     async def test_inviter_gets_notification_after_referral_reward(self):
         import referrals
 

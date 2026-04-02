@@ -7,12 +7,15 @@ from awg_backend import issue_subscription
 from config import logger
 from content_settings import get_setting
 from database import (
+    count_user_applied_payments,
     create_referral_reward_once,
+    create_referral_recurring_reward_once,
     ensure_referral_code,
     get_referral_attribution,
     get_referral_code,
     get_referral_summary,
     get_user_id_by_referral_code,
+    has_referral_first_reward,
     set_referral_attribution,
     user_has_paid_subscription,
     get_user_meta,
@@ -108,6 +111,70 @@ async def notify_inviter_about_referral_reward(bot: Any, invitee_user_id: int) -
         return True
     except Exception as error:
         logger.warning("Не удалось отправить уведомление о реферальном бонусе inviter=%s: %s", inviter_user_id, error)
+        return False
+
+
+async def apply_recurring_inviter_reward(
+    invitee_user_id: int,
+    payment_id: str,
+    purchased_days: int,
+) -> bool:
+    if int(await get_setting("REFERRAL_ENABLED", int) or 0) != 1:
+        return False
+    if purchased_days < 30:
+        return False
+    attribution = await get_referral_attribution(invitee_user_id)
+    if not attribution:
+        return False
+    if not await has_referral_first_reward(invitee_user_id):
+        return False
+    applied_payments = await count_user_applied_payments(invitee_user_id)
+    if applied_payments < 2:
+        return False
+    inviter_user_id, code = attribution
+    inviter_days = 1
+    created = await create_referral_recurring_reward_once(
+        invitee_user_id=invitee_user_id,
+        inviter_user_id=inviter_user_id,
+        payment_id=payment_id,
+        inviter_bonus_days=inviter_days,
+    )
+    if not created:
+        return False
+    await issue_subscription(inviter_user_id, inviter_days, silent=True, operation_id=f"ref-recurring-inviter-{payment_id}")
+    await write_audit_log(
+        invitee_user_id,
+        "referral_recurring_inviter_reward_applied",
+        f"inviter={inviter_user_id}; code={code}; inviter_days={inviter_days}; payment_id={payment_id}; purchased_days={purchased_days}",
+    )
+    logger.info(
+        "Recurring referral inviter reward applied for payment=%s invitee=%s inviter=%s",
+        payment_id,
+        invitee_user_id,
+        inviter_user_id,
+    )
+    return True
+
+
+async def notify_inviter_about_recurring_referral_reward(bot: Any, invitee_user_id: int) -> bool:
+    if bot is None:
+        return False
+    attribution = await get_referral_attribution(invitee_user_id)
+    if not attribution:
+        return False
+    inviter_user_id, _code = attribution
+    invitee_username, _invitee_first_name = await get_user_meta(invitee_user_id)
+    invitee_mention = _format_tg_mention(invitee_username, invitee_user_id)
+    text = (
+        "🎁 <b>Дополнительный реферальный бонус</b>\n\n"
+        f"За повторную покупку пользователя {invitee_mention} "
+        f"(ID: <code>{invitee_user_id}</code>) вам начислен <b>+1 дн.</b>"
+    )
+    try:
+        await bot.send_message(inviter_user_id, text, parse_mode="HTML")
+        return True
+    except Exception as error:
+        logger.warning("Не удалось отправить уведомление о recurring-реферальном бонусе inviter=%s: %s", inviter_user_id, error)
         return False
 
 

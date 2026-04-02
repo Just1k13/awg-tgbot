@@ -47,7 +47,12 @@ from database import (
 from helpers import utc_now_naive
 from keyboards import get_post_payment_kb
 from content_settings import get_text
-from referrals import apply_referral_rewards_on_first_payment, notify_inviter_about_referral_reward
+from referrals import (
+    apply_recurring_inviter_reward,
+    apply_referral_rewards_on_first_payment,
+    notify_inviter_about_recurring_referral_reward,
+    notify_inviter_about_referral_reward,
+)
 from texts import get_payment_result_text
 from ui_constants import CB_BUY_30, CB_BUY_7
 from maintenance import get_purchase_maintenance_text, is_purchase_maintenance_enabled
@@ -364,6 +369,9 @@ async def process_payment_provisioning(payment_id: str, user_id: int, payload: s
         rewarded = await apply_referral_rewards_on_first_payment(user_id, payment_id)
         if rewarded:
             await notify_inviter_about_referral_reward(bot, user_id)
+        recurring_rewarded = await apply_recurring_inviter_reward(user_id, payment_id, days)
+        if recurring_rewarded:
+            await notify_inviter_about_recurring_referral_reward(bot, user_id)
         return True
     except Exception as e:
         retry_at = (utc_now_naive() + timedelta(seconds=PAYMENT_RETRY_DELAY_SECONDS)).isoformat()

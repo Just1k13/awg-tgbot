@@ -38,11 +38,14 @@ from device_activity import render_device_activity_line
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active, utc_now_naive
 from keyboards import (
     get_buy_inline_kb,
+    get_configs_empty_kb,
     get_config_result_kb,
     get_configs_devices_kb,
     get_instruction_inline_kb,
     get_main_menu,
     get_profile_inline_kb,
+    get_support_back_kb,
+    get_support_center_kb,
     get_user_reissue_confirm_kb,
 )
 from texts import (
@@ -62,8 +65,14 @@ from ui_constants import (
     CB_CONFIG_CONF_PREFIX,
     CB_CONFIG_DEVICE_PREFIX,
     CB_OPEN_CONFIGS,
+    CB_OPEN_SUPPORT,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
+    CB_SUPPORT_BACK,
+    CB_SUPPORT_CONNECTION,
+    CB_SUPPORT_PAYMENT,
+    CB_SUPPORT_TERMS,
+    CB_USER_REISSUE_DEVICE_PREFIX,
     CB_USER_REISSUE_CANCEL,
     CB_USER_REISSUE_CONFIRM,
 )
@@ -202,7 +211,7 @@ async def _send_configs_menu(target, user: types.User):
         await target.answer(
             await get_text("configs_empty"),
             parse_mode="HTML",
-            reply_markup=get_instruction_inline_kb(),
+            reply_markup=get_configs_empty_kb(),
         )
         return
 
@@ -216,6 +225,66 @@ async def _send_configs_menu(target, user: types.User):
 async def _find_user_config_by_key_id(user_id: int, key_id: int):
     configs = await get_user_keys(user_id)
     return next((item for item in configs if item[0] == key_id), None)
+
+
+def _terms_text() -> str:
+    return (
+        "📄 <b>Краткие условия</b>\n\n"
+        "• Сервис выдаёт доступ AmneziaWG для личного использования (single-server MVP).\n"
+        "• Оплата даёт доступ на 7 / 30 / 90 дней.\n"
+        "• После успешной оплаты выдаётся цифровой доступ (vpn:// и .conf).\n"
+        "• По вопросам поддержки и возвратов: через раздел помощи."
+    )
+
+
+def _payment_support_text() -> str:
+    return (
+        "💳 <b>Поддержка по оплате</b>\n\n"
+        "По вопросам оплаты и активации после оплаты напишите в поддержку и укажите ваш "
+        "<code>user_id</code> из профиля."
+    )
+
+
+async def _send_support_center(target) -> None:
+    await target.answer(
+        f"{await get_support_full_text()}\n\nВыберите, с чем нужна помощь:",
+        parse_mode="HTML",
+        reply_markup=get_support_center_kb(),
+    )
+
+
+async def _start_user_reissue_flow(target, user: types.User, *, key_id: int | None = None) -> None:
+    sub_until = await get_user_subscription(user.id)
+    if not subscription_is_active(sub_until):
+        await target.answer("Сейчас активной подписки нет. Сначала оформите или продлите доступ.")
+        return
+    configs = await get_user_keys(user.id)
+    if not configs:
+        await target.answer(
+            "Не найден активный конфиг для перевыпуска. Откройте «🔑 Подключение» или напишите в поддержку.",
+            reply_markup=get_support_back_kb(),
+        )
+        return
+    selected = configs[0]
+    if key_id is not None:
+        selected = next((item for item in configs if item[0] == key_id), configs[0])
+    _, device_num, _, _ = selected
+    await clear_pending_admin_action(user.id, "user_reissue_device")
+    await set_pending_admin_action(
+        user.id,
+        "user_reissue_device",
+        {"action": "user_reissue_device", "device_num": int(device_num)},
+    )
+    await target.answer(
+        (
+            "⚠️ <b>Перевыпуск доступа</b>\n\n"
+            "Текущий конфиг устройства будет отключён.\n"
+            "Старый vpn:// и .conf перестанут работать.\n\n"
+            "Продолжить перевыпуск?"
+        ),
+        parse_mode="HTML",
+        reply_markup=get_user_reissue_confirm_kb(),
+    )
 
 
 def _help_clients_kb() -> types.InlineKeyboardMarkup:
@@ -276,28 +345,12 @@ async def support_cmd(message: types.Message):
 
 @router.message(Command("paysupport"))
 async def paysupport_cmd(message: types.Message):
-    await message.answer(
-        (
-            "💳 <b>Поддержка по оплате</b>\n\n"
-            "По вопросам оплаты и активации после оплаты напишите в поддержку через <code>/support</code> "
-            "и укажите ваш <code>user_id</code> из профиля."
-        ),
-        parse_mode="HTML",
-    )
+    await message.answer(_payment_support_text(), parse_mode="HTML")
 
 
 @router.message(Command("terms"))
 async def terms_cmd(message: types.Message):
-    await message.answer(
-        (
-            "📄 <b>Краткие условия</b>\n\n"
-            "• Сервис выдаёт доступ AmneziaWG для личного использования (single-server MVP).\n"
-            "• Оплата даёт доступ на 7 / 30 / 90 дней.\n"
-            "• После успешной оплаты выдаётся цифровой доступ (vpn:// и .conf).\n"
-            "• По вопросам поддержки и возвратов: через <code>/support</code>."
-        ),
-        parse_mode="HTML",
-    )
+    await message.answer(_terms_text(), parse_mode="HTML")
 
 
 @router.message(Command("promo"))
@@ -425,7 +478,7 @@ async def show_selected_device_config(cb: types.CallbackQuery):
     else:
         await cb.message.answer(
             await get_text("config_vpn_missing"),
-            reply_markup=get_instruction_inline_kb(),
+            reply_markup=get_configs_empty_kb(),
         )
 
 
@@ -463,7 +516,7 @@ async def send_selected_device_conf(cb: types.CallbackQuery):
     else:
         await cb.message.answer(
             await get_text("config_conf_missing"),
-            reply_markup=get_instruction_inline_kb(),
+            reply_markup=get_configs_empty_kb(),
         )
 
 
@@ -489,37 +542,26 @@ async def support(message: types.Message):
     support_username = get_support_username()
     if not support_username:
         logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
-    await message.answer(await get_support_full_text(), parse_mode="HTML")
+    await _send_support_center(message)
 
 
 @router.message(Command("resetdevice"))
 async def reset_device_cmd(message: types.Message):
     await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    sub_until = await get_user_subscription(message.from_user.id)
-    if not subscription_is_active(sub_until):
-        await message.answer("Сейчас активной подписки нет. Сначала оформите или продлите доступ.")
-        return
-    configs = await get_user_keys(message.from_user.id)
-    if not configs:
-        await message.answer("Не найден активный конфиг для перевыпуска. Откройте «🔑 Подключение» или напишите в поддержку.")
-        return
-    _, device_num, _, _ = configs[0]
-    await clear_pending_admin_action(message.from_user.id, "user_reissue_device")
-    await set_pending_admin_action(
-        message.from_user.id,
-        "user_reissue_device",
-        {"action": "user_reissue_device", "device_num": int(device_num)},
-    )
-    await message.answer(
-        (
-            "⚠️ <b>Перевыпуск доступа</b>\n\n"
-            "Текущий конфиг устройства будет отключён.\n"
-            "Старый vpn:// и .conf перестанут работать.\n\n"
-            "Продолжить перевыпуск?"
-        ),
-        parse_mode="HTML",
-        reply_markup=get_user_reissue_confirm_kb(),
-    )
+    await _start_user_reissue_flow(message, message.from_user)
+
+
+@router.callback_query(F.data.startswith(CB_USER_REISSUE_DEVICE_PREFIX))
+async def user_reissue_from_button(cb: types.CallbackQuery):
+    await cb.answer()
+    key_id: int | None = None
+    if cb.data != f"{CB_USER_REISSUE_DEVICE_PREFIX}0":
+        try:
+            key_id = int(cb.data.removeprefix(CB_USER_REISSUE_DEVICE_PREFIX))
+        except ValueError:
+            key_id = None
+    if cb.message:
+        await _start_user_reissue_flow(cb.message, cb.from_user, key_id=key_id)
 
 
 @router.callback_query(F.data == CB_USER_REISSUE_CANCEL)
@@ -549,7 +591,10 @@ async def user_reissue_confirm(cb: types.CallbackQuery):
         await clear_pending_admin_action(cb.from_user.id, "user_reissue_device")
         if result.get("status") != "reissued":
             if cb.message:
-                await cb.message.answer("Не удалось перевыпустить устройство. Попробуйте позже или напишите в поддержку.")
+                await cb.message.answer(
+                    "Не удалось перевыпустить устройство. Попробуйте позже или напишите в поддержку.",
+                    reply_markup=get_support_back_kb(),
+                )
             return
         await write_audit_log(cb.from_user.id, "user_reissue_device", f"device_num={device_num}")
         if cb.message:
@@ -558,7 +603,7 @@ async def user_reissue_confirm(cb: types.CallbackQuery):
     except Exception as error:
         logger.exception("Ошибка user_reissue_confirm: %s", error)
         if cb.message:
-            await cb.message.answer("❌ Ошибка перевыпуска. Попробуйте позже или напишите в поддержку.")
+            await cb.message.answer("❌ Ошибка перевыпуска. Попробуйте позже или напишите в поддержку.", reply_markup=get_support_back_kb())
 
 
 @router.callback_query(F.data == CB_CHECK_ACTIVATION_STATUS)
@@ -577,8 +622,52 @@ async def check_activation_status(cb: types.CallbackQuery):
     await cb.message.answer(
         f"{await get_activation_status_text(status, has_config=has_config)}\n\n{await get_support_short_text()}",
         parse_mode="HTML",
-        reply_markup=get_profile_inline_kb(subscription_active=is_active),
+        reply_markup=get_support_back_kb() if status in {"needs_repair", "stuck_manual", "failed"} else get_profile_inline_kb(subscription_active=is_active),
     )
+
+
+@router.callback_query(F.data == CB_OPEN_SUPPORT)
+async def open_support_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    if cb.message:
+        await _send_support_center(cb.message)
+
+
+@router.callback_query(F.data == CB_SUPPORT_PAYMENT)
+async def support_payment_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    if cb.message:
+        await cb.message.answer(_payment_support_text(), parse_mode="HTML", reply_markup=get_support_back_kb())
+
+
+@router.callback_query(F.data == CB_SUPPORT_CONNECTION)
+async def support_connection_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    if cb.message:
+        await cb.message.answer(
+            f"{await get_instruction_with_policy_text()}\n\n{await get_support_short_text()}",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=get_support_back_kb(),
+        )
+
+
+@router.callback_query(F.data == CB_SUPPORT_TERMS)
+async def support_terms_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    if cb.message:
+        await cb.message.answer(_terms_text(), parse_mode="HTML", reply_markup=get_support_back_kb())
+
+
+@router.callback_query(F.data == CB_SUPPORT_BACK)
+async def support_back_callback(cb: types.CallbackQuery):
+    await cb.answer()
+    if cb.message:
+        sub_until = await get_user_subscription(cb.from_user.id)
+        await cb.message.answer(
+            "⬅️ Возврат в основное меню помощи.\nОткройте «👤 Профиль» или «🔑 Подключение» для нужного действия.",
+            reply_markup=get_profile_inline_kb(subscription_active=subscription_is_active(sub_until)),
+        )
 
 
 @router.message(F.text == BTN_BUY)

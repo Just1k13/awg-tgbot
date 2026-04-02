@@ -8,7 +8,9 @@ from ui_constants import (
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM, CB_BUY_30, CB_BUY_7, CB_BUY_90,
     CB_CHECK_ACTIVATION_STATUS,
     CB_CONFIG_CONF_PREFIX, CB_CONFIG_DEVICE_PREFIX, CB_OPEN_CONFIGS,
+    CB_OPEN_SUPPORT,
     CB_SHOW_BUY_MENU, CB_SHOW_INSTRUCTION, CB_USER_REISSUE_CANCEL, CB_USER_REISSUE_CONFIRM,
+    CB_SUPPORT_BACK, CB_SUPPORT_CONNECTION, CB_SUPPORT_PAYMENT, CB_SUPPORT_TERMS, CB_USER_REISSUE_DEVICE_PREFIX,
 )
 
 
@@ -45,6 +47,8 @@ def get_profile_inline_kb(subscription_active: bool) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text="💳 Оплатить доступ", callback_data=CB_SHOW_BUY_MENU)])
     rows.append([InlineKeyboardButton(text="🔑 Подключение", callback_data=CB_OPEN_CONFIGS)])
     rows.append([InlineKeyboardButton(text="⏱ Статус активации", callback_data=CB_CHECK_ACTIVATION_STATUS)])
+    rows.append([InlineKeyboardButton(text="♻️ Перевыпустить устройство", callback_data=f"{CB_USER_REISSUE_DEVICE_PREFIX}0")])
+    rows.append([InlineKeyboardButton(text="🆘 Помощь и поддержка", callback_data=CB_OPEN_SUPPORT)])
     rows.append([InlineKeyboardButton(text="📖 Как подключиться", callback_data=CB_SHOW_INSTRUCTION)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -74,7 +78,9 @@ def get_config_result_kb(key_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📄 Выдать .conf файл (для опытных)", callback_data=f"{CB_CONFIG_CONF_PREFIX}{key_id}")],
+            [InlineKeyboardButton(text="♻️ Перевыпустить это устройство", callback_data=f"{CB_USER_REISSUE_DEVICE_PREFIX}{key_id}")],
             [InlineKeyboardButton(text="⬅️ Назад к устройствам", callback_data=CB_OPEN_CONFIGS)],
+            [InlineKeyboardButton(text="🆘 Помощь и поддержка", callback_data=CB_OPEN_SUPPORT)],
             _guide_row(),
         ]
     )
@@ -85,7 +91,36 @@ def get_post_payment_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🔑 Получить подключение", callback_data=CB_OPEN_CONFIGS)],
             [InlineKeyboardButton(text="⏱ Проверить статус активации", callback_data=CB_CHECK_ACTIVATION_STATUS)],
+            [InlineKeyboardButton(text="🆘 Помощь и поддержка", callback_data=CB_OPEN_SUPPORT)],
             _guide_row(),
+        ]
+    )
+
+
+def get_support_center_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Помощь с оплатой", callback_data=CB_SUPPORT_PAYMENT)],
+            [InlineKeyboardButton(text="🔌 Помощь с подключением", callback_data=CB_SUPPORT_CONNECTION)],
+            [InlineKeyboardButton(text="📄 Краткие условия", callback_data=CB_SUPPORT_TERMS)],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=CB_SUPPORT_BACK)],
+        ]
+    )
+
+
+def get_support_back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад в помощь", callback_data=CB_OPEN_SUPPORT)],
+        ]
+    )
+
+
+def get_configs_empty_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            _guide_row(),
+            [InlineKeyboardButton(text="🆘 Помощь и поддержка", callback_data=CB_OPEN_SUPPORT)],
         ]
     )
 

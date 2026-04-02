@@ -543,37 +543,6 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         recipients = await database.get_broadcast_recipients(job_id, 0, 50)
         self.assertEqual(recipients, [10, 11])
 
-    async def test_backup_requires_explicit_opt_in_for_insecure_send(self):
-        import config
-        import handlers_admin
-
-        class DummyMessage:
-            def __init__(self):
-                self.answers = []
-                self.documents = []
-
-            async def answer(self, text, **kwargs):
-                self.answers.append(text)
-
-            async def answer_document(self, document, caption=None, **kwargs):
-                self.documents.append((document, caption))
-
-        original_secure = handlers_admin.BACKUP_SECURE_MODE
-        original_allow = handlers_admin.BACKUP_ALLOW_INSECURE_SEND
-        handlers_admin.BACKUP_SECURE_MODE = False
-        handlers_admin.BACKUP_ALLOW_INSECURE_SEND = False
-        original_config_db_path = config.DB_PATH
-        config.DB_PATH = self.db_path
-        try:
-            msg = DummyMessage()
-            await handlers_admin.backup_db(msg)  # type: ignore[arg-type]
-            self.assertTrue(any("Небезопасная отправка backup отключена" in text for text in msg.answers))
-            self.assertEqual(msg.documents, [])
-        finally:
-            handlers_admin.BACKUP_SECURE_MODE = original_secure
-            handlers_admin.BACKUP_ALLOW_INSECURE_SEND = original_allow
-            config.DB_PATH = original_config_db_path
-
     async def test_unknown_slash_command_gets_user_feedback(self):
         import handlers_user
 

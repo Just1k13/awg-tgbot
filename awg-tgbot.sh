@@ -1538,6 +1538,57 @@ get_bot_db_file() {
   printf '%s' "$db_file"
 }
 
+create_local_backup() {
+  local db_file backup_root timestamp archive_file meta_dir meta_file local_sha
+  if ! has_residual_files || [[ ! -f "$ENV_FILE" || ! -d "$BOT_DIR" ]]; then
+    warn "Бот не установлен полностью. Нечего архивировать."
+    return 1
+  fi
+
+  db_file="$(get_bot_db_file)"
+  if [[ ! -f "$db_file" ]]; then
+    warn "Файл БД не найден: ${db_file}"
+    return 1
+  fi
+
+  timestamp="$(date -u +%Y%m%d_%H%M%S)"
+  backup_root="${INSTALL_DIR}/backups"
+  archive_file="${backup_root}/awg-tgbot-backup-${timestamp}.tar.gz"
+  meta_dir="$(mktemp -d)"
+  meta_file="${meta_dir}/metadata.txt"
+  mkdir -p "$backup_root"
+  chmod 700 "$backup_root" || true
+
+  local_sha="$(cat "$VERSION_FILE" 2>/dev/null | tr -d '\r\n' || true)"
+  if [[ -z "$local_sha" && -d "$INSTALL_DIR/.git" ]]; then
+    local_sha="$(git -C "$INSTALL_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
+  [[ -n "$local_sha" ]] || local_sha="unknown"
+
+  cat > "$meta_file" <<EOF
+created_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+repo_branch=${REPO_BRANCH}
+local_sha=${local_sha}
+db_file=$(basename "$db_file")
+env_file=.env
+EOF
+
+  if ! tar -czf "$archive_file" \
+    -C "$(dirname "$db_file")" "$(basename "$db_file")" \
+    -C "$INSTALL_DIR" ".env" \
+    -C "$meta_dir" "metadata.txt"; then
+    rm -rf "$meta_dir"
+    rm -f "$archive_file"
+    warn "Не удалось создать архив бэкапа."
+    return 1
+  fi
+
+  rm -rf "$meta_dir"
+  chmod 600 "$archive_file" || true
+  ok "Бэкап сохранён: ${archive_file}"
+  return 0
+}
+
 list_bot_managed_peer_keys() {
   local db_file="$1"
   [[ -f "$db_file" ]] || return 0
@@ -2162,8 +2213,9 @@ print_menu_awg_yes_bot_yes() {
   echo "1) Статус"
   echo "2) Логи"
   echo "3) Переустановить"
-  echo "4) Удалить"
-  echo "5) Диагностика"
+  echo "4) Бэкап"
+  echo "5) Удалить"
+  echo "6) Диагностика"
   echo "0) Выход"
   print_line
 }
@@ -2173,9 +2225,10 @@ print_menu_awg_no_bot_yes() {
   echo "1) Статус"
   echo "2) Логи"
   echo "3) Переустановить"
-  echo "4) Удалить"
-  echo "5) Диагностика"
-  echo "6) Повторить проверку"
+  echo "4) Бэкап"
+  echo "5) Удалить"
+  echo "6) Диагностика"
+  echo "7) Повторить проверку"
   echo "0) Выход"
   print_line
 }
@@ -2198,6 +2251,7 @@ run_action() {
       ;;
     status) show_status ;;
     logs) show_logs ;;
+    backup) create_local_backup ;;
     diagnostics) detect_install_state; refresh_update_status_quiet; print_detailed_startup_summary ;;
     preflight|detect-install-state) detect_install_state; refresh_update_status_quiet; print_detailed_startup_summary ;;
     sync-helper-policy) sync_awg_helper_policy_from_env ;;
@@ -2223,8 +2277,9 @@ main_menu() {
           1) show_status ;;
           2) show_logs ;;
           3) install_or_reinstall_flow reinstall ;;
-          4) remove_bot ;;
-          5) print_detailed_startup_summary ;;
+          4) create_local_backup ;;
+          5) remove_bot ;;
+          6) print_detailed_startup_summary ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac
@@ -2247,9 +2302,10 @@ main_menu() {
           1) show_status ;;
           2) show_logs ;;
           3) install_or_reinstall_flow reinstall ;;
-          4) remove_bot ;;
-          5) print_detailed_startup_summary ;;
-          6) should_pause=0 ;;
+          4) create_local_backup ;;
+          5) remove_bot ;;
+          6) print_detailed_startup_summary ;;
+          7) should_pause=0 ;;
           0) cleanup_transient_install_state; clear_if_tty; print_exit_hint; exit 0 ;;
           *) warn "Неизвестный пункт меню." ;;
         esac

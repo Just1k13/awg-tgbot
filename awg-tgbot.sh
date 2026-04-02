@@ -1116,9 +1116,10 @@ PY
 }
 
 prompt_api_token() {
-  local __resultvar="$1" __token=""
+  local __resultvar="$1" __token="" __default=""
+  __default="$(get_env_value API_TOKEN)"
   while true; do
-    prompt_with_default 'Введите токен Telegram-бота' '' __token
+    prompt_with_default 'Введите токен Telegram-бота' "$__default" __token
     if [[ "$__token" == *:* ]]; then
       printf -v "$__resultvar" '%s' "$__token"
       return 0
@@ -1128,9 +1129,10 @@ prompt_api_token() {
 }
 
 prompt_admin_id() {
-  local __resultvar="$1" __admin_input=""
+  local __resultvar="$1" __admin_input="" __default=""
+  __default="$(get_env_value ADMIN_ID)"
   while true; do
-    prompt_with_default 'Введите Telegram user_id администратора' '' __admin_input
+    prompt_with_default 'Введите Telegram user_id администратора' "$__default" __admin_input
     if [[ "$__admin_input" =~ ^[0-9]+$ ]]; then
       printf -v "$__resultvar" '%s' "$__admin_input"
       return 0

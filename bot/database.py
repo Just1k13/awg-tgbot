@@ -459,6 +459,16 @@ async def clear_pending_admin_action(admin_id: int, action_key: str) -> None:
     )
 
 
+async def get_pending_admin_action(admin_id: int, action_key: str) -> dict[str, Any] | None:
+    row = await fetchone(
+        "SELECT payload FROM pending_actions WHERE admin_id = ? AND action_key = ?",
+        (admin_id, action_key),
+    )
+    if not row:
+        return None
+    return _safe_load_json(row[0])
+
+
 async def set_pending_broadcast(admin_id: int, text: str) -> None:
     await execute(
         """

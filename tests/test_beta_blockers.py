@@ -398,6 +398,100 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         row = await database.fetchone("SELECT COUNT(*) FROM broadcast_jobs WHERE status='queued'")
         self.assertEqual(row[0], 1)
 
+    async def test_broadcast_interactive_flow_start_capture_confirm(self):
+        import handlers_admin
+        import database
+
+        await database.ensure_user_exists(1)
+        await database.ensure_user_exists(2)
+
+        class FakeMessage:
+            def __init__(self):
+                self.calls = []
+
+            async def answer(self, text, **kwargs):
+                self.calls.append((text, kwargs))
+
+        class FakeCb:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 1})()
+                self.message = FakeMessage()
+                self.bot = None
+
+            async def answer(self, *args, **kwargs):
+                return None
+
+        start_cb = FakeCb()
+        await handlers_admin.admin_broadcast_btn(start_cb)  # type: ignore[arg-type]
+        pending_action = await database.get_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY)
+        self.assertIsNotNone(pending_action)
+
+        class FakeInputMessage:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 1})()
+                self.text = "hello all"
+                self.calls = []
+
+            async def answer(self, text, **kwargs):
+                self.calls.append((text, kwargs))
+
+        input_message = FakeInputMessage()
+        await handlers_admin.broadcast_capture_text(input_message)  # type: ignore[arg-type]
+        self.assertIn("Подтвердите рассылку", input_message.calls[-1][0])
+        self.assertEqual(await database.get_pending_broadcast(1), "hello all")
+        self.assertIsNone(await database.get_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY))
+
+        confirm_cb = FakeCb()
+        await handlers_admin.broadcast_confirm(confirm_cb)  # type: ignore[arg-type]
+        queued = await database.fetchone("SELECT COUNT(*) FROM broadcast_jobs WHERE status='queued'")
+        self.assertEqual(queued[0], 1)
+
+    async def test_broadcast_cancel_clears_interactive_state(self):
+        import handlers_admin
+        import database
+
+        await database.set_pending_broadcast(1, "draft")
+        await database.set_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY, {"action": "broadcast_input"})
+
+        class FakeMessage:
+            async def answer(self, *args, **kwargs):
+                return None
+
+        class FakeCb:
+            def __init__(self, uid: int):
+                self.from_user = type("u", (), {"id": uid})()
+                self.message = FakeMessage()
+                self.bot = None
+
+            async def answer(self, *args, **kwargs):
+                return None
+
+        await handlers_admin.broadcast_cancel(FakeCb(1))  # type: ignore[arg-type]
+        self.assertIsNone(await database.get_pending_broadcast(1))
+        self.assertIsNone(await database.get_pending_admin_action(1, handlers_admin.BROADCAST_INPUT_ACTION_KEY))
+
+    async def test_broadcast_cancel_non_admin_guard_keeps_pending(self):
+        import handlers_admin
+        import database
+
+        await database.set_pending_broadcast(1, "draft")
+
+        class FakeMessage:
+            async def answer(self, *args, **kwargs):
+                return None
+
+        class FakeCb:
+            def __init__(self):
+                self.from_user = type("u", (), {"id": 2})()
+                self.message = FakeMessage()
+                self.bot = None
+
+            async def answer(self, *args, **kwargs):
+                return None
+
+        await handlers_admin.broadcast_cancel(FakeCb())  # type: ignore[arg-type]
+        self.assertEqual(await database.get_pending_broadcast(1), "draft")
+
     async def test_broadcast_targets_are_snapshotted_at_claim_time(self):
         import database
 

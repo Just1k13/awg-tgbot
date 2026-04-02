@@ -29,13 +29,13 @@ from database import (
     get_latest_user_payment_summary,
     list_promo_codes,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
-    get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_user_keys, get_user_meta, normalize_promo_code, pop_pending_admin_action,
+    get_pending_admin_action, get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_user_keys, get_user_meta, normalize_promo_code, pop_pending_admin_action,
     set_app_setting, set_pending_admin_action, set_pending_broadcast, write_audit_log,
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
 from device_activity import render_device_activity_line
 from keyboards import (
-    get_admin_confirm_kb, get_admin_inline_kb, get_admin_simple_back_kb, get_broadcast_confirm_kb,
+    get_admin_confirm_kb, get_admin_inline_kb, get_admin_simple_back_kb, get_broadcast_cancel_kb, get_broadcast_confirm_kb,
 )
 from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BROADCAST, CB_ADMIN_BACKUP,
@@ -75,6 +75,14 @@ ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/maintenance_on", "включить freeze новых покупок"),
     ("/maintenance_off", "выключить freeze новых покупок"),
 )
+BROADCAST_INPUT_ACTION_KEY = "broadcast_input"
+
+
+def _build_broadcast_preview(raw_text: str) -> str:
+    preview = raw_text.strip()
+    if len(preview) > 500:
+        preview = f"{preview[:500]}…"
+    return escape_html(preview)
 
 
 def _build_redacted_backup_payload(db_path: str) -> tuple[bytes, str]:
@@ -1168,16 +1176,18 @@ async def admin_broadcast_btn(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
     await cb.answer()
+    await clear_pending_broadcast(ADMIN_ID)
+    await set_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY, {"action": BROADCAST_INPUT_ACTION_KEY})
     users_total = int(await fetchval("SELECT COUNT(*) FROM users"))
     await cb.message.answer(
         (
             "📢 <b>Рассылка</b>\n\n"
-            "Используйте команду:\n"
-            "<code>/send Ваш текст</code>\n\n"
-            f"Сейчас в базе: <b>{users_total}</b> пользователей.\n"
+            f"Сейчас в базе: <b>{users_total}</b> пользователей.\n\n"
+            "Отправьте текст рассылки одним сообщением.\n"
             "Перед отправкой будет обязательное подтверждение."
         ),
         parse_mode="HTML",
+        reply_markup=get_broadcast_cancel_kb(),
     )
 
 
@@ -1209,9 +1219,36 @@ async def broadcast_cancel(cb: types.CallbackQuery):
     if not await _guard_admin_callback(cb):
         return
     await clear_pending_broadcast(ADMIN_ID)
+    await clear_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY)
     await write_audit_log(ADMIN_ID, "broadcast_cancel", "")
     await cb.message.answer("❌ Рассылка отменена")
     await cb.answer("Отменено")
+
+
+@router.message(IsAdmin(), F.text)
+async def broadcast_capture_text(message: types.Message):
+    pending_action = await get_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY)
+    if not pending_action:
+        return
+    if message.text.startswith("/"):
+        return
+    text = message.text.strip()
+    if not text:
+        await message.answer("Текст пустой. Отправьте сообщение для рассылки или нажмите «Отменить».", reply_markup=get_broadcast_cancel_kb())
+        return
+
+    await set_pending_broadcast(ADMIN_ID, text)
+    await clear_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY)
+    users_total = int(await fetchval("SELECT COUNT(*) FROM users"))
+    await message.answer(
+        (
+            "📢 <b>Подтвердите рассылку</b>\n\n"
+            f"Получателей (по текущей базе): <b>{users_total}</b>\n\n"
+            f"Текст:\n{_build_broadcast_preview(text)}"
+        ),
+        parse_mode="HTML",
+        reply_markup=get_broadcast_confirm_kb(),
+    )
 
 
 @router.callback_query(F.data == CB_ADMIN_REFERRALS)
@@ -1431,18 +1468,25 @@ async def broadcast_prepare(message: types.Message, command: CommandObject):
         await message.answer("⏳ Слишком частый вызов /send")
         return
     if not command.args:
-        await message.answer("Напишите текст после <code>/send</code>", parse_mode="HTML")
+        await clear_pending_broadcast(ADMIN_ID)
+        await set_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY, {"action": BROADCAST_INPUT_ACTION_KEY})
+        await message.answer(
+            "Отправьте текст рассылки одним сообщением.",
+            reply_markup=get_broadcast_cancel_kb(),
+        )
         return
-    await set_pending_broadcast(ADMIN_ID, command.args)
+    text = command.args.strip()
+    if not text:
+        await message.answer("Текст пустой. Отправьте сообщение после <code>/send</code>.", parse_mode="HTML")
+        return
+    await set_pending_broadcast(ADMIN_ID, text)
+    await clear_pending_admin_action(ADMIN_ID, BROADCAST_INPUT_ACTION_KEY)
     users_total = int(await fetchval("SELECT COUNT(*) FROM users"))
-    preview = command.args.strip()
-    if len(preview) > 500:
-        preview = f"{preview[:500]}…"
     await message.answer(
         (
             "📢 <b>Подтвердите рассылку</b>\n\n"
             f"Получателей (по текущей базе): <b>{users_total}</b>\n\n"
-            f"Текст:\n{escape_html(preview)}"
+            f"Текст:\n{_build_broadcast_preview(text)}"
         ),
         parse_mode="HTML",
         reply_markup=get_broadcast_confirm_kb(),

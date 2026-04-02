@@ -261,9 +261,7 @@ async def build_ref_stats_text() -> str:
     stats = await get_referral_admin_stats()
     recent = "\n".join([f"• invitee={r[0]} inviter={r[1]} pay={r[2]}" for r in stats["recent"]]) or "—"
     top = "\n".join([f"• inviter={row[0]} rewards={row[1]}" for row in stats["top"]]) or "—"
-    total_bonus_days = int(await fetchval(
-        "SELECT COALESCE(SUM(invitee_bonus_days + inviter_bonus_days), 0) FROM referral_rewards"
-    ))
+    total_bonus_days = int(stats["total_bonus_days"])
     return (
         "🎁 <b>Referral admin summary</b>\n\n"
         f"pending=<b>{stats['pending']}</b>\n"

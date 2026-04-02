@@ -5,12 +5,10 @@ from aiogram import F, Router, types
 from aiogram.filters import Command, CommandObject
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+import config
 from config import (
     ADMIN_ID,
     SERVER_NAME,
-    STARS_PRICE_7_DAYS,
-    STARS_PRICE_30_DAYS,
-    STARS_PRICE_90_DAYS,
     USER_REISSUE_COOLDOWN_SECONDS,
     logger,
     get_support_username,
@@ -186,9 +184,9 @@ async def _send_buy_menu(target, user_id: int):
         return
     sub_until = await get_user_subscription(user_id)
     price_lines = [
-        f"• 7 дней — {STARS_PRICE_7_DAYS}⭐",
-        f"• 30 дней — {STARS_PRICE_30_DAYS}⭐",
-        f"• 90 дней — {STARS_PRICE_90_DAYS}⭐",
+        f"• 7 дней — {config.STARS_PRICE_7_DAYS}⭐",
+        f"• 30 дней — {config.STARS_PRICE_30_DAYS}⭐",
+        f"• 90 дней — {config.STARS_PRICE_90_DAYS}⭐",
     ]
     if subscription_is_active(sub_until):
         remaining = format_remaining_time(sub_until)

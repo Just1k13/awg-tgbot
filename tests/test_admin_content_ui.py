@@ -24,6 +24,7 @@ class AdminMenuMvpTests(unittest.TestCase):
         self.assertIn("📊 Статистика", labels)
         self.assertIn("🎁 Рефералы", labels)
         self.assertIn("🔄 Синхронизация", labels)
+        self.assertIn("💸 Цены", labels)
         self.assertIn("💾 Бэкап", labels)
         self.assertIn("📢 Рассылка", labels)
 

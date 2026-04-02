@@ -64,7 +64,7 @@ class AdminDeviceActivityRenderingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(lines), 1)
         self.assertIn("Устройство 1", lines[0])
-        self.assertIn("активно недавно", lines[0])
+        self.assertIn("(31.03 11:55)", lines[0])
 
 
 if __name__ == "__main__":

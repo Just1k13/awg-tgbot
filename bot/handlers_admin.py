@@ -9,7 +9,7 @@ from aiogram import Bot
 from aiogram.filters import BaseFilter, Command, CommandObject
 
 from awg_backend import (
-    check_awg_container, clean_orphan_awg_peers, count_free_ip_slots, delete_user_everywhere,
+    check_awg_container, count_free_ip_slots, delete_user_everywhere,
     delete_user_device, get_awg_peers, get_orphan_awg_peers, issue_subscription, reissue_user_device, revoke_user_access, run_docker,
     sync_qos_state,
 )
@@ -39,15 +39,14 @@ from keyboards import (
 )
 from ui_constants import (
     BTN_ADMIN, CB_ADMIN_BACK_MAIN, CB_ADMIN_BROADCAST, CB_ADMIN_BACKUP,
-    CB_ADMIN_CLEAN_ORPHANS, CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
+    CB_ADMIN_COMMANDS, CB_ADMIN_HEALTH, CB_ADMIN_LIST, CB_ADMIN_REFERRALS,
     CB_ADMIN_REFRESH_HEALTH, CB_ADMIN_REFRESH_REFERRALS, CB_ADMIN_STATS, CB_ADMIN_SYNC,
     CB_BROADCAST_CANCEL, CB_BROADCAST_CONFIRM,
     CB_ADMIN_USERS_PAGE_PREFIX, CB_ADMIN_MANAGE_USER_PREFIX, CB_ADMIN_ADD_DAYS_PREFIX,
     CB_ADMIN_RETRY_ACTIVATION_PREFIX,
     CB_ADMIN_DEVICE_DELETE_PREFIX, CB_ADMIN_DEVICE_REISSUE_PREFIX,
-    CB_ADMIN_REVOKE_PREFIX, CB_ADMIN_DELETE_PREFIX, CB_CONFIRM_CLEAN_ORPHANS,
-    CB_CANCEL_CLEAN_ORPHANS, CB_CONFIRM_REVOKE, CB_CANCEL_REVOKE, CB_CONFIRM_DELETE_USER,
-    CB_CANCEL_DELETE_USER, CB_CONFIRM_CLEAN_ORPHANS_FORCE, CB_CANCEL_CLEAN_ORPHANS_FORCE, CB_CONFIRM_DEVICE_DELETE,
+    CB_ADMIN_REVOKE_PREFIX, CB_ADMIN_DELETE_PREFIX, CB_CONFIRM_REVOKE, CB_CANCEL_REVOKE, CB_CONFIRM_DELETE_USER,
+    CB_CANCEL_DELETE_USER, CB_CONFIRM_DEVICE_DELETE,
     CB_CANCEL_DEVICE_DELETE, CB_CONFIRM_DEVICE_REISSUE, CB_CANCEL_DEVICE_REISSUE,
 )
 from config_validate import read_helper_policy
@@ -669,57 +668,6 @@ async def admin_sync_awg(cb: types.CallbackQuery):
     except Exception as e:
         logger.exception("Ошибка admin_sync_awg: %s", e)
         await cb.answer("❌ Ошибка проверки", show_alert=True)
-
-
-@router.callback_query(F.data == CB_ADMIN_CLEAN_ORPHANS)
-async def admin_clean_orphans(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    orphans = await get_orphan_awg_peers()
-    await set_pending_admin_action(ADMIN_ID, "clean_orphans", {"action": "clean_orphans", "orphans": len(orphans)})
-    await cb.message.answer(
-        (
-            "⚠️ <b>Проверка потерянных peer</b>\n\n"
-            f"Найдено потерянных peer: <b>{len(orphans)}</b>\n"
-            "Первый этап: peer будут помещены в карантин (без удаления).\n"
-            "Force-удаление выполняйте только после повторной проверки."
-        ),
-        parse_mode="HTML",
-        reply_markup=get_admin_confirm_kb("clean_orphans"),
-    )
-    await cb.answer()
-
-
-@router.callback_query(F.data == CB_CONFIRM_CLEAN_ORPHANS)
-async def confirm_clean_orphans(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    action = await pop_pending_admin_action(ADMIN_ID, "clean_orphans")
-    if not action or action.get("action") != "clean_orphans":
-        await cb.answer("Нет ожидающего действия", show_alert=True)
-        return
-    try:
-        removed = await clean_orphan_awg_peers(force=False)
-        await write_audit_log(ADMIN_ID, "clean_orphans_quarantine", f"removed={removed}")
-        await cb.message.answer(
-            "🧹 <b>Проверка потерянных peer завершена</b>\n\n"
-            "Peer помечены как защищённые (карантин).\n"
-            f"Физически удалено (force only): <b>{removed}</b>",
-            parse_mode="HTML",
-        )
-        await cb.answer("Очистка завершена")
-    except Exception as e:
-        logger.exception("Ошибка confirm_clean_orphans: %s", e)
-        await cb.answer(str(e), show_alert=True)
-
-
-@router.callback_query(F.data == CB_CANCEL_CLEAN_ORPHANS)
-async def cancel_clean_orphans(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await clear_pending_admin_action(ADMIN_ID, "clean_orphans")
-    await cb.message.answer("❌ Очистка потерянных peer отменена")
-    await cb.answer("Отменено")
 
 
 @router.callback_query(F.data == CB_ADMIN_LIST)
@@ -1437,24 +1385,6 @@ async def stats_cmd(message: types.Message):
     await message.answer(await build_stats_text(), parse_mode="HTML")
 
 
-@router.message(Command("orphans"), IsAdmin())
-async def orphans_cmd(message: types.Message):
-    try:
-        orphans = await get_orphan_awg_peers()
-        if not orphans:
-            await message.answer("✅ Потерянные peer не найдены.")
-            return
-        lines = [f"👻 <b>Потерянные peer ({len(orphans)})</b>\n"]
-        for peer in orphans[:50]:
-            lines.append(f"• <code>{peer['public_key']}</code> — {peer.get('ip') or 'IP не указан'}")
-        if len(orphans) > 50:
-            lines.append(f"\n... и ещё {len(orphans) - 50}")
-        await message.answer("\n".join(lines), parse_mode="HTML")
-    except Exception as e:
-        logger.exception("Ошибка /orphans: %s", e)
-        await message.answer("❌ Не удалось получить список потерянных peer.")
-
-
 @router.message(Command("audit"), IsAdmin())
 async def audit_cmd(message: types.Message, command: CommandObject):
     limit = 20
@@ -1490,57 +1420,6 @@ async def sync_awg_cmd(message: types.Message):
     except Exception as e:
         logger.exception("Ошибка /sync_awg: %s", e)
         await message.answer("❌ Ошибка проверки синхронизации.")
-
-
-@router.message(Command("clean_orphans"), IsAdmin())
-async def clean_orphans_cmd(message: types.Message):
-    try:
-        orphans = await get_orphan_awg_peers()
-        await set_pending_admin_action(
-            ADMIN_ID,
-            "clean_orphans",
-            {"action": "clean_orphans", "orphans": len(orphans)},
-        )
-        await message.answer(
-            (
-                "⚠️ <b>Подтвердите очистку потерянных peer (карантин)</b>\n\n"
-                f"Найдено потерянных peer: <b>{len(orphans)}</b>\n"
-                "На этом шаге peer только помечаются как карантин и не удаляются физически.\n"
-                "Для физического удаления используйте отдельную команду <code>/clean_orphans_force</code> после проверки."
-            ),
-            parse_mode="HTML",
-            reply_markup=get_admin_confirm_kb("clean_orphans"),
-        )
-    except Exception as e:
-        logger.exception("Ошибка /clean_orphans: %s", e)
-        await message.answer("❌ Не удалось подготовить очистку потерянных peer.")
-
-
-@router.message(Command("clean_orphans_force"), IsAdmin())
-async def clean_orphans_force_cmd(message: types.Message):
-    await message.answer("⚠️ /clean_orphans_force отключена в personal MVP.")
-
-
-@router.callback_query(F.data == CB_CONFIRM_CLEAN_ORPHANS_FORCE)
-async def confirm_clean_orphans_force(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await cb.answer("Отключено в personal MVP", show_alert=True)
-
-
-@router.callback_query(F.data == CB_CANCEL_CLEAN_ORPHANS_FORCE)
-async def cancel_clean_orphans_force(cb: types.CallbackQuery):
-    if not await _guard_admin_callback(cb):
-        return
-    await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force")
-    await clear_pending_admin_action(ADMIN_ID, "clean_orphans_force_word")
-    await cb.message.answer("❌ Force-очистка потерянных peer отменена")
-    await cb.answer()
-
-
-@router.message(Command("force_delete"), IsAdmin())
-async def force_delete_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ /force_delete отключена в personal MVP.")
 
 
 @router.message(Command("backup"), IsAdmin())

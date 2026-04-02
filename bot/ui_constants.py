@@ -21,7 +21,6 @@ CB_OPEN_CONFIGS = "open_configs"
 CB_ADMIN_LIST = "admin_list"
 CB_ADMIN_STATS = "admin_stats"
 CB_ADMIN_SYNC = "admin_sync_awg"
-CB_ADMIN_CLEAN_ORPHANS = "admin_clean_orphans"
 CB_ADMIN_BROADCAST = "admin_broadcast"
 CB_ADMIN_BACKUP = "admin_backup"
 CB_ADMIN_COMMANDS = "admin_manual_commands"
@@ -44,8 +43,6 @@ CB_ADMIN_RETRY_ACTIVATION_PREFIX = "admin_retry_activation_"
 CB_ADMIN_DEVICE_DELETE_PREFIX = "admin_device_delete_"
 CB_ADMIN_DEVICE_REISSUE_PREFIX = "admin_device_reissue_"
 
-CB_CONFIRM_CLEAN_ORPHANS = "confirm_clean_orphans"
-CB_CANCEL_CLEAN_ORPHANS = "cancel_clean_orphans"
 CB_CONFIRM_REVOKE = "confirm_revoke"
 CB_CANCEL_REVOKE = "cancel_revoke"
 CB_CONFIRM_DELETE_USER = "confirm_delete_user"
@@ -54,10 +51,6 @@ CB_CONFIRM_DEVICE_DELETE = "confirm_device_delete"
 CB_CANCEL_DEVICE_DELETE = "cancel_device_delete"
 CB_CONFIRM_DEVICE_REISSUE = "confirm_device_reissue"
 CB_CANCEL_DEVICE_REISSUE = "cancel_device_reissue"
-CB_CONFIRM_CLEAN_ORPHANS_FORCE = "confirm_clean_orphans_force"
-CB_CANCEL_CLEAN_ORPHANS_FORCE = "cancel_clean_orphans_force"
-
-
 def is_admin_callback_data(data: str | None) -> bool:
     return bool(data and data.startswith(ADMIN_CALLBACK_PREFIX))
 

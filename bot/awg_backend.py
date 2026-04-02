@@ -464,46 +464,6 @@ async def _get_quarantined_public_keys() -> set[str]:
     return {row[0].strip() for row in rows if row and row[0]}
 
 
-def _list_orphan_delete_candidates_force(
-    *,
-    awg_peers: list[dict[str, str | None]],
-    db_keys: set[str],
-    bot_managed_keys: set[str],
-    quarantined: set[str],
-) -> list[dict[str, str | None]]:
-    candidates: list[dict[str, str | None]] = []
-    for peer in awg_peers:
-        public_key = (peer.get("public_key") or "").strip()
-        peer_ip = peer.get("ip")
-        if not public_key:
-            continue
-        if public_key not in quarantined:
-            continue
-        if public_key in db_keys:
-            continue
-        if public_key not in bot_managed_keys:
-            continue
-        if public_key in IGNORE_PEERS:
-            continue
-        if not _is_managed_client_ip(peer_ip):
-            continue
-        candidates.append({"public_key": public_key, "ip": peer_ip})
-    return candidates
-
-
-async def list_orphan_delete_candidates_force() -> list[dict[str, str | None]]:
-    awg_peers = await get_awg_peers()
-    db_keys = await get_valid_db_public_keys()
-    bot_managed_keys = await get_bot_managed_known_public_keys()
-    quarantined = await _get_quarantined_public_keys()
-    return _list_orphan_delete_candidates_force(
-        awg_peers=awg_peers,
-        db_keys=db_keys,
-        bot_managed_keys=bot_managed_keys,
-        quarantined=quarantined,
-    )
-
-
 async def get_orphan_awg_peers() -> list[dict[str, str | None]]:
     awg_peers = await get_awg_peers()
     if not awg_peers:
@@ -519,49 +479,6 @@ async def get_orphan_awg_peers() -> list[dict[str, str | None]]:
         and peer["public_key"] in bot_managed_keys
         and peer["public_key"] not in protected
     ]
-
-
-async def clean_orphan_awg_peers(force: bool = False) -> int:
-    db_keys = await get_valid_db_public_keys()
-    health = await db_health_info()
-    if not db_keys and not force and health.get("total_keys_count", 0) > 0:
-        raise RuntimeError(
-            "Очистка orphan peer запрещена: в БД 0 валидных ключей при наличии записей keys. Используйте принудительный режим только если уверены, что БД и AWG рассинхронизированы."
-        )
-
-    if force:
-        quarantined = await _get_quarantined_public_keys()
-        if not quarantined:
-            logger.info("Force orphan cleanup: nothing to delete (quarantine is empty)")
-            return 0
-        orphans = await list_orphan_delete_candidates_force()
-        if not orphans:
-            logger.info("Force orphan cleanup: nothing to delete (0 candidates)")
-            return 0
-    else:
-        orphans = await get_orphan_awg_peers()
-
-    removed = 0
-    protected = await get_protected_public_keys()
-    protected.update(IGNORE_PEERS)
-    for peer in orphans:
-        public_key = peer.get("public_key")
-        if not public_key:
-            continue
-        if not force and public_key in protected:
-            logger.info("Пропущен protected peer: %s", public_key)
-            continue
-        if not force:
-            await add_protected_peer(public_key, "orphan-quarantine")
-            logger.warning("Orphan peer помещен в quarantine: %s", public_key)
-            continue
-        try:
-            await remove_peer_from_awg(public_key)
-            removed += 1
-            logger.info("Удалён orphan peer (force): %s", public_key)
-        except Exception as e:
-            logger.error("Не удалось удалить orphan peer %s: %s", public_key, e)
-    return removed
 
 
 async def _get_subscription_operation(db, operation_id: str) -> tuple[str, str, str] | None:

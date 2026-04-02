@@ -121,15 +121,6 @@ def get_admin_confirm_kb(action_key: str) -> InlineKeyboardMarkup:
     )
 
 
-def get_admin_force_confirm_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Подтвердить FORCE", callback_data="confirm_clean_orphans_force")],
-            [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_clean_orphans_force")],
-        ]
-    )
-
-
 def get_admin_simple_back_kb(back_cb: str, refresh_cb: str | None = None) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     if refresh_cb:

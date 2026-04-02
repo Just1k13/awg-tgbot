@@ -65,6 +65,8 @@ ADMIN_MANUAL_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/audit", "последние события"),
     ("/ref_stats", "сводка по рефералам"),
     ("/send TEXT", "рассылка (осторожно)"),
+    ("/finduser QUERY", "поиск пользователя по id или username"),
+    ("/payinfo USER_ID", "краткая сводка по последнему платежу"),
     ("/backup", "redacted backup в Telegram и на диск"),
     ("/give USER_ID DAYS", "выдать/продлить доступ вручную"),
     ("/promo_create CODE DAYS [MAX]", "создать промокод"),
@@ -607,6 +609,73 @@ async def _render_users_page(target_message: types.Message, page: int) -> None:
     )
 
 
+def _payment_admin_details(payment_summary: dict | None) -> tuple[str, str, str]:
+    if not payment_summary:
+        return ("нет платежей", "—", "—")
+    payment_line = f"{payment_summary['status']} · {payment_summary['amount']} {payment_summary['currency']}"
+    activation_line = str(payment_summary.get("last_provision_status") or "—")
+    charge_id = str(payment_summary.get("payment_id") or "—")
+    return payment_line, activation_line, charge_id
+
+
+async def _send_user_manage_card(target_message: types.Message, uid: int, page: int) -> None:
+    row = await fetchone("SELECT sub_until FROM users WHERE user_id = ?", (uid,))
+    if not row:
+        await target_message.answer("Пользователь не найден.")
+        return
+    sub_until = row[0]
+    status_text, until_text = get_status_text(sub_until)
+    tg_username, first_name = await get_user_meta(uid)
+    keys = await get_user_keys(uid)
+    payment_summary = await get_latest_user_payment_summary(uid)
+    referral = await get_referral_summary(uid)
+    admin_device_rows = await fetchall(
+        """
+        SELECT device_num
+        FROM keys
+        WHERE user_id = ?
+          AND public_key NOT LIKE 'pending:%'
+          AND state = 'active'
+        ORDER BY device_num
+        """,
+        (uid,),
+    )
+    admin_device_nums = [int(row[0]) for row in admin_device_rows]
+    connection_status = "готово" if keys else "нет ключа"
+    payment_line, activation_line, charge_id = _payment_admin_details(payment_summary)
+    operator_step = _operator_next_step(payment_summary["status"], activation_line, bool(keys)) if payment_summary else "wait"
+    show_retry_activation = _is_retry_activation_relevant(payment_summary, bool(keys))
+    retry_hint = "\n🧰 Retry: <b>доступен</b> для ручной повторной активации" if show_retry_activation else ""
+    activity_lines = await _build_admin_device_activity_lines(uid)
+    await target_message.answer(
+        (
+            "🛠 <b>Управление пользователем</b>\n\n"
+            f"🆔 <code>{uid}</code>\n"
+            f"👤 Имя: {escape_html(first_name)}\n"
+            f"✈️ Telegram: {format_tg_username(tg_username)}\n"
+            f"📌 Статус: {status_text}\n"
+            f"📅 До: <b>{until_text}</b>\n"
+            f"🔑 Подключение: <b>{connection_status}</b> (устройств: {len(keys)})\n"
+            f"💸 Последний платёж: <b>{payment_line}</b>\n"
+            f"🚦 Активация: <b>{activation_line}</b>\n"
+            f"🧾 Charge ID: <code>{escape_html(charge_id)}</code>\n"
+            "↩️ Возврат: выполняется вручную оператором по Charge ID (TODO: без авто-refund в MVP)\n"
+            f"➡️ Шаг оператора: <b>{operator_step}</b>\n"
+            f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}\n\n"
+            "📶 Активность устройств:\n"
+            f"{'\n'.join(activity_lines)}"
+            f"{retry_hint}"
+        ),
+        parse_mode="HTML",
+        reply_markup=_user_manage_kb(
+            uid,
+            page,
+            show_retry_activation=show_retry_activation,
+            device_nums=admin_device_nums,
+        ),
+    )
+
+
 def build_admin_manual_commands_text() -> str:
     lines = ["⌨️ <b>Ручные admin-команды</b>", ""]
     for command, description in ADMIN_MANUAL_COMMANDS:
@@ -707,67 +776,7 @@ async def admin_manage_user(cb: types.CallbackQuery):
         _, _, _, uid_raw, page_raw = cb.data.split("_", 4)
         uid = int(uid_raw)
         page = int(page_raw)
-        row = await fetchone("SELECT sub_until FROM users WHERE user_id = ?", (uid,))
-        if not row:
-            await cb.answer("Пользователь не найден", show_alert=True)
-            return
-        sub_until = row[0]
-        status_text, until_text = get_status_text(sub_until)
-        tg_username, first_name = await get_user_meta(uid)
-        keys = await get_user_keys(uid)
-        payment_summary = await get_latest_user_payment_summary(uid)
-        referral = await get_referral_summary(uid)
-        admin_device_rows = await fetchall(
-            """
-            SELECT device_num
-            FROM keys
-            WHERE user_id = ?
-              AND public_key NOT LIKE 'pending:%'
-              AND state = 'active'
-            ORDER BY device_num
-            """,
-            (uid,),
-        )
-        admin_device_nums = [int(row[0]) for row in admin_device_rows]
-        connection_status = "готово" if keys else "нет ключа"
-        payment_line = "нет платежей"
-        activation_line = "нет данных"
-        operator_step = "wait"
-        show_retry_activation = False
-        if payment_summary:
-            payment_line = (
-                f"{payment_summary['status']} · {payment_summary['amount']} {payment_summary['currency']}"
-            )
-            activation_line = payment_summary["last_provision_status"] or "—"
-            operator_step = _operator_next_step(payment_summary["status"], activation_line, bool(keys))
-            show_retry_activation = _is_retry_activation_relevant(payment_summary, bool(keys))
-        retry_hint = "\n🧰 Retry: <b>доступен</b> для ручной повторной активации" if show_retry_activation else ""
-        activity_lines = await _build_admin_device_activity_lines(uid)
-        await cb.message.answer(
-            (
-                "🛠 <b>Управление пользователем</b>\n\n"
-                f"🆔 <code>{uid}</code>\n"
-                f"👤 Имя: {escape_html(first_name)}\n"
-                f"✈️ Telegram: {format_tg_username(tg_username)}\n"
-                f"📌 Статус: {status_text}\n"
-                f"📅 До: <b>{until_text}</b>\n"
-                f"🔑 Подключение: <b>{connection_status}</b> (устройств: {len(keys)})\n"
-                f"💸 Последний платёж: <b>{payment_line}</b>\n"
-                f"🚦 Активация: <b>{activation_line}</b>\n"
-                f"➡️ Шаг оператора: <b>{operator_step}</b>\n"
-                f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}\n\n"
-                "📶 Активность устройств:\n"
-                f"{'\n'.join(activity_lines)}"
-                f"{retry_hint}"
-            ),
-            parse_mode="HTML",
-            reply_markup=_user_manage_kb(
-                uid,
-                page,
-                show_retry_activation=show_retry_activation,
-                device_nums=admin_device_nums,
-            ),
-        )
+        await _send_user_manage_card(cb.message, uid, page)
         await cb.answer("Открыто")
     except ValueError:
         await cb.answer("Некорректный user_id", show_alert=True)
@@ -1413,6 +1422,89 @@ async def list_users_cmd(message: types.Message):
         tg_username, _ = await get_user_meta(uid)
         lines.append(f"• <code>{uid}</code> — {format_tg_username(tg_username)} — {status_text} — {until_text}")
     await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("finduser"), IsAdmin())
+async def find_user_cmd(message: types.Message, command: CommandObject):
+    query = (command.args or "").strip()
+    if not query:
+        await message.answer("Формат: <code>/finduser QUERY</code>\nQUERY: user_id или username/@username", parse_mode="HTML")
+        return
+    if query.isdigit():
+        uid = int(query)
+        row = await fetchone("SELECT 1 FROM users WHERE user_id = ?", (uid,))
+        if not row:
+            await message.answer("Пользователь с таким user_id не найден.")
+            return
+        await _send_user_manage_card(message, uid, 0)
+        return
+
+    needle = query.lstrip("@").lower()
+    exact_rows = await fetchall(
+        """
+        SELECT user_id, tg_username
+        FROM users
+        WHERE LOWER(COALESCE(tg_username, '')) = ?
+        ORDER BY created_at DESC
+        LIMIT 3
+        """,
+        (needle,),
+    )
+    if exact_rows:
+        uid = int(exact_rows[0][0])
+        await _send_user_manage_card(message, uid, 0)
+        return
+
+    rows = await fetchall(
+        """
+        SELECT user_id, tg_username
+        FROM users
+        WHERE LOWER(COALESCE(tg_username, '')) LIKE ?
+        ORDER BY created_at DESC
+        LIMIT 5
+        """,
+        (f"%{needle}%",),
+    )
+    if not rows:
+        await message.answer("Совпадений не найдено.")
+        return
+    kb_rows = [
+        [
+            types.InlineKeyboardButton(
+                text=f"👤 {uid} — {format_tg_username(username)}",
+                callback_data=f"{CB_ADMIN_MANAGE_USER_PREFIX}{uid}_0",
+            )
+        ]
+        for uid, username in rows
+    ]
+    await message.answer(
+        "Найдено несколько пользователей. Откройте карточку:",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=kb_rows),
+    )
+
+
+@router.message(Command("payinfo"), IsAdmin())
+async def payinfo_cmd(message: types.Message, command: CommandObject):
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer("Формат: <code>/payinfo USER_ID</code>", parse_mode="HTML")
+        return
+    uid = int(command.args.strip())
+    payment_summary = await get_latest_user_payment_summary(uid)
+    if not payment_summary:
+        await message.answer("Платежей не найдено.")
+        return
+    await message.answer(
+        (
+            "💳 <b>Последний платёж пользователя</b>\n\n"
+            f"🆔 user_id: <code>{uid}</code>\n"
+            f"📌 status: <b>{escape_html(str(payment_summary.get('status') or '—'))}</b>\n"
+            f"💰 amount: <b>{payment_summary.get('amount')} {escape_html(str(payment_summary.get('currency') or '—'))}</b>\n"
+            f"🧾 telegram_payment_charge_id: <code>{escape_html(str(payment_summary.get('payment_id') or '—'))}</code>\n"
+            "↩️ Refund prep: используйте charge_id для ручного возврата в платежном кабинете.\n"
+            "TODO: автоматический refund не реализован в selfhost MVP."
+        ),
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("stats"), IsAdmin())

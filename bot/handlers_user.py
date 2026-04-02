@@ -10,21 +10,28 @@ from config import (
     SERVER_NAME,
     STARS_PRICE_7_DAYS,
     STARS_PRICE_30_DAYS,
+    STARS_PRICE_90_DAYS,
+    USER_REISSUE_COOLDOWN_SECONDS,
     logger,
     get_support_username,
     maybe_set_support_username,
 )
 from awg_backend import get_awg_peers
 from awg_backend import issue_subscription
+from awg_backend import reissue_user_device
 from database import (
     activate_promo_code,
+    clear_pending_admin_action,
     ensure_user_exists,
     fetchall,
     get_latest_user_payment_summary,
+    get_pending_admin_action,
     get_user_keys,
     get_user_subscription,
     normalize_promo_code,
     rollback_promo_activation_reservation,
+    set_pending_admin_action,
+    persistent_guard_hit,
     write_audit_log,
 )
 from device_activity import render_device_activity_line
@@ -36,6 +43,7 @@ from keyboards import (
     get_instruction_inline_kb,
     get_main_menu,
     get_profile_inline_kb,
+    get_user_reissue_confirm_kb,
 )
 from texts import (
     get_activation_status_text,
@@ -56,6 +64,8 @@ from ui_constants import (
     CB_OPEN_CONFIGS,
     CB_SHOW_BUY_MENU,
     CB_SHOW_INSTRUCTION,
+    CB_USER_REISSUE_CANCEL,
+    CB_USER_REISSUE_CONFIRM,
 )
 from content_settings import get_text
 from referrals import capture_referral_start, get_referral_screen_data
@@ -86,6 +96,8 @@ def _format_last_payment_tariff(payload: str | None) -> str:
         return "7 дней"
     if payload == "sub_30":
         return "30 дней"
+    if payload == "sub_90":
+        return "90 дней"
     return "—"
 
 
@@ -167,6 +179,7 @@ async def _send_buy_menu(target, user_id: int):
     price_lines = [
         f"• 7 дней — {STARS_PRICE_7_DAYS}⭐",
         f"• 30 дней — {STARS_PRICE_30_DAYS}⭐",
+        f"• 90 дней — {STARS_PRICE_90_DAYS}⭐",
     ]
     if subscription_is_active(sub_until):
         remaining = format_remaining_time(sub_until)
@@ -253,6 +266,37 @@ async def help_cmd(message: types.Message):
     await message.answer(
         "Выберите официальный клиент AmneziaWG для установки:",
         reply_markup=_help_clients_kb(),
+    )
+
+
+@router.message(Command("support"))
+async def support_cmd(message: types.Message):
+    await support(message)
+
+
+@router.message(Command("paysupport"))
+async def paysupport_cmd(message: types.Message):
+    await message.answer(
+        (
+            "💳 <b>Поддержка по оплате</b>\n\n"
+            "По вопросам оплаты и активации после оплаты напишите в поддержку через <code>/support</code> "
+            "и укажите ваш <code>user_id</code> из профиля."
+        ),
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("terms"))
+async def terms_cmd(message: types.Message):
+    await message.answer(
+        (
+            "📄 <b>Краткие условия</b>\n\n"
+            "• Сервис выдаёт доступ AmneziaWG для личного использования (single-server MVP).\n"
+            "• Оплата даёт доступ на 7 / 30 / 90 дней.\n"
+            "• После успешной оплаты выдаётся цифровой доступ (vpn:// и .conf).\n"
+            "• По вопросам поддержки и возвратов: через <code>/support</code>."
+        ),
+        parse_mode="HTML",
     )
 
 
@@ -446,6 +490,75 @@ async def support(message: types.Message):
     if not support_username:
         logger.warning("SUPPORT_USERNAME is not configured; support contact hidden from user flow")
     await message.answer(await get_support_full_text(), parse_mode="HTML")
+
+
+@router.message(Command("resetdevice"))
+async def reset_device_cmd(message: types.Message):
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    sub_until = await get_user_subscription(message.from_user.id)
+    if not subscription_is_active(sub_until):
+        await message.answer("Сейчас активной подписки нет. Сначала оформите или продлите доступ.")
+        return
+    configs = await get_user_keys(message.from_user.id)
+    if not configs:
+        await message.answer("Не найден активный конфиг для перевыпуска. Откройте «🔑 Подключение» или напишите в поддержку.")
+        return
+    _, device_num, _, _ = configs[0]
+    await clear_pending_admin_action(message.from_user.id, "user_reissue_device")
+    await set_pending_admin_action(
+        message.from_user.id,
+        "user_reissue_device",
+        {"action": "user_reissue_device", "device_num": int(device_num)},
+    )
+    await message.answer(
+        (
+            "⚠️ <b>Перевыпуск доступа</b>\n\n"
+            "Текущий конфиг устройства будет отключён.\n"
+            "Старый vpn:// и .conf перестанут работать.\n\n"
+            "Продолжить перевыпуск?"
+        ),
+        parse_mode="HTML",
+        reply_markup=get_user_reissue_confirm_kb(),
+    )
+
+
+@router.callback_query(F.data == CB_USER_REISSUE_CANCEL)
+async def user_reissue_cancel(cb: types.CallbackQuery):
+    await cb.answer()
+    await clear_pending_admin_action(cb.from_user.id, "user_reissue_device")
+    if cb.message:
+        await cb.message.answer("❌ Перевыпуск отменён.")
+
+
+@router.callback_query(F.data == CB_USER_REISSUE_CONFIRM)
+async def user_reissue_confirm(cb: types.CallbackQuery):
+    await cb.answer()
+    action = await get_pending_admin_action(cb.from_user.id, "user_reissue_device")
+    if not action or action.get("action") != "user_reissue_device":
+        if cb.message:
+            await cb.message.answer("Нет ожидающего запроса на перевыпуск. Используйте /resetdevice.")
+        return
+    cooldown_hit = await persistent_guard_hit("user_reissue", cb.from_user.id, "current_device", USER_REISSUE_COOLDOWN_SECONDS)
+    if cooldown_hit:
+        if cb.message:
+            await cb.message.answer(f"⏳ Слишком часто. Повторите через {USER_REISSUE_COOLDOWN_SECONDS} сек.")
+        return
+    try:
+        device_num = int(action.get("device_num", 1))
+        result = await reissue_user_device(cb.from_user.id, device_num)
+        await clear_pending_admin_action(cb.from_user.id, "user_reissue_device")
+        if result.get("status") != "reissued":
+            if cb.message:
+                await cb.message.answer("Не удалось перевыпустить устройство. Попробуйте позже или напишите в поддержку.")
+            return
+        await write_audit_log(cb.from_user.id, "user_reissue_device", f"device_num={device_num}")
+        if cb.message:
+            await cb.message.answer("✅ Перевыпуск выполнен. Старый конфиг отключён, используйте новый в разделе «🔑 Подключение».")
+            await _send_configs_menu(cb.message, cb.from_user)
+    except Exception as error:
+        logger.exception("Ошибка user_reissue_confirm: %s", error)
+        if cb.message:
+            await cb.message.answer("❌ Ошибка перевыпуска. Попробуйте позже или напишите в поддержку.")
 
 
 @router.callback_query(F.data == CB_CHECK_ACTIVATION_STATUS)

@@ -73,31 +73,6 @@ class AdminSecurityHardeningTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(state)
         self.assertTrue(answers and answers[-1][0] == "Нет доступа")
 
-    async def test_non_admin_cannot_cancel_force_orphan_cleanup(self):
-        import database
-        import handlers_admin
-
-        await database.set_pending_admin_action(1, "clean_orphans_force", {"action": "clean_orphans_force"})
-        await database.set_pending_admin_action(1, "clean_orphans_force_word", {"action": "clean_orphans_force", "confirmed": True})
-
-        answers: list[tuple[str, bool]] = []
-
-        class DummyCb:
-            from_user = SimpleNamespace(id=555)
-            message = SimpleNamespace(answer=lambda *_args, **_kwargs: None)
-
-            async def answer(self, text: str, show_alert: bool = False):
-                answers.append((text, show_alert))
-
-        cb = DummyCb()
-        await handlers_admin.cancel_clean_orphans_force(cb)
-
-        state_force = await database.pop_pending_admin_action(1, "clean_orphans_force")
-        state_force_word = await database.pop_pending_admin_action(1, "clean_orphans_force_word")
-        self.assertIsNotNone(state_force)
-        self.assertIsNotNone(state_force_word)
-        self.assertTrue(answers and answers[-1][0] == "Нет доступа")
-
     async def test_admin_manage_keyboard_has_no_qos_buttons(self):
         import handlers_admin
 

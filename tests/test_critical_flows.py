@@ -114,36 +114,6 @@ class CriticalFlowsTests(unittest.IsolatedAsyncioTestCase):
         row = await database.fetchone("SELECT COUNT(*) FROM users WHERE user_id = 50")
         self.assertEqual(row[0], 1)
 
-    async def test_orphan_cleanup_quarantine_only_without_force(self):
-        import awg_backend
-
-        async def fake_orphans():
-            return [{"public_key": "orphan-1", "ip": "10.8.1.9"}]
-
-        protected_calls = []
-
-        async def fake_add_protected(pub, reason):
-            protected_calls.append((pub, reason))
-
-        async def fail_remove(_):
-            raise AssertionError("remove should not be called in non-force mode")
-
-        original_get = awg_backend.get_orphan_awg_peers
-        original_add = awg_backend.add_protected_peer
-        original_remove = awg_backend.remove_peer_from_awg
-        awg_backend.get_orphan_awg_peers = fake_orphans
-        awg_backend.add_protected_peer = fake_add_protected
-        awg_backend.remove_peer_from_awg = fail_remove
-        try:
-            removed = await awg_backend.clean_orphan_awg_peers(force=False)
-        finally:
-            awg_backend.get_orphan_awg_peers = original_get
-            awg_backend.add_protected_peer = original_add
-            awg_backend.remove_peer_from_awg = original_remove
-
-        self.assertEqual(removed, 0)
-        self.assertEqual(protected_calls, [("orphan-1", "orphan-quarantine")])
-
     async def test_delete_user_everywhere_retry_from_delete_pending(self):
         import awg_backend
         import database
@@ -570,49 +540,6 @@ peer: PUBKEY_B
         self.assertIn("I4 = should-appear-4", cfg)
         self.assertIn("I5 = should-appear-5", cfg)
 
-    async def test_force_cleanup_candidates_limited_to_quarantine_managed_not_in_db(self):
-        import awg_backend
-
-        async def fake_get_awg_peers():
-            return [
-                {"public_key": "candidate-ok", "ip": "10.8.1.10"},
-                {"public_key": "in-db", "ip": "10.8.1.11"},
-                {"public_key": "not-owned", "ip": "10.8.1.14"},
-                {"public_key": "missing-ip", "ip": None},
-                {"public_key": "outside-range", "ip": "192.168.1.10"},
-                {"public_key": "not-quarantined", "ip": "10.8.1.12"},
-                {"public_key": "ignored", "ip": "10.8.1.13"},
-            ]
-
-        async def fake_db_keys():
-            return {"in-db"}
-
-        async def fake_bot_managed_keys():
-            return {"candidate-ok", "in-db", "missing-ip", "outside-range", "ignored"}
-
-        async def fake_quarantined():
-            return {"candidate-ok", "in-db", "missing-ip", "outside-range", "ignored", "not-owned"}
-
-        original_get = awg_backend.get_awg_peers
-        original_db = awg_backend.get_valid_db_public_keys
-        original_bot_managed = awg_backend.get_bot_managed_known_public_keys
-        original_quarantined = awg_backend._get_quarantined_public_keys
-        original_ignore = awg_backend.IGNORE_PEERS
-        awg_backend.get_awg_peers = fake_get_awg_peers
-        awg_backend.get_valid_db_public_keys = fake_db_keys
-        awg_backend.get_bot_managed_known_public_keys = fake_bot_managed_keys
-        awg_backend._get_quarantined_public_keys = fake_quarantined
-        awg_backend.IGNORE_PEERS = set(original_ignore) | {"ignored"}
-        try:
-            candidates = await awg_backend.list_orphan_delete_candidates_force()
-        finally:
-            awg_backend.get_awg_peers = original_get
-            awg_backend.get_valid_db_public_keys = original_db
-            awg_backend.get_bot_managed_known_public_keys = original_bot_managed
-            awg_backend._get_quarantined_public_keys = original_quarantined
-            awg_backend.IGNORE_PEERS = original_ignore
-        self.assertEqual(candidates, [{"public_key": "candidate-ok", "ip": "10.8.1.10"}])
-
     async def test_get_orphan_awg_peers_requires_bot_managed_ownership(self):
         import awg_backend
 
@@ -764,10 +691,12 @@ class InstallerAndHelperHardeningTests(unittest.TestCase):
         self.assertIn('REPO_BRANCH="${REPO_BRANCH:-$DEFAULT_REPO_BRANCH}"', script)
         self.assertNotIn('REPO_BRANCH="main"', script)
 
-    def test_clean_orphans_command_does_not_promise_physical_delete(self):
+    def test_legacy_orphan_force_commands_removed_from_admin_surface(self):
         admin_handler = (ROOT / "bot" / "handlers_admin.py").read_text(encoding="utf-8")
-        self.assertIn("quarantine", admin_handler)
-        self.assertNotIn("Будет удалено: <b>{len(orphans)}</b>", admin_handler)
+        self.assertNotIn('Command("orphans")', admin_handler)
+        self.assertNotIn('Command("clean_orphans")', admin_handler)
+        self.assertNotIn('Command("clean_orphans_force")', admin_handler)
+        self.assertNotIn('Command("force_delete")', admin_handler)
 
     def test_helper_rejects_invalid_policy_json(self):
         import awg_helper

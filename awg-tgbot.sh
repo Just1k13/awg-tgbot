@@ -1099,6 +1099,20 @@ ensure_env_file() {
   return 0
 }
 
+migrate_legacy_tariff_defaults() {
+  local current=""
+  current="$(get_env_value STARS_PRICE_7_DAYS)"
+  if [[ "$current" == "15" ]]; then
+    set_env_value STARS_PRICE_7_DAYS "21"
+  fi
+
+  current="$(get_env_value STARS_PRICE_90_DAYS)"
+  if [[ "$current" == "120" ]]; then
+    set_env_value STARS_PRICE_90_DAYS "140"
+  fi
+  return 0
+}
+
 ensure_secret() {
   local current secret
   current="$(get_env_value ENCRYPTION_SECRET)"
@@ -1457,6 +1471,7 @@ install_or_reinstall_flow() {
   deploy_repo "$tmp_dir" || { rm -rf "$tmp_dir"; die "Не удалось развернуть файлы проекта."; }
   rm -rf "$tmp_dir"
   ensure_env_file
+  migrate_legacy_tariff_defaults
 
   write_common_env "$api_token" "$admin_id" "$server_name" "$secret"
   ensure_fernet_key
@@ -1482,7 +1497,7 @@ install_or_reinstall_flow() {
     fi
   else
     configure_manual_awg_only
-    default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "15")"
+    default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_7_DAYS)" "21")"
     prompt_with_default 'Цена 7 дней в Telegram Stars' "$default" value
     set_env_value STARS_PRICE_7_DAYS "$value"
     default="$(pick_existing_or_default "$(get_env_value STARS_PRICE_30_DAYS)" "50")"

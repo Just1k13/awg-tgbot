@@ -7,17 +7,23 @@ from awg_backend import issue_subscription
 from config import logger
 from content_settings import get_setting
 from database import (
+    create_referral_recurring_reward_once,
     create_referral_reward_once,
     ensure_referral_code,
     get_referral_attribution,
     get_referral_code,
     get_referral_summary,
     get_user_id_by_referral_code,
+    has_referral_first_reward,
+    payment_is_applied_for_user,
     set_referral_attribution,
     user_has_paid_subscription,
     get_user_meta,
     write_audit_log,
 )
+
+REFERRAL_RECURRING_INVITER_BONUS_DAYS = 2
+REFERRAL_RECURRING_MIN_PURCHASE_DAYS = 30
 
 
 def _build_ref_code(user_id: int) -> str:
@@ -109,6 +115,57 @@ async def notify_inviter_about_referral_reward(bot: Any, invitee_user_id: int) -
     except Exception as error:
         logger.warning("Не удалось отправить уведомление о реферальном бонусе inviter=%s: %s", inviter_user_id, error)
         return False
+
+
+async def apply_referral_recurring_inviter_reward(
+    invitee_user_id: int,
+    payment_id: str,
+    purchased_days: int,
+) -> bool:
+    if int(await get_setting("REFERRAL_ENABLED", int) or 0) != 1:
+        return False
+    attribution = await get_referral_attribution(invitee_user_id)
+    if not attribution:
+        return False
+    if purchased_days < REFERRAL_RECURRING_MIN_PURCHASE_DAYS:
+        return False
+    if not await payment_is_applied_for_user(payment_id, invitee_user_id):
+        return False
+    if not await has_referral_first_reward(invitee_user_id):
+        return False
+
+    inviter_user_id, code = attribution
+    created = await create_referral_recurring_reward_once(
+        invitee_user_id=invitee_user_id,
+        inviter_user_id=inviter_user_id,
+        payment_id=payment_id,
+        inviter_bonus_days=REFERRAL_RECURRING_INVITER_BONUS_DAYS,
+    )
+    if not created:
+        return False
+
+    await issue_subscription(
+        inviter_user_id,
+        REFERRAL_RECURRING_INVITER_BONUS_DAYS,
+        silent=True,
+        operation_id=f"ref-recurring-inviter-{payment_id}",
+    )
+    await write_audit_log(
+        invitee_user_id,
+        "referral_recurring_inviter_reward_applied",
+        (
+            f"inviter={inviter_user_id}; code={code}; payment_id={payment_id}; "
+            f"inviter_days={REFERRAL_RECURRING_INVITER_BONUS_DAYS}; purchased_days={purchased_days}"
+        ),
+    )
+    logger.info(
+        "Referral recurring inviter reward applied for payment=%s invitee=%s inviter=%s days=%s",
+        payment_id,
+        invitee_user_id,
+        inviter_user_id,
+        REFERRAL_RECURRING_INVITER_BONUS_DAYS,
+    )
+    return True
 
 
 async def get_referral_screen_data(user_id: int, bot_username: str) -> dict[str, str | int]:

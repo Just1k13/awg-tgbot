@@ -558,6 +558,142 @@ class BetaBlockersTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first)
         self.assertFalse(second)
 
+    async def test_referral_recurring_second_30_day_purchase_gives_plus_2_days(self):
+        import database
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(9100)
+        await referrals.capture_referral_start(9101, f"ref_{code}")
+        await referrals.create_referral_reward_once(9101, 9100, "pay-first", 5, 3)
+        await database.save_payment(
+            telegram_payment_charge_id="pay-second-30",
+            provider_payment_charge_id="prov-second-30",
+            user_id=9101,
+            payload="sub_30",
+            amount=1,
+            currency="XTR",
+            payment_method="stars",
+            status="received",
+            raw_payload_json="{}",
+        )
+        await database.update_payment_status("pay-second-30", "applied")
+
+        issued = []
+
+        async def fake_issue_subscription(user_id, days, silent=False, operation_id=None):
+            from datetime import datetime
+            issued.append((user_id, days, silent, operation_id))
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            applied = await referrals.apply_referral_recurring_inviter_reward(9101, "pay-second-30", 30)
+        finally:
+            referrals.issue_subscription = original_issue
+
+        self.assertTrue(applied)
+        self.assertEqual(len(issued), 1)
+        self.assertEqual(issued[0][0], 9100)
+        self.assertEqual(issued[0][1], 2)
+        self.assertIn("ref-recurring-inviter-pay-second-30", issued[0][3])
+        recurring_row = await database.fetchone(
+            "SELECT inviter_bonus_days FROM referral_recurring_rewards WHERE payment_id = ?",
+            ("pay-second-30",),
+        )
+        self.assertEqual(int(recurring_row[0]), 2)
+        audit_row = await database.fetchone(
+            "SELECT action FROM audit_log WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (9101,),
+        )
+        self.assertEqual(audit_row[0], "referral_recurring_inviter_reward_applied")
+
+    async def test_referral_recurring_not_applied_for_7_day_purchase(self):
+        import database
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(9200)
+        await referrals.capture_referral_start(9201, f"ref_{code}")
+        await referrals.create_referral_reward_once(9201, 9200, "pay-first-7", 5, 3)
+        await database.save_payment(
+            telegram_payment_charge_id="pay-second-7",
+            provider_payment_charge_id="prov-second-7",
+            user_id=9201,
+            payload="sub_7",
+            amount=1,
+            currency="XTR",
+            payment_method="stars",
+            status="received",
+            raw_payload_json="{}",
+        )
+        await database.update_payment_status("pay-second-7", "applied")
+
+        applied = await referrals.apply_referral_recurring_inviter_reward(9201, "pay-second-7", 7)
+        self.assertFalse(applied)
+        row = await database.fetchone("SELECT COUNT(*) FROM referral_recurring_rewards")
+        self.assertEqual(int(row[0]), 0)
+
+    async def test_referral_recurring_not_applied_without_attribution(self):
+        import database
+        import referrals
+
+        await database.save_payment(
+            telegram_payment_charge_id="pay-no-attribution",
+            provider_payment_charge_id="prov-no-attribution",
+            user_id=9301,
+            payload="sub_30",
+            amount=1,
+            currency="XTR",
+            payment_method="stars",
+            status="received",
+            raw_payload_json="{}",
+        )
+        await database.update_payment_status("pay-no-attribution", "applied")
+
+        applied = await referrals.apply_referral_recurring_inviter_reward(9301, "pay-no-attribution", 30)
+        self.assertFalse(applied)
+        row = await database.fetchone("SELECT COUNT(*) FROM referral_recurring_rewards")
+        self.assertEqual(int(row[0]), 0)
+
+    async def test_referral_recurring_is_idempotent_by_payment_id(self):
+        import database
+        import referrals
+
+        code = await referrals.ensure_user_referral_code(9400)
+        await referrals.capture_referral_start(9401, f"ref_{code}")
+        await referrals.create_referral_reward_once(9401, 9400, "pay-first-9401", 5, 3)
+        await database.save_payment(
+            telegram_payment_charge_id="pay-repeat",
+            provider_payment_charge_id="prov-repeat",
+            user_id=9401,
+            payload="sub_30",
+            amount=1,
+            currency="XTR",
+            payment_method="stars",
+            status="received",
+            raw_payload_json="{}",
+        )
+        await database.update_payment_status("pay-repeat", "applied")
+
+        calls = {"count": 0}
+
+        async def fake_issue_subscription(*args, **kwargs):
+            from datetime import datetime
+            calls["count"] += 1
+            return datetime.fromisoformat("2026-05-01T00:00:00")
+
+        original_issue = referrals.issue_subscription
+        referrals.issue_subscription = fake_issue_subscription
+        try:
+            first = await referrals.apply_referral_recurring_inviter_reward(9401, "pay-repeat", 30)
+            second = await referrals.apply_referral_recurring_inviter_reward(9401, "pay-repeat", 30)
+        finally:
+            referrals.issue_subscription = original_issue
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertEqual(calls["count"], 1)
+
     async def test_inviter_gets_notification_after_referral_reward(self):
         import referrals
 

@@ -23,6 +23,8 @@ from config import (
 from database import (
     clear_pending_admin_action, clear_pending_broadcast, create_broadcast_job, create_promo_code, db_health_info, disable_promo_code, fetchall, fetchone, fetchval,
     get_latest_user_payment_summary,
+    get_user_device_traffic_summary,
+    get_user_total_traffic_bytes,
     list_promo_codes,
     get_metric, get_pending_jobs_stats, get_recovery_lag_seconds,
     get_pending_admin_action, get_pending_broadcast, get_recent_audit, get_referral_admin_stats, get_referral_summary, get_user_keys, get_user_meta, normalize_promo_code, pop_pending_admin_action,
@@ -30,6 +32,7 @@ from database import (
 )
 from helpers import escape_html, format_tg_username, get_status_text, utc_now_naive
 from device_activity import render_device_activity_line
+from traffic import format_bytes_compact, render_device_traffic_line
 from keyboards import (
     get_admin_confirm_kb, get_admin_inline_kb, get_admin_price_confirm_kb, get_admin_prices_kb, get_admin_simple_back_kb, get_broadcast_cancel_kb, get_broadcast_confirm_kb,
 )
@@ -520,6 +523,24 @@ async def _build_admin_device_activity_lines(uid: int) -> list[str]:
     return lines
 
 
+async def _build_admin_device_traffic_lines(uid: int) -> list[str]:
+    rows = await get_user_device_traffic_summary(uid)
+    if not rows:
+        return ["• Всего трафика — 0 B"]
+
+    lines = [
+        render_device_traffic_line(
+            int(row["device_num"]),
+            int(row["rx_bytes_total"]),
+            int(row["tx_bytes_total"]),
+        )
+        for row in rows
+    ]
+    total_bytes = await get_user_total_traffic_bytes(uid)
+    lines.append(f"• Всего трафика — {format_bytes_compact(total_bytes)}")
+    return lines
+
+
 async def _render_users_page(target_message: types.Message, page: int) -> None:
     total_users = (await fetchone("SELECT COUNT(*) FROM users"))[0]
     if total_users == 0:
@@ -590,6 +611,7 @@ async def _send_user_manage_card(target_message: types.Message, uid: int, page: 
     show_retry_activation = _is_retry_activation_relevant(payment_summary, bool(keys))
     retry_hint = "\n🧰 Retry: <b>доступен</b> для ручной повторной активации" if show_retry_activation else ""
     activity_lines = await _build_admin_device_activity_lines(uid)
+    traffic_lines = await _build_admin_device_traffic_lines(uid)
     await target_message.answer(
         (
             "🛠 <b>Управление пользователем</b>\n\n"
@@ -607,7 +629,9 @@ async def _send_user_manage_card(target_message: types.Message, uid: int, page: 
             f"➡️ Шаг оператора: <b>{operator_step}</b>\n"
             f"🎁 Рефералы: приглашено {referral['invited_count']} · с бонусом {referral['rewarded_count']}\n\n"
             "📶 Активность устройств:\n"
-            f"{'\n'.join(activity_lines)}"
+            f"{'\n'.join(activity_lines)}\n\n"
+            "📊 Трафик:\n"
+            f"{'\n'.join(traffic_lines)}"
             f"{retry_hint}"
         ),
         parse_mode="HTML",

@@ -59,7 +59,8 @@ TEXT_DEFAULTS: dict[str, str] = {
         "📅 <b>Дата:</b> {payment_date}\n"
         "💰 <b>Сумма:</b> {payment_amount}\n"
         "🚦 <b>Статус:</b> {payment_status}\n"
-        "📱 <b>Последняя активность:</b>\n{device_activity_block}\n\n"
+        "📱 <b>Последняя активность:</b>\n{device_activity_block}\n"
+        "📊 <b>Трафик:</b>\n{traffic_block}\n\n"
         "➡️ <b>Дальше:</b> {next_step}\n"
         "{support_line}"
     ),

@@ -24,8 +24,10 @@ from database import (
     fetchall,
     get_latest_user_payment_summary,
     get_pending_admin_action,
+    get_user_device_traffic_summary,
     get_user_keys,
     get_user_subscription,
+    get_user_total_traffic_bytes,
     normalize_promo_code,
     rollback_promo_activation_reservation,
     set_pending_admin_action,
@@ -33,6 +35,7 @@ from database import (
     write_audit_log,
 )
 from device_activity import render_device_activity_line
+from traffic import format_bytes_compact, render_device_traffic_line
 from helpers import escape_html, format_remaining_time, format_tg_username, get_status_text, subscription_is_active, utc_now_naive
 from keyboards import (
     get_buy_inline_kb,
@@ -175,6 +178,24 @@ async def _build_user_device_activity_lines(user_id: int) -> list[str]:
                 now=now,
             )
         )
+    return lines
+
+
+async def _build_user_traffic_lines(user_id: int) -> list[str]:
+    rows = await get_user_device_traffic_summary(user_id)
+    if not rows:
+        return ["• Всего трафика — 0 B"]
+
+    lines = [
+        render_device_traffic_line(
+            int(row["device_num"]),
+            int(row["rx_bytes_total"]),
+            int(row["tx_bytes_total"]),
+        )
+        for row in rows
+    ]
+    total_bytes = await get_user_total_traffic_bytes(user_id)
+    lines.append(f"• Всего трафика — {format_bytes_compact(total_bytes)}")
     return lines
 
 
@@ -420,6 +441,7 @@ async def profile(message: types.Message):
     payment_summary = await get_latest_user_payment_summary(message.from_user.id)
     payment_fields = _build_last_payment_fields(payment_summary)
     device_activity_lines = await _build_user_device_activity_lines(message.from_user.id)
+    traffic_lines = await _build_user_traffic_lines(message.from_user.id)
     await message.answer(
         await get_text(
             "profile_screen",
@@ -432,6 +454,7 @@ async def profile(message: types.Message):
             connection_status=connection_status,
             **payment_fields,
             device_activity_block="\n".join(device_activity_lines),
+            traffic_block="\n".join(traffic_lines),
             next_step=next_step,
             support_line=await get_support_short_text(),
         ),

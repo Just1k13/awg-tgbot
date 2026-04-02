@@ -29,8 +29,8 @@ class AdminDeviceActivityRenderingTests(unittest.IsolatedAsyncioTestCase):
             await db.execute("INSERT INTO users (user_id, sub_until, created_at) VALUES (501, '2099-01-01T00:00:00', '2026-01-01T00:00:00')")
             await db.execute(
                 """
-                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state)
-                VALUES (501, 1, 'PUBKEY1', '', '10.8.1.11', '2026-01-01T00:00:00', 'active')
+                INSERT INTO keys (user_id, device_num, public_key, config, ip, created_at, state, rx_bytes_total, tx_bytes_total)
+                VALUES (501, 1, 'PUBKEY1', '', '10.8.1.11', '2026-01-01T00:00:00', 'active', 2147483648, 1048576)
                 """
             )
             await db.commit()
@@ -59,12 +59,15 @@ class AdminDeviceActivityRenderingTests(unittest.IsolatedAsyncioTestCase):
         handlers_admin.get_awg_peers = fake_get_awg_peers
         try:
             lines = await handlers_admin._build_admin_device_activity_lines(501)
+            traffic = await handlers_admin._build_admin_device_traffic_lines(501)
         finally:
             handlers_admin.get_awg_peers = original
 
         self.assertEqual(len(lines), 1)
         self.assertIn("Устройство 1", lines[0])
         self.assertIn("(31.03 11:55)", lines[0])
+        self.assertIn("Устройство 1", traffic[0])
+        self.assertIn("Всего трафика", traffic[-1])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from awg_backend import (
     reconcile_active_awg_state,
     reconcile_pending_awg_state,
     run_docker,
+    sync_traffic_counters,
 )
 from config import (
     ADMIN_ID,
@@ -172,6 +173,19 @@ async def _reconciliation_worker(deps: RuntimeDeps) -> None:
         raise
 
 
+async def _traffic_sync_worker() -> None:
+    try:
+        while True:
+            try:
+                await sync_traffic_counters()
+            except Exception as error:
+                logger.exception("Traffic sync worker error: %s", error)
+            await asyncio.sleep(45)
+    except asyncio.CancelledError:
+        logger.info("Traffic sync worker cancelled")
+        raise
+
+
 async def _broadcast_worker(deps: RuntimeDeps) -> None:
     try:
         while True:
@@ -249,6 +263,13 @@ async def _startup_checks(bot: Bot) -> None:
         logger.exception("Ошибка восстановления active peers: %s", error)
 
     try:
+        touched = await sync_traffic_counters()
+        if touched:
+            logger.info("Traffic counters synced at startup: %s", touched)
+    except Exception as error:
+        logger.exception("Ошибка стартовой синхронизации трафика: %s", error)
+
+    try:
         db_info = await db_health_info()
         orphan_count = len(await get_orphan_awg_peers())
         logger.info(
@@ -319,6 +340,7 @@ async def main() -> None:
                 WorkerSpec("payment_recovery", lambda: _payments_worker(deps)),
                 WorkerSpec("reconciliation", lambda: _reconciliation_worker(deps)),
                 WorkerSpec("broadcast", lambda: _broadcast_worker(deps)),
+                WorkerSpec("traffic_sync", _traffic_sync_worker),
                 WorkerSpec("denylist_refresh", _denylist_refresh_worker),
             ]
         )

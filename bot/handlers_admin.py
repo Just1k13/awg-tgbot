@@ -117,7 +117,6 @@ def _build_broadcast_preview(raw_text: str) -> str:
 
 
 def _build_redacted_backup_payload(db_path: str) -> tuple[bytes, str]:
-    from pathlib import Path
     import sqlite3
     import tempfile
 
@@ -776,6 +775,10 @@ async def admin_prices_start_edit(cb: types.CallbackQuery):
     target = PRICE_TARGETS.get(cb.data)
     if not target:
         await cb.answer("Некорректный тариф", show_alert=True)
+        return
+    maintenance_enabled = int(await get_setting("MAINTENANCE_MODE", int) or 0) == 1
+    if not maintenance_enabled:
+        await cb.answer("Сначала включите /maintenance_on, затем изменяйте цену.", show_alert=True)
         return
     env_key, label = target
     current_value = int(getattr(config, env_key))
@@ -1519,16 +1522,6 @@ async def promo_disable_cmd(message: types.Message, command: CommandObject):
         await message.answer("❌ Не удалось отключить промокод.")
 
 
-@router.message(Command("set_rate"), IsAdmin())
-async def set_user_rate_limit_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ /set_rate отключена в personal MVP.")
-
-
-@router.message(Command("rate"), IsAdmin())
-async def get_user_rate_limit_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ /rate отключена в personal MVP.")
-
-
 @router.message(Command("revoke"), IsAdmin())
 async def revoke_user_cmd(message: types.Message, command: CommandObject):
     if not command.args:
@@ -1757,41 +1750,6 @@ async def maintenance_off_cmd(message: types.Message):
     await set_app_setting("MAINTENANCE_MODE", "0", updated_by=message.from_user.id)
     await write_audit_log(message.from_user.id, "maintenance_disabled", "purchase_flow=active")
     await message.answer("🟢 Maintenance выключен: новые покупки снова доступны.")
-
-
-@router.message(Command("text_list"), IsAdmin())
-async def text_list_cmd(message: types.Message):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("text_get"), IsAdmin())
-async def text_get_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("text_set"), IsAdmin())
-async def text_set_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("text_reset"), IsAdmin())
-async def text_reset_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Text editor отключён в personal MVP.")
-
-
-@router.message(Command("setting_list"), IsAdmin())
-async def setting_list_cmd(message: types.Message):
-    await message.answer("⚠️ Settings editor отключён в personal MVP.")
-
-
-@router.message(Command("setting_get"), IsAdmin())
-async def setting_get_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Settings editor отключён в personal MVP.")
-
-
-@router.message(Command("setting_set"), IsAdmin())
-async def setting_set_cmd(message: types.Message, command: CommandObject):
-    await message.answer("⚠️ Settings editor отключён в personal MVP.")
 
 
 @router.message(Command("ref_stats"), IsAdmin())

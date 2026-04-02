@@ -24,14 +24,6 @@ def save_env_value(name: str, value: str | int) -> None:
 STARS_PRICE_KEYS = ("STARS_PRICE_7_DAYS", "STARS_PRICE_30_DAYS", "STARS_PRICE_90_DAYS")
 
 
-def get_stars_prices() -> dict[str, int]:
-    return {
-        "STARS_PRICE_7_DAYS": int(globals()["STARS_PRICE_7_DAYS"]),
-        "STARS_PRICE_30_DAYS": int(globals()["STARS_PRICE_30_DAYS"]),
-        "STARS_PRICE_90_DAYS": int(globals()["STARS_PRICE_90_DAYS"]),
-    }
-
-
 def set_stars_price(name: str, value: int) -> tuple[int, int]:
     if name not in STARS_PRICE_KEYS:
         raise ValueError("unknown_stars_price_key")

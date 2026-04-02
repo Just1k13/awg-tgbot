@@ -35,7 +35,7 @@ class PaymentReadyConfigPendingTests(unittest.IsolatedAsyncioTestCase):
         class DummyPayment:
             invoice_payload = "sub_7"
             currency = "XTR"
-            total_amount = payments.STARS_PRICE_7_DAYS
+            total_amount = payments.get_tariffs()["sub_7"]["amount"]
             telegram_payment_charge_id = "pay_cfg_missing"
             provider_payment_charge_id = "prov_cfg_missing"
 
@@ -75,7 +75,7 @@ class PaymentReadyConfigPendingTests(unittest.IsolatedAsyncioTestCase):
         class DummyPayment:
             invoice_payload = "sub_7"
             currency = "XTR"
-            total_amount = payments.STARS_PRICE_7_DAYS
+            total_amount = payments.get_tariffs()["sub_7"]["amount"]
             telegram_payment_charge_id = "pay_cfg_ready"
             provider_payment_charge_id = "prov_cfg_ready"
 

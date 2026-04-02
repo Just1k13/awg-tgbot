@@ -67,12 +67,6 @@ except Exception:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-def __getattr__(name: str):
-    if name in {"STARS_PRICE_7_DAYS", "STARS_PRICE_30_DAYS", "STARS_PRICE_90_DAYS"}:
-        return int(getattr(config, name))
-    raise AttributeError(name)
-
-
 def get_tariffs() -> dict[str, dict[str, int | str]]:
     return {
         "sub_7": {"days": 7, "amount": int(config.STARS_PRICE_7_DAYS), "currency": "XTR", "method": "stars"},
